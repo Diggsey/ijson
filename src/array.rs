@@ -3,8 +3,9 @@ use std::borrow::{Borrow, BorrowMut};
 use std::cmp::{self, Ordering};
 use std::hash::Hash;
 use std::iter::FromIterator;
-use std::mem::MaybeUninit;
-use std::ops::{Deref, DerefMut};
+use std::mem::{self, MaybeUninit};
+use std::ops::{Deref, DerefMut, Index, IndexMut};
+use std::slice::SliceIndex;
 
 use super::value::{IValue, TypeTag};
 
@@ -56,6 +57,43 @@ impl Header {
                 )
             }
         }
+    }
+}
+
+pub struct IntoIter {
+    header: *mut Header,
+    index: usize,
+}
+
+impl Iterator for IntoIter {
+    type Item = IValue;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.header.is_null() {
+            None
+        } else {
+            // Safety: we set the pointer to null when it's deallocated
+            unsafe {
+                let len = (*self.header).len;
+                let res = (*self.header)
+                    .as_mut_uninit_slice()
+                    .get_unchecked_mut(self.index)
+                    .as_ptr()
+                    .read();
+                self.index += 1;
+                if self.index >= len {
+                    IArray::dealloc(self.header as *mut u8);
+                    self.header = std::ptr::null_mut();
+                }
+                Some(res)
+            }
+        }
+    }
+}
+
+impl Drop for IntoIter {
+    fn drop(&mut self) {
+        while self.next().is_some() {}
     }
 }
 
@@ -115,8 +153,9 @@ impl IArray {
         unsafe { &*(self.0.ptr() as *const Header) }
     }
 
-    fn header_mut(&mut self) -> &mut Header {
-        unsafe { &mut *(self.0.ptr() as *mut Header) }
+    // Safety: must not be static
+    unsafe fn header_mut(&mut self) -> &mut Header {
+        &mut *(self.0.ptr() as *mut Header)
     }
 
     fn is_static(&self) -> bool {
@@ -135,7 +174,21 @@ impl IArray {
         self.header().as_slice()
     }
     pub fn as_mut_slice(&mut self) -> &mut [IValue] {
-        self.header_mut().as_mut_slice()
+        if self.is_static() {
+            &mut []
+        } else {
+            unsafe { self.header_mut().as_mut_slice() }
+        }
+    }
+    fn resize_internal(&mut self, cap: usize) {
+        if self.is_static() || cap == 0 {
+            *self = Self::with_capacity(cap);
+        } else {
+            unsafe {
+                let new_ptr = Self::realloc(self.0.ptr(), cap);
+                self.0.set_ptr(new_ptr);
+            }
+        }
     }
     pub fn reserve(&mut self, additional: usize) {
         let hd = self.header();
@@ -144,16 +197,56 @@ impl IArray {
         if current_capacity >= desired_capacity {
             return;
         }
+        self.resize_internal(cmp::max(current_capacity * 2, desired_capacity));
+    }
+    pub fn truncate(&mut self, len: usize) {
         if self.is_static() {
-            *self = Self::with_capacity(desired_capacity);
-        } else {
-            unsafe {
-                let new_ptr = Self::realloc(
-                    self.0.ptr(),
-                    cmp::max(current_capacity * 2, desired_capacity),
-                );
-                self.0.set_ptr(new_ptr);
+            return;
+        }
+        unsafe {
+            let hd = self.header_mut();
+            while hd.len > len {
+                hd.pop();
             }
+        }
+    }
+    pub fn clear(&mut self) {
+        self.truncate(0);
+    }
+    pub fn insert(&mut self, index: usize, item: IValue) {
+        self.reserve(1);
+
+        unsafe {
+            // Safety: cannot be static after calling `reserve`
+            let hd = self.header_mut();
+            assert!(index <= hd.len);
+
+            // Safety: We just reserved enough space for at least one extra item
+            hd.push(item);
+            if index < hd.len {
+                hd.as_mut_slice()[index..].rotate_right(1);
+            }
+        }
+    }
+    pub fn remove(&mut self, index: usize) -> IValue {
+        assert!(index < self.len());
+
+        // Safety: cannot be static if index <= len
+        unsafe {
+            let hd = self.header_mut();
+            hd.as_mut_slice()[index..].rotate_left(1);
+            hd.pop().unwrap()
+        }
+    }
+    pub fn swap_remove(&mut self, index: usize) -> IValue {
+        assert!(index < self.len());
+
+        // Safety: cannot be static if index <= len
+        unsafe {
+            let hd = self.header_mut();
+            let last_index = hd.len - 1;
+            hd.as_mut_slice().swap(index, last_index);
+            hd.pop().unwrap()
         }
     }
     pub fn push(&mut self, item: IValue) {
@@ -164,26 +257,61 @@ impl IArray {
         }
     }
     pub fn pop(&mut self) -> Option<IValue> {
-        self.header_mut().pop()
+        if self.is_static() {
+            None
+        } else {
+            // Safety: not static
+            unsafe { self.header_mut().pop() }
+        }
+    }
+    pub fn shrink_to_fit(&mut self) {
+        self.resize_internal(self.len());
     }
 
     pub(crate) fn clone_impl(&self) -> IValue {
         let src = self.header().as_slice();
-        let mut res = Self::with_capacity(src.len());
-        let hd = res.header_mut();
-        for v in src {
-            // Safety: we reserved enough space at the start
+        let l = src.len();
+        let mut res = Self::with_capacity(l);
+
+        if l > 0 {
             unsafe {
-                hd.push(v.clone());
+                // Safety: we cannot be static if len > 0
+                let hd = res.header_mut();
+                for v in src {
+                    // Safety: we reserved enough space at the start
+                    hd.push(v.clone());
+                }
             }
         }
         res.0
     }
     pub(crate) fn drop_impl(&mut self) {
+        self.clear();
         if !self.is_static() {
             unsafe {
                 Self::dealloc(self.0.ptr());
                 self.0.set_ref(&EMPTY_HEADER);
+            }
+        }
+    }
+}
+
+impl IntoIterator for IArray {
+    type Item = IValue;
+    type IntoIter = IntoIter;
+
+    fn into_iter(mut self) -> Self::IntoIter {
+        if self.is_static() {
+            IntoIter {
+                header: std::ptr::null_mut(),
+                index: 0,
+            }
+        } else {
+            // Safety: not static
+            unsafe {
+                let header = self.header_mut() as *mut _;
+                mem::forget(self);
+                IntoIter { header, index: 0 }
             }
         }
     }
@@ -258,5 +386,21 @@ impl Ord for IArray {
 impl PartialOrd for IArray {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl<I: SliceIndex<[IValue]>> Index<I> for IArray {
+    type Output = I::Output;
+
+    #[inline]
+    fn index(&self, index: I) -> &Self::Output {
+        Index::index(self.as_slice(), index)
+    }
+}
+
+impl<I: SliceIndex<[IValue]>> IndexMut<I> for IArray {
+    #[inline]
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
+        IndexMut::index_mut(self.as_mut_slice(), index)
     }
 }

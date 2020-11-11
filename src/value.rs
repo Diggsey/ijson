@@ -6,6 +6,7 @@ use std::ptr::NonNull;
 
 use super::array::IArray;
 use super::number::INumber;
+use super::object::IObject;
 use super::string::IString;
 
 #[repr(transparent)]
@@ -68,7 +69,7 @@ impl IValue {
     pub const FALSE: Self = unsafe { Self::new_inline(TypeTag::ArrayOrFalse) };
     pub const TRUE: Self = unsafe { Self::new_inline(TypeTag::ObjectOrTrue) };
 
-    fn ptr_usize(&self) -> usize {
+    pub(crate) fn ptr_usize(&self) -> usize {
         self.ptr.as_ptr() as usize
     }
     // Safety: Must only be called on non-inline types
@@ -188,6 +189,34 @@ impl IValue {
         }
     }
 
+    // Safety: Must be an array
+    unsafe fn as_object_unchecked(&self) -> &IObject {
+        mem::transmute(self)
+    }
+
+    // Safety: Must be an array
+    unsafe fn as_object_unchecked_mut(&mut self) -> &mut IObject {
+        mem::transmute(self)
+    }
+
+    pub fn as_object(&self) -> Option<&IObject> {
+        if self.is_object() {
+            // Safety: IObject is a `#[repr(transparent)]` wrapper around IValue
+            Some(unsafe { self.as_object_unchecked() })
+        } else {
+            None
+        }
+    }
+
+    pub fn as_object_mut(&mut self) -> Option<&mut IObject> {
+        if self.is_object() {
+            // Safety: IObject is a `#[repr(transparent)]` wrapper around IValue
+            Some(unsafe { self.as_object_unchecked_mut() })
+        } else {
+            None
+        }
+    }
+
     // Safety: Must be a string
     unsafe fn as_string_unchecked(&self) -> &IString {
         mem::transmute(self)
@@ -202,15 +231,6 @@ impl IValue {
         if self.is_string() {
             // Safety: IString is a `#[repr(transparent)]` wrapper around IValue
             Some(unsafe { self.as_string_unchecked() })
-        } else {
-            None
-        }
-    }
-
-    pub fn as_string_mut(&mut self) -> Option<&mut IString> {
-        if self.is_string() {
-            // Safety: IString is a `#[repr(transparent)]` wrapper around IValue
-            Some(unsafe { self.as_string_unchecked_mut() })
         } else {
             None
         }
@@ -243,9 +263,9 @@ impl Clone for IValue {
             ValueType::Null | ValueType::Bool => Self { ptr: self.ptr },
             // Safety: We checked the type
             ValueType::Array => unsafe { self.as_array_unchecked() }.clone_impl(),
+            ValueType::Object => unsafe { self.as_object_unchecked() }.clone_impl(),
             ValueType::String => unsafe { self.as_string_unchecked() }.clone_impl(),
             ValueType::Number => unsafe { self.as_number_unchecked() }.clone_impl(),
-            _ => unimplemented!(),
         }
     }
 }
@@ -257,9 +277,9 @@ impl Drop for IValue {
             ValueType::Null | ValueType::Bool => {}
             // Safety: We checked the type
             ValueType::Array => unsafe { self.as_array_unchecked_mut() }.drop_impl(),
+            ValueType::Object => unsafe { self.as_object_unchecked_mut() }.drop_impl(),
             ValueType::String => unsafe { self.as_string_unchecked_mut() }.drop_impl(),
             ValueType::Number => unsafe { self.as_number_unchecked_mut() }.drop_impl(),
-            _ => unimplemented!(),
         }
     }
 }
@@ -272,8 +292,9 @@ impl Hash for IValue {
             // Safety: We checked the type
             ValueType::Array => unsafe { self.as_array_unchecked() }.hash(state),
             // Safety: We checked the type
+            ValueType::Object => unsafe { self.as_object_unchecked() }.hash(state),
+            // Safety: We checked the type
             ValueType::Number => unsafe { self.as_number_unchecked() }.hash(state),
-            _ => unimplemented!(),
         }
     }
 }
@@ -289,7 +310,7 @@ impl PartialEq for IValue {
                     ValueType::Null | ValueType::Bool | ValueType::String => self.ptr == other.ptr,
                     ValueType::Number => self.as_number_unchecked() == other.as_number_unchecked(),
                     ValueType::Array => self.as_array_unchecked() == other.as_array_unchecked(),
-                    ValueType::Object => unimplemented!(),
+                    ValueType::Object => self.as_object_unchecked() == other.as_object_unchecked(),
                 }
             }
         } else {
@@ -316,7 +337,9 @@ impl Ord for IValue {
                         self.as_number_unchecked().cmp(other.as_number_unchecked())
                     }
                     ValueType::Array => self.as_array_unchecked().cmp(other.as_array_unchecked()),
-                    ValueType::Object => unimplemented!(),
+                    ValueType::Object => {
+                        self.as_object_unchecked().cmp(other.as_object_unchecked())
+                    }
                 }
             }
         } else {

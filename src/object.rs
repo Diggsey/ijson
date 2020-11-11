@@ -1,0 +1,707 @@
+use std::alloc::{alloc, dealloc, Layout, LayoutErr};
+use std::cmp::{self, Ordering};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::mem::{self, MaybeUninit};
+
+use super::string::IString;
+use super::value::{IValue, TypeTag};
+
+#[repr(C)]
+#[repr(align(4))]
+struct Header {
+    len: usize,
+    cap: usize,
+}
+
+#[repr(C)]
+struct KeyValuePair {
+    key: IString,
+    value: IValue,
+}
+
+fn hash_capacity(cap: usize) -> usize {
+    cap + cap / 4
+}
+
+fn hash_fn(s: &IString) -> usize {
+    let v: &IValue = s.as_ref();
+    // We know the bottom two bits are always the same
+    let p = v.ptr_usize() >> 2;
+    p.wrapping_mul(202529)
+}
+
+fn hash_bucket(s: &IString, hash_cap: usize) -> usize {
+    hash_fn(s) % hash_cap
+}
+
+struct SplitHeader<'a> {
+    cap: &'a usize,
+    items: &'a [KeyValuePair],
+    table: &'a [usize],
+}
+
+impl<'a> SplitHeader<'a> {
+    fn find_bucket(&self, key: &IString) -> Result<usize, usize> {
+        let hash_cap = hash_capacity(*self.cap);
+        let initial_bucket = hash_bucket(key, hash_cap);
+        unsafe {
+            // Linear search from expected bucket
+            for i in 0..hash_cap {
+                let bucket = (initial_bucket + i) % hash_cap;
+                let index = *self.table.get_unchecked(bucket);
+
+                // If we hit an empty bucket, we know the key is not present
+                if index == usize::MAX {
+                    return Err(bucket);
+                }
+
+                // If the bucket contains our key, we found the bucket
+                let k = &self.items.get_unchecked(index).key;
+                if k == key {
+                    return Ok(bucket);
+                }
+
+                // If the bucket contains a different key, and its probe length is less than
+                // ours, then we know our key is not present or we would have evicted this one.
+                let key_dist = (hash_bucket(k, hash_cap) + hash_cap - bucket) % hash_cap;
+                if key_dist < i {
+                    return Err(bucket);
+                }
+            }
+        }
+        Err(usize::MAX)
+    }
+    // Safety: index must be in bounds
+    unsafe fn find_bucket_from_index(&self, index: usize) -> usize {
+        let hash_cap = hash_capacity(*self.cap);
+        let key = &self.items.get_unchecked(index).key;
+        let mut bucket = hash_bucket(key, hash_cap);
+
+        // We don't bother with any early exit conditions, because
+        // we know the item is present.
+        while *self.table.get_unchecked(bucket) != index {
+            bucket = (bucket + 1) % hash_cap;
+        }
+
+        bucket
+    }
+}
+
+struct SplitHeaderMut<'a> {
+    len: &'a mut usize,
+    cap: &'a mut usize,
+    items: &'a mut [KeyValuePair],
+    table: &'a mut [usize],
+}
+
+impl<'a> SplitHeaderMut<'a> {
+    fn as_ref(&self) -> SplitHeader {
+        SplitHeader {
+            cap: self.cap,
+            items: self.items,
+            table: self.table,
+        }
+    }
+    unsafe fn unshift(&mut self, initial_bucket: usize) {
+        let hash_cap = hash_capacity(*self.cap);
+        for i in 1..hash_cap {
+            let bucket = (initial_bucket + i) % hash_cap;
+            let index = *self.table.get_unchecked(bucket);
+
+            // If we hit an empty bucket, we're done
+            if index == usize::MAX {
+                return;
+            }
+
+            // If the probe length is zero, we're done
+            let k = &self.items.get_unchecked(index).key;
+            let key_dist = (hash_bucket(k, hash_cap) + hash_cap - bucket) % hash_cap;
+            if key_dist == 0 {
+                return;
+            }
+
+            // Shift this element back one
+            self.table.swap(bucket - 1, bucket);
+        }
+    }
+    // Safety: item with this index must have just been pushed, and the bucket
+    // index must be correct.
+    unsafe fn shift(&mut self, initial_bucket: usize, mut index: usize) {
+        let hash_cap = hash_capacity(*self.cap);
+        for i in 0..hash_cap {
+            // If we hit an empty bucket, we're done
+            if index == usize::MAX {
+                return;
+            }
+
+            let bucket = (initial_bucket + i) % hash_cap;
+            mem::swap(self.table.get_unchecked_mut(bucket), &mut index);
+        }
+    }
+    // Safety: Bucket index must be in range and occupied
+    unsafe fn remove_bucket(&mut self, bucket: usize) {
+        // Remove the entry from the table
+        let index = mem::replace(self.table.get_unchecked_mut(bucket), usize::MAX);
+
+        // Unshift any displaced buckets, so the table is valid again
+        self.unshift(bucket);
+
+        // If the item being removed is not at the end of the array,
+        // we need to do some book-keeping
+        let last_index = *self.len - 1;
+        if last_index != index {
+            // Find the bucket containing the last item
+            let bucket_to_update = self.as_ref().find_bucket_from_index(last_index);
+
+            // Update it to point to the location where that item will be
+            // after we swap it.
+            *self.table.get_unchecked_mut(bucket_to_update) = index;
+
+            // Swap the element to be removed to the back
+            self.items.swap(index, last_index);
+        }
+    }
+}
+
+impl Header {
+    fn as_item_ptr(&self) -> *const KeyValuePair {
+        // Safety: pointers to the end of structs are allowed
+        unsafe { (self as *const Header).offset(1) as *const KeyValuePair }
+    }
+    fn as_hash_ptr(&self) -> *const usize {
+        // Safety: pointers to the end of structs are allowed
+        unsafe { self.as_item_ptr().offset(self.cap as isize) as *const usize }
+    }
+    // Safety: len < cap
+    unsafe fn end_item_mut(&mut self) -> &mut MaybeUninit<KeyValuePair> {
+        &mut *(self.as_item_ptr().offset(self.len as isize) as *mut MaybeUninit<KeyValuePair>)
+    }
+    fn split(&self) -> SplitHeader {
+        // Safety: Header `len` and `cap` must be accurate
+        unsafe {
+            SplitHeader {
+                cap: &self.cap,
+                items: std::slice::from_raw_parts(self.as_item_ptr(), self.len),
+                table: std::slice::from_raw_parts(self.as_hash_ptr(), hash_capacity(self.cap)),
+            }
+        }
+    }
+    fn split_mut(&mut self) -> SplitHeaderMut {
+        // Safety: Header `len` and `cap` must be accurate
+        let len = self.len;
+        let hash_cap = hash_capacity(self.cap);
+        let item_ptr = self.as_item_ptr();
+        let hash_ptr = self.as_hash_ptr();
+        unsafe {
+            SplitHeaderMut {
+                len: &mut self.len,
+                cap: &mut self.cap,
+                items: std::slice::from_raw_parts_mut(item_ptr as *mut _, len),
+                table: std::slice::from_raw_parts_mut(hash_ptr as *mut _, hash_cap),
+            }
+        }
+    }
+    fn as_mut_uninit_slice(&mut self) -> &mut [MaybeUninit<KeyValuePair>] {
+        // Safety: Header `len` and `cap` must be accurate
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.as_item_ptr().offset(self.len as isize) as *mut MaybeUninit<KeyValuePair>,
+                self.cap - self.len,
+            )
+        }
+    }
+    // Safety: Must ensure there's capacity for an extra element
+    unsafe fn entry(&mut self, key: IString) -> Entry {
+        match self.split().find_bucket(&key) {
+            Err(bucket) => Entry::Vacant(VacantEntry {
+                header: self,
+                bucket,
+                key,
+            }),
+            Ok(bucket) => Entry::Occupied(OccupiedEntry {
+                header: self,
+                bucket,
+            }),
+        }
+    }
+    unsafe fn pop(&mut self) -> (IString, IValue) {
+        self.len -= 1;
+        let item = self.end_item_mut().as_mut_ptr().read();
+        (item.key, item.value)
+    }
+    unsafe fn push(&mut self, key: IString, value: IValue) -> usize {
+        self.end_item_mut()
+            .as_mut_ptr()
+            .write(KeyValuePair { key, value });
+        let res = self.len;
+        self.len += 1;
+        res
+    }
+    fn clear(&mut self) {
+        // Clear the table
+        for item in self.split_mut().table {
+            *item = usize::MAX;
+        }
+        // Drop the items
+        while self.len > 0 {
+            // Safety: not empty
+            unsafe {
+                self.pop();
+            }
+        }
+    }
+}
+
+pub struct OccupiedEntry<'a> {
+    header: &'a mut Header,
+    bucket: usize,
+}
+
+impl<'a> OccupiedEntry<'a> {
+    fn get_key_value(&self) -> (&IString, &IValue) {
+        // Safety: Indices are known to be in range
+        let split = self.header.split();
+        unsafe {
+            let index = *split.table.get_unchecked(self.bucket);
+            let kvp = split.items.get_unchecked(index);
+            (&kvp.key, &kvp.value)
+        }
+    }
+    fn get_key_value_mut(&mut self) -> (&IString, &mut IValue) {
+        // Safety: Indices are known to be in range
+        let split = self.header.split_mut();
+        unsafe {
+            let index = *split.table.get_unchecked(self.bucket);
+            let kvp = split.items.get_unchecked_mut(index);
+            (&kvp.key, &mut kvp.value)
+        }
+    }
+    fn into_get_key_value_mut(self) -> (&'a IString, &'a mut IValue) {
+        // Safety: Indices are known to be in range
+        let split = self.header.split_mut();
+        unsafe {
+            let index = *split.table.get_unchecked(self.bucket);
+            let kvp = split.items.get_unchecked_mut(index);
+            (&kvp.key, &mut kvp.value)
+        }
+    }
+    pub fn key(&self) -> &IString {
+        self.get_key_value().0
+    }
+    pub fn remove_entry(self) -> (IString, IValue) {
+        // Safety: Bucket is known to be correct
+        unsafe {
+            self.header.split_mut().remove_bucket(self.bucket);
+            self.header.pop()
+        }
+    }
+    pub fn get(&self) -> &IValue {
+        self.get_key_value().1
+    }
+    pub fn get_mut(&mut self) -> &mut IValue {
+        self.get_key_value_mut().1
+    }
+    pub fn into_mut(self) -> &'a mut IValue {
+        self.into_get_key_value_mut().1
+    }
+    pub fn insert(&mut self, value: IValue) -> IValue {
+        mem::replace(self.get_mut(), value)
+    }
+    pub fn remove(self) -> IValue {
+        self.remove_entry().1
+    }
+}
+
+pub struct VacantEntry<'a> {
+    header: &'a mut Header,
+    bucket: usize,
+    key: IString,
+}
+
+impl<'a> VacantEntry<'a> {
+    pub fn key(&self) -> &IString {
+        &self.key
+    }
+    pub fn into_key(self) -> IString {
+        self.key
+    }
+    pub fn insert(self, value: IValue) -> &'a mut IValue {
+        // Safety: we reserve space when the entry is initially created.
+        // We know the bucket index is correct.
+        unsafe {
+            let index = self.header.push(self.key, value);
+            let mut split = self.header.split_mut();
+            split.shift(self.bucket, index);
+            &mut split.items.last_mut().unwrap().value
+        }
+    }
+}
+
+pub enum Entry<'a> {
+    Occupied(OccupiedEntry<'a>),
+    Vacant(VacantEntry<'a>),
+}
+
+impl<'a> Entry<'a> {
+    pub fn or_insert(self, default: IValue) -> &'a mut IValue {
+        match self {
+            Entry::Occupied(occ) => occ.into_mut(),
+            Entry::Vacant(vac) => vac.insert(default),
+        }
+    }
+    pub fn or_insert_with(self, default: impl FnOnce() -> IValue) -> &'a mut IValue {
+        match self {
+            Entry::Occupied(occ) => occ.into_mut(),
+            Entry::Vacant(vac) => vac.insert(default()),
+        }
+    }
+    pub fn key(&self) -> &IString {
+        match self {
+            Entry::Occupied(occ) => occ.key(),
+            Entry::Vacant(vac) => vac.key(),
+        }
+    }
+    pub fn and_modify(mut self, f: impl FnOnce(&mut IValue)) -> Self {
+        if let Entry::Occupied(occ) = &mut self {
+            f(occ.get_mut());
+        }
+        self
+    }
+}
+
+pub struct IntoIter {
+    header: *mut Header,
+    index: usize,
+}
+
+impl Iterator for IntoIter {
+    type Item = (IString, IValue);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.header.is_null() {
+            None
+        } else {
+            // Safety: we set the pointer to null when it's deallocated
+            unsafe {
+                let len = (*self.header).len;
+                let res = (*self.header)
+                    .as_mut_uninit_slice()
+                    .get_unchecked_mut(self.index)
+                    .as_ptr()
+                    .read();
+                self.index += 1;
+                if self.index >= len {
+                    IObject::dealloc(self.header as *mut u8);
+                    self.header = std::ptr::null_mut();
+                }
+                Some((res.key, res.value))
+            }
+        }
+    }
+}
+
+impl Drop for IntoIter {
+    fn drop(&mut self) {
+        while self.next().is_some() {}
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone)]
+pub struct IObject(IValue);
+
+static EMPTY_HEADER: Header = Header { len: 0, cap: 0 };
+
+impl IObject {
+    fn layout(cap: usize) -> Result<Layout, LayoutErr> {
+        Ok(Layout::new::<Header>()
+            .extend(Layout::array::<KeyValuePair>(cap)?)?
+            .0
+            .extend(Layout::array::<usize>(hash_capacity(cap))?)?
+            .0
+            .pad_to_align())
+    }
+
+    fn alloc(cap: usize) -> *mut u8 {
+        unsafe {
+            let hd = &mut *(alloc(Self::layout(cap).unwrap()) as *mut Header);
+            hd.len = 0;
+            hd.cap = cap;
+            for item in hd.split_mut().table {
+                *item = usize::MAX;
+            }
+            hd as *mut _ as *mut u8
+        }
+    }
+
+    fn dealloc(ptr: *mut u8) {
+        unsafe {
+            let layout = Self::layout((*(ptr as *const Header)).cap).unwrap();
+            dealloc(ptr, layout);
+        }
+    }
+
+    pub fn new() -> Self {
+        unsafe { Self(IValue::new_ref(&EMPTY_HEADER, TypeTag::ObjectOrTrue)) }
+    }
+
+    pub fn with_capacity(cap: usize) -> Self {
+        if cap == 0 {
+            Self::new()
+        } else {
+            Self(unsafe { IValue::new_ptr(Self::alloc(cap), TypeTag::ObjectOrTrue) })
+        }
+    }
+
+    fn header(&self) -> &Header {
+        unsafe { &*(self.0.ptr() as *const Header) }
+    }
+
+    // Safety: must not be static
+    unsafe fn header_mut(&mut self) -> &mut Header {
+        &mut *(self.0.ptr() as *mut Header)
+    }
+
+    fn is_static(&self) -> bool {
+        self.capacity() == 0
+    }
+    pub fn capacity(&self) -> usize {
+        self.header().cap
+    }
+    pub fn len(&self) -> usize {
+        self.header().len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn resize_internal(&mut self, cap: usize) {
+        let old_obj = mem::replace(self, Self::with_capacity(cap));
+        if !self.is_static() {
+            unsafe {
+                let hd = self.header_mut();
+                for (k, v) in old_obj {
+                    if let Err(bucket) = hd.split().find_bucket(&k) {
+                        let index = hd.push(k, v);
+                        hd.split_mut().shift(bucket, index);
+                    }
+                }
+            }
+        }
+    }
+    pub fn reserve(&mut self, additional: usize) {
+        let hd = self.header();
+        let current_capacity = hd.cap;
+        let desired_capacity = hd.len.checked_add(additional).unwrap();
+        if current_capacity >= desired_capacity {
+            return;
+        }
+        self.resize_internal(cmp::max(current_capacity * 2, desired_capacity));
+    }
+
+    pub fn entry(&mut self, key: IString) -> Entry {
+        self.reserve(1);
+        // Safety: cannot be static after reserving space
+        unsafe { self.header_mut().entry(key) }
+    }
+    pub fn keys(&self) -> impl Iterator<Item = &IString> {
+        self.iter().map(|x| x.0)
+    }
+    pub fn values(&self) -> impl Iterator<Item = &IValue> {
+        self.iter().map(|x| x.1)
+    }
+    pub fn iter(&self) -> impl Iterator<Item = (&IString, &IValue)> {
+        self.header()
+            .split()
+            .items
+            .iter()
+            .map(|kvp| (&kvp.key, &kvp.value))
+    }
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut IValue> {
+        self.iter_mut().map(|x| x.1)
+    }
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&IString, &mut IValue)> {
+        if self.is_static() {
+            &mut []
+        } else {
+            // Safety: not static
+            unsafe { self.header_mut().split_mut().items }
+        }
+        .iter_mut()
+        .map(|kvp| (&kvp.key, &mut kvp.value))
+    }
+    pub fn clear(&mut self) {
+        if !self.is_static() {
+            // Safety: not static
+            unsafe {
+                self.header_mut().clear();
+            }
+        }
+    }
+    pub fn get_key_value(&self, k: &IString) -> Option<(&IString, &IValue)> {
+        let hd = self.header().split();
+        if let Ok(bucket) = hd.find_bucket(k) {
+            // Safety: Bucket index is valid
+            unsafe {
+                let index = *hd.table.get_unchecked(bucket);
+                let item = hd.items.get_unchecked(index);
+                Some((&item.key, &item.value))
+            }
+        } else {
+            None
+        }
+    }
+    pub fn get(&self, k: &IString) -> Option<&IValue> {
+        self.get_key_value(k).map(|x| x.1)
+    }
+    pub fn get_mut(&mut self, k: &IString) -> Option<&mut IValue> {
+        if self.is_static() {
+            return None;
+        } else {
+            // Safety: not static
+            let hd = unsafe { self.header_mut().split_mut() };
+            if let Ok(bucket) = hd.as_ref().find_bucket(k) {
+                // Safety: Bucket index is valid
+                unsafe {
+                    let index = *hd.table.get_unchecked(bucket);
+                    let item = hd.items.get_unchecked_mut(index);
+                    Some(&mut item.value)
+                }
+            } else {
+                None
+            }
+        }
+    }
+    pub fn insert(&mut self, k: IString, v: IValue) -> Option<IValue> {
+        match self.entry(k) {
+            Entry::Occupied(mut occ) => Some(occ.insert(v)),
+            Entry::Vacant(vac) => {
+                vac.insert(v);
+                None
+            }
+        }
+    }
+    pub fn remove_entry(&mut self, k: &IString) -> Option<(IString, IValue)> {
+        if self.is_static() {
+            return None;
+        } else {
+            // Safety: not static
+            let hd = unsafe { self.header_mut() };
+            let mut split = hd.split_mut();
+            if let Ok(bucket) = split.as_ref().find_bucket(k) {
+                // Safety: Bucket index is valid
+                unsafe {
+                    split.remove_bucket(bucket);
+                    Some(hd.pop())
+                }
+            } else {
+                None
+            }
+        }
+    }
+    pub fn remove(&mut self, k: &IString) -> Option<IValue> {
+        self.remove_entry(k).map(|x| x.1)
+    }
+    pub fn retain(&mut self, mut f: impl FnMut(&IString, &mut IValue) -> bool) {
+        if self.is_static() {
+            return;
+        } else {
+            // Safety: not static
+            let hd = unsafe { self.header_mut() };
+            let mut index = 0;
+            while index < hd.len {
+                let mut split = hd.split_mut();
+
+                // Safety: Indices are in range
+                unsafe {
+                    let kvp = split.items.get_unchecked_mut(index);
+                    if f(&kvp.key, &mut kvp.value) {
+                        index += 1;
+                    } else {
+                        let bucket = split.as_ref().find_bucket_from_index(index);
+                        split.remove_bucket(bucket);
+                        hd.pop();
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn clone_impl(&self) -> IValue {
+        let mut res = Self::with_capacity(self.len());
+        for (k, v) in self.iter() {
+            res.insert(k.clone(), v.clone());
+        }
+
+        res.0
+    }
+    pub(crate) fn drop_impl(&mut self) {
+        self.clear();
+        if !self.is_static() {
+            unsafe {
+                Self::dealloc(self.0.ptr());
+                self.0.set_ref(&EMPTY_HEADER);
+            }
+        }
+    }
+}
+
+impl AsRef<IValue> for IObject {
+    fn as_ref(&self) -> &IValue {
+        &self.0
+    }
+}
+
+impl IntoIterator for IObject {
+    type Item = (IString, IValue);
+    type IntoIter = IntoIter;
+
+    fn into_iter(mut self) -> Self::IntoIter {
+        if self.is_static() {
+            IntoIter {
+                header: std::ptr::null_mut(),
+                index: 0,
+            }
+        } else {
+            // Safety: not static
+            unsafe {
+                let header = self.header_mut() as *mut _;
+                mem::forget(self);
+                IntoIter { header, index: 0 }
+            }
+        }
+    }
+}
+
+impl PartialEq for IObject {
+    fn eq(&self, _other: &Self) -> bool {
+        unimplemented!()
+    }
+}
+
+impl Eq for IObject {}
+impl Ord for IObject {
+    fn cmp(&self, _other: &Self) -> Ordering {
+        unimplemented!()
+    }
+}
+impl PartialOrd for IObject {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Hash for IObject {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+
+        let mut total_hash = 0u64;
+        for item in self.iter() {
+            let mut h = DefaultHasher::new();
+            item.hash(&mut h);
+            total_hash = total_hash.wrapping_add(h.finish());
+        }
+        total_hash.hash(state);
+    }
+}
