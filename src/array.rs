@@ -1,6 +1,7 @@
 use std::alloc::{alloc, dealloc, realloc, Layout, LayoutErr};
 use std::borrow::{Borrow, BorrowMut};
 use std::cmp::{self, Ordering};
+use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::iter::FromIterator;
 use std::mem::{self, MaybeUninit};
@@ -99,7 +100,7 @@ impl Drop for IntoIter {
 
 #[repr(transparent)]
 #[derive(Clone)]
-pub struct IArray(IValue);
+pub struct IArray(pub(crate) IValue);
 
 static EMPTY_HEADER: Header = Header { len: 0, cap: 0 };
 
@@ -409,5 +410,90 @@ impl<I: SliceIndex<[IValue]>> IndexMut<I> for IArray {
     #[inline]
     fn index_mut(&mut self, index: I) -> &mut Self::Output {
         IndexMut::index_mut(self.as_mut_slice(), index)
+    }
+}
+
+impl Debug for IArray {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Debug::fmt(self.as_slice(), f)
+    }
+}
+
+impl<T: Into<IValue>> From<Vec<T>> for IArray {
+    fn from(other: Vec<T>) -> Self {
+        let mut res = IArray::with_capacity(other.len());
+        res.extend(other.into_iter().map(Into::into));
+        res
+    }
+}
+
+impl<T: Into<IValue> + Clone> From<&[T]> for IArray {
+    fn from(other: &[T]) -> Self {
+        let mut res = IArray::with_capacity(other.len());
+        res.extend(other.iter().cloned().map(Into::into));
+        res
+    }
+}
+
+impl<'a> IntoIterator for &'a IArray {
+    type Item = &'a IValue;
+    type IntoIter = std::slice::Iter<'a, IValue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut IArray {
+    type Item = &'a mut IValue;
+    type IntoIter = std::slice::IterMut<'a, IValue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn can_create() {
+        let x = IArray::new();
+        let y = IArray::with_capacity(10);
+
+        assert_eq!(x, y);
+    }
+
+    #[test]
+    fn can_collect() {
+        let x = vec![IValue::NULL, IValue::TRUE, IValue::FALSE];
+        let y: IArray = x.iter().cloned().collect();
+
+        assert_eq!(x.as_slice(), y.as_slice());
+    }
+
+    #[test]
+    fn can_push_insert() {
+        let mut x = IArray::new();
+        x.insert(0, IValue::NULL);
+        x.push(IValue::TRUE);
+        x.insert(1, IValue::FALSE);
+
+        assert_eq!(x.as_slice(), &[IValue::NULL, IValue::FALSE, IValue::TRUE]);
+    }
+
+    #[test]
+    fn can_nest() {
+        let x: IArray = vec![IValue::NULL, IValue::TRUE, IValue::FALSE].into();
+        let y: IArray = vec![
+            IValue::NULL,
+            x.clone().into(),
+            IValue::FALSE,
+            x.clone().into(),
+        ]
+        .into();
+
+        assert_eq!(&y[1], x.as_ref());
     }
 }

@@ -10,11 +10,3 @@ pub use number::INumber;
 pub use object::IObject;
 pub use string::IString;
 pub use value::IValue;
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
-    }
-}

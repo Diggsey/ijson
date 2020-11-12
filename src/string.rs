@@ -1,6 +1,7 @@
 use std::alloc::{alloc, dealloc, Layout, LayoutErr};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
+use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::ops::Deref;
 use std::ptr::{copy_nonoverlapping, NonNull};
@@ -82,7 +83,7 @@ impl WeakIString {
 
 #[repr(transparent)]
 #[derive(Clone)]
-pub struct IString(IValue);
+pub struct IString(pub(crate) IValue);
 
 static EMPTY_HEADER: Header = Header {
     len: 0,
@@ -262,5 +263,11 @@ impl PartialOrd for IString {
 impl Hash for IString {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.raw_hash(state);
+    }
+}
+
+impl Debug for IString {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Debug::fmt(self.as_str(), f)
     }
 }

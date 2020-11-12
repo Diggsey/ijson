@@ -1,6 +1,8 @@
 use std::alloc::{alloc, dealloc, Layout, LayoutErr};
 use std::cmp::{self, Ordering};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::{self, Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 use std::mem::{self, MaybeUninit};
@@ -425,7 +427,7 @@ impl Drop for IntoIter {
 
 #[repr(transparent)]
 #[derive(Clone)]
-pub struct IObject(IValue);
+pub struct IObject(pub(crate) IValue);
 
 static EMPTY_HEADER: Header = Header { len: 0, cap: 0 };
 
@@ -532,25 +534,22 @@ impl IObject {
     pub fn values(&self) -> impl Iterator<Item = &IValue> {
         self.iter().map(|x| x.1)
     }
-    pub fn iter(&self) -> impl Iterator<Item = (&IString, &IValue)> {
-        self.header()
-            .split()
-            .items
-            .iter()
-            .map(|kvp| (&kvp.key, &kvp.value))
+    pub fn iter(&self) -> Iter {
+        Iter(self.header().split().items.iter())
     }
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut IValue> {
         self.iter_mut().map(|x| x.1)
     }
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&IString, &mut IValue)> {
-        if self.is_static() {
-            &mut []
-        } else {
-            // Safety: not static
-            unsafe { self.header_mut().split_mut().items }
-        }
-        .iter_mut()
-        .map(|kvp| (&kvp.key, &mut kvp.value))
+    pub fn iter_mut(&mut self) -> IterMut {
+        IterMut(
+            if self.is_static() {
+                &mut []
+            } else {
+                // Safety: not static
+                unsafe { self.header_mut().split_mut().items }
+            }
+            .iter_mut(),
+        )
     }
     pub fn clear(&mut self) {
         if !self.is_static() {
@@ -846,5 +845,65 @@ impl<T: ObjectIndex> ObjectIndex for &T {
 
     fn remove(self, v: &mut IObject) -> Option<(IString, IValue)> {
         (*self).remove(v)
+    }
+}
+
+impl Debug for IObject {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
+}
+
+pub struct Iter<'a>(std::slice::Iter<'a, KeyValuePair>);
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = (&'a IString, &'a IValue);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|x| (&x.key, &x.value))
+    }
+}
+
+pub struct IterMut<'a>(std::slice::IterMut<'a, KeyValuePair>);
+
+impl<'a> Iterator for IterMut<'a> {
+    type Item = (&'a IString, &'a mut IValue);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|x| (&x.key, &mut x.value))
+    }
+}
+
+impl<'a> IntoIterator for &'a IObject {
+    type Item = (&'a IString, &'a IValue);
+    type IntoIter = Iter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut IObject {
+    type Item = (&'a IString, &'a mut IValue);
+    type IntoIter = IterMut<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl<K: Into<IString>, V: Into<IValue>> From<HashMap<K, V>> for IObject {
+    fn from(other: HashMap<K, V>) -> Self {
+        let mut res = Self::with_capacity(other.len());
+        res.extend(other.into_iter().map(|(k, v)| (k.into(), v.into())));
+        res
+    }
+}
+
+impl<K: Into<IString>, V: Into<IValue>> From<BTreeMap<K, V>> for IObject {
+    fn from(other: BTreeMap<K, V>) -> Self {
+        let mut res = Self::with_capacity(other.len());
+        res.extend(other.into_iter().map(|(k, v)| (k.into(), v.into())));
+        res
     }
 }

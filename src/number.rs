@@ -1,6 +1,7 @@
 use std::alloc::{alloc, dealloc, Layout, LayoutErr};
 use std::cmp::Ordering;
 use std::convert::{TryFrom, TryInto};
+use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 
 use super::value::{IValue, TypeTag};
@@ -319,7 +320,7 @@ static STATIC_NUMBERS: [Header; 256] = define_static_numbers!(
 
 #[repr(transparent)]
 #[derive(Clone)]
-pub struct INumber(IValue);
+pub struct INumber(pub(crate) IValue);
 
 impl INumber {
     fn layout(type_: NumberType) -> Result<Layout, LayoutErr> {
@@ -526,6 +527,11 @@ impl From<u8> for INumber {
         Self::new_short(v as i32)
     }
 }
+impl From<usize> for INumber {
+    fn from(v: usize) -> Self {
+        Self::new_u64(v as u64)
+    }
+}
 
 impl From<i64> for INumber {
     fn from(v: i64) -> Self {
@@ -545,6 +551,11 @@ impl From<i16> for INumber {
 impl From<i8> for INumber {
     fn from(v: i8) -> Self {
         Self::new_static(v)
+    }
+}
+impl From<isize> for INumber {
+    fn from(v: isize) -> Self {
+        Self::new_i64(v as i64)
     }
 }
 
@@ -594,5 +605,19 @@ impl PartialOrd for INumber {
 impl AsRef<IValue> for INumber {
     fn as_ref(&self) -> &IValue {
         &self.0
+    }
+}
+
+impl Debug for INumber {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if let Some(v) = self.to_i64() {
+            Debug::fmt(&v, f)
+        } else if let Some(v) = self.to_u64() {
+            Debug::fmt(&v, f)
+        } else if let Some(v) = self.to_f64() {
+            Debug::fmt(&v, f)
+        } else {
+            unreachable!()
+        }
     }
 }

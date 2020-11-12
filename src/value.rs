@@ -1,4 +1,6 @@
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::hint::unreachable_unchecked;
 use std::mem;
@@ -497,5 +499,97 @@ impl<I: ValueIndex> IndexMut<I> for IValue {
     #[inline]
     fn index_mut(&mut self, index: I) -> &mut IValue {
         index.index_or_insert(self)
+    }
+}
+
+impl Debug for IValue {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        unsafe {
+            match self.type_() {
+                // Inline and interned types can be trivially hashed
+                ValueType::Null => f.write_str("null"),
+                ValueType::Bool => Debug::fmt(&self.is_true(), f),
+                // Safety: We checked the type
+                ValueType::String => Debug::fmt(self.as_string_unchecked(), f),
+                // Safety: We checked the type
+                ValueType::Array => Debug::fmt(self.as_array_unchecked(), f),
+                // Safety: We checked the type
+                ValueType::Object => Debug::fmt(self.as_object_unchecked(), f),
+                // Safety: We checked the type
+                ValueType::Number => Debug::fmt(self.as_number_unchecked(), f),
+            }
+        }
+    }
+}
+
+macro_rules! typed_conversions {
+    ($interm:ty: $($src:ty),*) => {
+        $(
+            impl From<$src> for IValue {
+                fn from(other: $src) -> Self {
+                    <$interm>::from(other).into()
+                }
+            }
+        )*
+    }
+}
+
+impl<T: Into<IValue>> From<Option<T>> for IValue {
+    fn from(other: Option<T>) -> Self {
+        if let Some(v) = other {
+            v.into()
+        } else {
+            Self::NULL
+        }
+    }
+}
+
+impl From<bool> for IValue {
+    fn from(other: bool) -> Self {
+        if other {
+            Self::TRUE
+        } else {
+            Self::FALSE
+        }
+    }
+}
+
+typed_conversions! {
+    INumber: INumber, i8, u8, i16, u16, i32, u32, i64, u64, isize, usize
+}
+
+typed_conversions! {
+    IString: IString, String, &str
+}
+
+typed_conversions! {
+    IArray: IArray
+}
+
+impl<T: Into<IValue>> From<Vec<T>> for IValue {
+    fn from(other: Vec<T>) -> Self {
+        IArray::from(other).into()
+    }
+}
+
+impl<T: Into<IValue> + Clone> From<&[T]> for IValue {
+    fn from(other: &[T]) -> Self {
+        IArray::from(other).into()
+    }
+}
+
+typed_conversions! {
+    IObject: IObject
+}
+
+impl<K: Into<IString>, V: Into<IValue>> From<HashMap<K, V>> for IValue {
+    fn from(other: HashMap<K, V>) -> Self {
+        IObject::from(other).into()
+    }
+}
+
+impl<K: Into<IString>, V: Into<IValue>> From<BTreeMap<K, V>> for IValue {
+    fn from(other: BTreeMap<K, V>) -> Self {
+        IObject::from(other).into()
     }
 }
