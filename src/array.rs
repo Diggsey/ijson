@@ -213,7 +213,7 @@ impl IArray {
     pub fn clear(&mut self) {
         self.truncate(0);
     }
-    pub fn insert(&mut self, index: usize, item: IValue) {
+    pub fn insert(&mut self, index: usize, item: impl Into<IValue>) {
         self.reserve(1);
 
         unsafe {
@@ -222,38 +222,42 @@ impl IArray {
             assert!(index <= hd.len);
 
             // Safety: We just reserved enough space for at least one extra item
-            hd.push(item);
+            hd.push(item.into());
             if index < hd.len {
                 hd.as_mut_slice()[index..].rotate_right(1);
             }
         }
     }
-    pub fn remove(&mut self, index: usize) -> IValue {
-        assert!(index < self.len());
-
-        // Safety: cannot be static if index <= len
-        unsafe {
-            let hd = self.header_mut();
-            hd.as_mut_slice()[index..].rotate_left(1);
-            hd.pop().unwrap()
+    pub fn remove(&mut self, index: usize) -> Option<IValue> {
+        if index < self.len() {
+            // Safety: cannot be static if index <= len
+            unsafe {
+                let hd = self.header_mut();
+                hd.as_mut_slice()[index..].rotate_left(1);
+                hd.pop()
+            }
+        } else {
+            None
         }
     }
-    pub fn swap_remove(&mut self, index: usize) -> IValue {
-        assert!(index < self.len());
-
-        // Safety: cannot be static if index <= len
-        unsafe {
-            let hd = self.header_mut();
-            let last_index = hd.len - 1;
-            hd.as_mut_slice().swap(index, last_index);
-            hd.pop().unwrap()
+    pub fn swap_remove(&mut self, index: usize) -> Option<IValue> {
+        if index < self.len() {
+            // Safety: cannot be static if index <= len
+            unsafe {
+                let hd = self.header_mut();
+                let last_index = hd.len - 1;
+                hd.as_mut_slice().swap(index, last_index);
+                hd.pop()
+            }
+        } else {
+            None
         }
     }
-    pub fn push(&mut self, item: IValue) {
+    pub fn push(&mut self, item: impl Into<IValue>) {
         self.reserve(1);
         // Safety: We just reserved enough space for at least one extra item
         unsafe {
-            self.header_mut().push(item);
+            self.header_mut().push(item.into());
         }
     }
     pub fn pop(&mut self) -> Option<IValue> {
@@ -373,19 +377,22 @@ impl AsRef<IValue> for IArray {
 
 impl PartialEq for IArray {
     fn eq(&self, other: &Self) -> bool {
-        self.as_slice() == other.as_slice()
+        if self.0.raw_eq(&other.0) {
+            true
+        } else {
+            self.as_slice() == other.as_slice()
+        }
     }
 }
 
 impl Eq for IArray {}
-impl Ord for IArray {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.as_slice().cmp(other.as_slice())
-    }
-}
 impl PartialOrd for IArray {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        if self.0.raw_eq(&other.0) {
+            Some(Ordering::Equal)
+        } else {
+            self.as_slice().partial_cmp(other.as_slice())
+        }
     }
 }
 

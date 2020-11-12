@@ -2,7 +2,9 @@ use std::alloc::{alloc, dealloc, Layout, LayoutErr};
 use std::cmp::{self, Ordering};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::iter::FromIterator;
 use std::mem::{self, MaybeUninit};
+use std::ops::{Index, IndexMut};
 
 use super::string::IString;
 use super::value::{IValue, TypeTag};
@@ -225,6 +227,20 @@ impl Header {
             }),
         }
     }
+    // Safety: Must ensure there's capacity for an extra element
+    unsafe fn entry_or_clone(&mut self, key: &IString) -> Entry {
+        match self.split().find_bucket(key) {
+            Err(bucket) => Entry::Vacant(VacantEntry {
+                header: self,
+                bucket,
+                key: key.clone(),
+            }),
+            Ok(bucket) => Entry::Occupied(OccupiedEntry {
+                header: self,
+                bucket,
+            }),
+        }
+    }
     unsafe fn pop(&mut self) -> (IString, IValue) {
         self.len -= 1;
         let item = self.end_item_mut().as_mut_ptr().read();
@@ -305,8 +321,8 @@ impl<'a> OccupiedEntry<'a> {
     pub fn into_mut(self) -> &'a mut IValue {
         self.into_get_key_value_mut().1
     }
-    pub fn insert(&mut self, value: IValue) -> IValue {
-        mem::replace(self.get_mut(), value)
+    pub fn insert(&mut self, value: impl Into<IValue>) -> IValue {
+        mem::replace(self.get_mut(), value.into())
     }
     pub fn remove(self) -> IValue {
         self.remove_entry().1
@@ -326,11 +342,11 @@ impl<'a> VacantEntry<'a> {
     pub fn into_key(self) -> IString {
         self.key
     }
-    pub fn insert(self, value: IValue) -> &'a mut IValue {
+    pub fn insert(self, value: impl Into<IValue>) -> &'a mut IValue {
         // Safety: we reserve space when the entry is initially created.
         // We know the bucket index is correct.
         unsafe {
-            let index = self.header.push(self.key, value);
+            let index = self.header.push(self.key, value.into());
             let mut split = self.header.split_mut();
             split.shift(self.bucket, index);
             &mut split.items.last_mut().unwrap().value
@@ -500,10 +516,15 @@ impl IObject {
         self.resize_internal(cmp::max(current_capacity * 2, desired_capacity));
     }
 
-    pub fn entry(&mut self, key: IString) -> Entry {
+    pub fn entry(&mut self, key: impl Into<IString>) -> Entry {
         self.reserve(1);
         // Safety: cannot be static after reserving space
-        unsafe { self.header_mut().entry(key) }
+        unsafe { self.header_mut().entry(key.into()) }
+    }
+    pub fn entry_or_clone(&mut self, key: &IString) -> Entry {
+        self.reserve(1);
+        // Safety: cannot be static after reserving space
+        unsafe { self.header_mut().entry_or_clone(key) }
     }
     pub fn keys(&self) -> impl Iterator<Item = &IString> {
         self.iter().map(|x| x.0)
@@ -539,41 +560,19 @@ impl IObject {
             }
         }
     }
-    pub fn get_key_value(&self, k: &IString) -> Option<(&IString, &IValue)> {
-        let hd = self.header().split();
-        if let Ok(bucket) = hd.find_bucket(k) {
-            // Safety: Bucket index is valid
-            unsafe {
-                let index = *hd.table.get_unchecked(bucket);
-                let item = hd.items.get_unchecked(index);
-                Some((&item.key, &item.value))
-            }
-        } else {
-            None
-        }
+    pub fn get_key_value(&self, k: impl ObjectIndex) -> Option<(&IString, &IValue)> {
+        k.index_into(self)
     }
-    pub fn get(&self, k: &IString) -> Option<&IValue> {
+    pub fn get_key_value_mut(&mut self, k: impl ObjectIndex) -> Option<(&IString, &mut IValue)> {
+        k.index_into_mut(self)
+    }
+    pub fn get(&self, k: impl ObjectIndex) -> Option<&IValue> {
         self.get_key_value(k).map(|x| x.1)
     }
-    pub fn get_mut(&mut self, k: &IString) -> Option<&mut IValue> {
-        if self.is_static() {
-            return None;
-        } else {
-            // Safety: not static
-            let hd = unsafe { self.header_mut().split_mut() };
-            if let Ok(bucket) = hd.as_ref().find_bucket(k) {
-                // Safety: Bucket index is valid
-                unsafe {
-                    let index = *hd.table.get_unchecked(bucket);
-                    let item = hd.items.get_unchecked_mut(index);
-                    Some(&mut item.value)
-                }
-            } else {
-                None
-            }
-        }
+    pub fn get_mut(&mut self, k: impl ObjectIndex) -> Option<&mut IValue> {
+        self.get_key_value_mut(k).map(|x| x.1)
     }
-    pub fn insert(&mut self, k: IString, v: IValue) -> Option<IValue> {
+    pub fn insert(&mut self, k: impl Into<IString>, v: impl Into<IValue>) -> Option<IValue> {
         match self.entry(k) {
             Entry::Occupied(mut occ) => Some(occ.insert(v)),
             Entry::Vacant(vac) => {
@@ -582,25 +581,10 @@ impl IObject {
             }
         }
     }
-    pub fn remove_entry(&mut self, k: &IString) -> Option<(IString, IValue)> {
-        if self.is_static() {
-            return None;
-        } else {
-            // Safety: not static
-            let hd = unsafe { self.header_mut() };
-            let mut split = hd.split_mut();
-            if let Ok(bucket) = split.as_ref().find_bucket(k) {
-                // Safety: Bucket index is valid
-                unsafe {
-                    split.remove_bucket(bucket);
-                    Some(hd.pop())
-                }
-            } else {
-                None
-            }
-        }
+    pub fn remove_entry(&mut self, k: impl ObjectIndex) -> Option<(IString, IValue)> {
+        k.remove(self)
     }
-    pub fn remove(&mut self, k: &IString) -> Option<IValue> {
+    pub fn remove(&mut self, k: impl ObjectIndex) -> Option<IValue> {
         self.remove_entry(k).map(|x| x.1)
     }
     pub fn retain(&mut self, mut f: impl FnMut(&IString, &mut IValue) -> bool) {
@@ -675,20 +659,30 @@ impl IntoIterator for IObject {
 }
 
 impl PartialEq for IObject {
-    fn eq(&self, _other: &Self) -> bool {
-        unimplemented!()
+    fn eq(&self, other: &Self) -> bool {
+        if self.0.raw_eq(&other.0) {
+            return true;
+        }
+        if self.len() != other.len() {
+            return false;
+        }
+        for (k, v) in self.iter() {
+            if other.get(k) != Some(v) {
+                return false;
+            }
+        }
+        true
     }
 }
 
 impl Eq for IObject {}
-impl Ord for IObject {
-    fn cmp(&self, _other: &Self) -> Ordering {
-        unimplemented!()
-    }
-}
 impl PartialOrd for IObject {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        if self == other {
+            Some(Ordering::Equal)
+        } else {
+            None
+        }
     }
 }
 
@@ -703,5 +697,154 @@ impl Hash for IObject {
             total_hash = total_hash.wrapping_add(h.finish());
         }
         total_hash.hash(state);
+    }
+}
+
+impl Extend<(IString, IValue)> for IObject {
+    fn extend<T: IntoIterator<Item = (IString, IValue)>>(&mut self, iter: T) {
+        for (k, v) in iter {
+            self.insert(k, v);
+        }
+    }
+}
+
+impl FromIterator<(IString, IValue)> for IObject {
+    fn from_iter<T: IntoIterator<Item = (IString, IValue)>>(iter: T) -> Self {
+        let mut res = IObject::new();
+        res.extend(iter);
+        res
+    }
+}
+
+impl<I: ObjectIndex> Index<I> for IObject {
+    type Output = IValue;
+
+    #[inline]
+    fn index(&self, index: I) -> &IValue {
+        index.index_into(self).unwrap().1
+    }
+}
+
+impl<I: ObjectIndex> IndexMut<I> for IObject {
+    #[inline]
+    fn index_mut(&mut self, index: I) -> &mut IValue {
+        index.index_or_insert(self)
+    }
+}
+
+mod private {
+    #[doc(hidden)]
+    pub trait Sealed {}
+    impl Sealed for usize {}
+    impl Sealed for &str {}
+    impl Sealed for &super::IString {}
+    impl<T: Sealed> Sealed for &T {}
+}
+
+pub trait ObjectIndex: private::Sealed + Copy {
+    #[doc(hidden)]
+    fn index_into(self, v: &IObject) -> Option<(&IString, &IValue)>;
+
+    #[doc(hidden)]
+    fn index_into_mut(self, v: &mut IObject) -> Option<(&IString, &mut IValue)>;
+
+    #[doc(hidden)]
+    fn index_or_insert(self, v: &mut IObject) -> &mut IValue;
+
+    #[doc(hidden)]
+    fn remove(self, v: &mut IObject) -> Option<(IString, IValue)>;
+}
+
+impl ObjectIndex for &str {
+    fn index_into(self, v: &IObject) -> Option<(&IString, &IValue)> {
+        IString::intern(self).index_into(v)
+    }
+
+    fn index_into_mut(self, v: &mut IObject) -> Option<(&IString, &mut IValue)> {
+        IString::intern(self).index_into_mut(v)
+    }
+
+    fn index_or_insert(self, v: &mut IObject) -> &mut IValue {
+        v.entry(IString::intern(self)).or_insert(IValue::NULL)
+    }
+
+    fn remove(self, v: &mut IObject) -> Option<(IString, IValue)> {
+        IString::intern(self).remove(v)
+    }
+}
+
+impl ObjectIndex for &IString {
+    fn index_into(self, v: &IObject) -> Option<(&IString, &IValue)> {
+        let hd = v.header().split();
+        if let Ok(bucket) = hd.find_bucket(self) {
+            // Safety: Bucket index is valid
+            unsafe {
+                let index = *hd.table.get_unchecked(bucket);
+                let item = hd.items.get_unchecked(index);
+                Some((&item.key, &item.value))
+            }
+        } else {
+            None
+        }
+    }
+
+    fn index_into_mut(self, v: &mut IObject) -> Option<(&IString, &mut IValue)> {
+        if v.is_static() {
+            return None;
+        } else {
+            // Safety: not static
+            let hd = unsafe { v.header_mut().split_mut() };
+            if let Ok(bucket) = hd.as_ref().find_bucket(self) {
+                // Safety: Bucket index is valid
+                unsafe {
+                    let index = *hd.table.get_unchecked(bucket);
+                    let item = hd.items.get_unchecked_mut(index);
+                    Some((&item.key, &mut item.value))
+                }
+            } else {
+                None
+            }
+        }
+    }
+
+    fn index_or_insert<'v>(self, v: &'v mut IObject) -> &'v mut IValue {
+        v.entry_or_clone(self).or_insert(IValue::NULL)
+    }
+
+    fn remove(self, v: &mut IObject) -> Option<(IString, IValue)> {
+        if v.is_static() {
+            return None;
+        } else {
+            // Safety: not static
+            let hd = unsafe { v.header_mut() };
+            let mut split = hd.split_mut();
+            if let Ok(bucket) = split.as_ref().find_bucket(self) {
+                // Safety: Bucket index is valid
+                unsafe {
+                    split.remove_bucket(bucket);
+                    Some(hd.pop())
+                }
+            } else {
+                None
+            }
+        }
+    }
+}
+
+impl<T: ObjectIndex> ObjectIndex for &T {
+    fn index_into(self, v: &IObject) -> Option<(&IString, &IValue)> {
+        (*self).index_into(v)
+    }
+
+    fn index_into_mut(self, v: &mut IObject) -> Option<(&IString, &mut IValue)> {
+        (*self).index_into_mut(v)
+    }
+
+    fn index_or_insert(self, v: &mut IObject) -> &mut IValue {
+        (*self).index_or_insert(v)
+    }
+
+    fn remove(self, v: &mut IObject) -> Option<(IString, IValue)> {
+        (*self).remove(v)
     }
 }

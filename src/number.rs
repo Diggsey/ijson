@@ -217,10 +217,10 @@ impl Header {
             }
         }
     }
-    fn is_integer(&self) -> bool {
+    fn has_decimal_point(&self) -> bool {
         match self.type_ {
-            NumberType::Static | NumberType::I24 | NumberType::I64 | NumberType::U64 => true,
-            NumberType::F64 => false,
+            NumberType::Static | NumberType::I24 | NumberType::I64 | NumberType::U64 => false,
+            NumberType::F64 => true,
         }
     }
     fn to_f64_lossy(&self) -> f64 {
@@ -477,11 +477,14 @@ impl INumber {
     pub fn to_f64_lossy(&self) -> f64 {
         self.header().to_f64_lossy()
     }
+    pub fn to_f32_lossy(&self) -> f32 {
+        self.to_f64_lossy() as f32
+    }
 
     /// This allows distinguishing between `1.0` and `1` in the original JSON.
     /// Numeric operations will otherwise treat these two values as equivalent.
-    pub fn is_integer(&self) -> bool {
-        self.header().is_integer()
+    pub fn has_decimal_point(&self) -> bool {
+        self.header().has_decimal_point()
     }
 }
 
@@ -576,7 +579,11 @@ impl PartialEq for INumber {
 impl Eq for INumber {}
 impl Ord for INumber {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.header().cmp(other.header())
+        if self.0.raw_eq(&other.0) {
+            Ordering::Equal
+        } else {
+            self.header().cmp(other.header())
+        }
     }
 }
 impl PartialOrd for INumber {

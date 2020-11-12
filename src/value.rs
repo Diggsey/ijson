@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::hash::Hash;
 use std::hint::unreachable_unchecked;
 use std::mem;
+use std::ops::{Index, IndexMut};
 use std::ptr::NonNull;
 
 use super::array::IArray;
@@ -254,6 +255,46 @@ impl IValue {
             None
         }
     }
+
+    pub fn get(&self, index: impl ValueIndex) -> Option<&IValue> {
+        index.index_into(self)
+    }
+    pub fn get_mut(&mut self, index: impl ValueIndex) -> Option<&mut IValue> {
+        index.index_into_mut(self)
+    }
+    pub fn remove(&mut self, index: impl ValueIndex) -> Option<IValue> {
+        index.remove(self)
+    }
+    pub fn take(&mut self) -> IValue {
+        mem::replace(self, IValue::NULL)
+    }
+
+    /// Converts this value to an i64 if it is a number that can be represented exactly
+    pub fn to_i64(&self) -> Option<i64> {
+        self.as_number()?.to_i64()
+    }
+    /// Converts this value to a u64 if it is a number that can be represented exactly
+    pub fn to_u64(&self) -> Option<u64> {
+        self.as_number()?.to_u64()
+    }
+    /// Converts this value to an f64 if it is a number that can be represented exactly
+    pub fn to_f64(&self) -> Option<f64> {
+        self.as_number()?.to_f64()
+    }
+    /// Converts this value to an f32 if it is a number that can be represented exactly
+    pub fn to_f32(&self) -> Option<f32> {
+        self.as_number()?.to_f32()
+    }
+    /// Converts this value to an i32 if it is a number that can be represented exactly
+    pub fn to_i32(&self) -> Option<i32> {
+        self.as_number()?.to_i32()
+    }
+    pub fn to_f64_lossy(&self) -> Option<f64> {
+        Some(self.as_number()?.to_f64_lossy())
+    }
+    pub fn to_f32_lossy(&self) -> Option<f32> {
+        Some(self.as_number()?.to_f32_lossy())
+    }
 }
 
 impl Clone for IValue {
@@ -320,35 +361,141 @@ impl PartialEq for IValue {
 }
 
 impl Eq for IValue {}
-impl Ord for IValue {
-    fn cmp(&self, other: &Self) -> Ordering {
+impl PartialOrd for IValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let (t1, t2) = (self.type_(), other.type_());
         if t1 == t2 {
             // Safety: Only methods for the appropriate type are called
             unsafe {
                 match t1 {
                     // Inline and interned types can be trivially compared
-                    ValueType::Null => Ordering::Equal,
-                    ValueType::Bool => self.is_true().cmp(&other.is_true()),
-                    ValueType::String => {
-                        self.as_string_unchecked().cmp(other.as_string_unchecked())
-                    }
-                    ValueType::Number => {
-                        self.as_number_unchecked().cmp(other.as_number_unchecked())
-                    }
-                    ValueType::Array => self.as_array_unchecked().cmp(other.as_array_unchecked()),
-                    ValueType::Object => {
-                        self.as_object_unchecked().cmp(other.as_object_unchecked())
-                    }
+                    ValueType::Null => Some(Ordering::Equal),
+                    ValueType::Bool => self.is_true().partial_cmp(&other.is_true()),
+                    ValueType::String => self
+                        .as_string_unchecked()
+                        .partial_cmp(other.as_string_unchecked()),
+                    ValueType::Number => self
+                        .as_number_unchecked()
+                        .partial_cmp(other.as_number_unchecked()),
+                    ValueType::Array => self
+                        .as_array_unchecked()
+                        .partial_cmp(other.as_array_unchecked()),
+                    ValueType::Object => return None,
                 }
             }
         } else {
-            t1.cmp(&t2)
+            t1.partial_cmp(&t2)
         }
     }
 }
-impl PartialOrd for IValue {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+
+mod private {
+    #[doc(hidden)]
+    pub trait Sealed {}
+    impl Sealed for usize {}
+    impl Sealed for &str {}
+    impl Sealed for &super::IString {}
+    impl<T: Sealed> Sealed for &T {}
+}
+
+pub trait ValueIndex: private::Sealed + Copy {
+    #[doc(hidden)]
+    fn index_into(self, v: &IValue) -> Option<&IValue>;
+
+    #[doc(hidden)]
+    fn index_into_mut(self, v: &mut IValue) -> Option<&mut IValue>;
+
+    #[doc(hidden)]
+    fn index_or_insert(self, v: &mut IValue) -> &mut IValue;
+
+    #[doc(hidden)]
+    fn remove(self, v: &mut IValue) -> Option<IValue>;
+}
+
+impl ValueIndex for usize {
+    fn index_into(self, v: &IValue) -> Option<&IValue> {
+        v.as_array().unwrap().get(self)
+    }
+
+    fn index_into_mut(self, v: &mut IValue) -> Option<&mut IValue> {
+        v.as_array_mut().unwrap().get_mut(self)
+    }
+
+    fn index_or_insert(self, v: &mut IValue) -> &mut IValue {
+        self.index_into_mut(v).unwrap()
+    }
+
+    fn remove(self, v: &mut IValue) -> Option<IValue> {
+        v.as_array_mut().unwrap().remove(self)
+    }
+}
+
+impl ValueIndex for &str {
+    fn index_into(self, v: &IValue) -> Option<&IValue> {
+        v.as_object().unwrap().get(&IString::intern(self))
+    }
+
+    fn index_into_mut(self, v: &mut IValue) -> Option<&mut IValue> {
+        v.as_object_mut().unwrap().get_mut(&IString::intern(self))
+    }
+
+    fn index_or_insert(self, v: &mut IValue) -> &mut IValue {
+        &mut v.as_object_mut().unwrap()[self]
+    }
+
+    fn remove(self, v: &mut IValue) -> Option<IValue> {
+        v.as_object_mut().unwrap().remove(self)
+    }
+}
+
+impl ValueIndex for &IString {
+    fn index_into(self, v: &IValue) -> Option<&IValue> {
+        v.as_object().unwrap().get(self)
+    }
+
+    fn index_into_mut(self, v: &mut IValue) -> Option<&mut IValue> {
+        v.as_object_mut().unwrap().get_mut(self)
+    }
+
+    fn index_or_insert(self, v: &mut IValue) -> &mut IValue {
+        &mut v.as_object_mut().unwrap()[self]
+    }
+
+    fn remove(self, v: &mut IValue) -> Option<IValue> {
+        v.as_object_mut().unwrap().remove(self)
+    }
+}
+
+impl<T: ValueIndex> ValueIndex for &T {
+    fn index_into(self, v: &IValue) -> Option<&IValue> {
+        (*self).index_into(v)
+    }
+
+    fn index_into_mut(self, v: &mut IValue) -> Option<&mut IValue> {
+        (*self).index_into_mut(v)
+    }
+
+    fn index_or_insert(self, v: &mut IValue) -> &mut IValue {
+        (*self).index_or_insert(v)
+    }
+
+    fn remove(self, v: &mut IValue) -> Option<IValue> {
+        (*self).remove(v)
+    }
+}
+
+impl<I: ValueIndex> Index<I> for IValue {
+    type Output = IValue;
+
+    #[inline]
+    fn index(&self, index: I) -> &IValue {
+        index.index_into(self).unwrap()
+    }
+}
+
+impl<I: ValueIndex> IndexMut<I> for IValue {
+    #[inline]
+    fn index_mut(&mut self, index: I) -> &mut IValue {
+        index.index_or_insert(self)
     }
 }
