@@ -1,10 +1,11 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
+use std::convert::TryFrom;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::hint::unreachable_unchecked;
 use std::mem;
-use std::ops::{Index, IndexMut};
+use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
 
 use super::array::IArray;
@@ -15,6 +16,59 @@ use super::string::IString;
 #[repr(transparent)]
 pub struct IValue {
     ptr: NonNull<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Destructured {
+    Null,
+    Bool(bool),
+    Number(INumber),
+    String(IString),
+    Array(IArray),
+    Object(IObject),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum DestructuredRef<'a> {
+    Null,
+    Bool(bool),
+    Number(&'a INumber),
+    String(&'a IString),
+    Array(&'a IArray),
+    Object(&'a IObject),
+}
+
+#[derive(Debug)]
+pub enum DestructuredMut<'a> {
+    Null,
+    Bool(BoolMut<'a>),
+    Number(&'a mut INumber),
+    String(&'a mut IString),
+    Array(&'a mut IArray),
+    Object(&'a mut IObject),
+}
+
+#[derive(Debug)]
+pub struct BoolMut<'a>(&'a mut IValue);
+
+impl<'a> BoolMut<'a> {
+    pub fn set(&mut self, value: bool) {
+        *self.0 = value.into();
+    }
+    pub fn get(&self) -> bool {
+        self.0.is_true()
+    }
+}
+
+impl<'a> Deref for BoolMut<'a> {
+    type Target = bool;
+    fn deref(&self) -> &bool {
+        if self.get() {
+            &true
+        } else {
+            &false
+        }
+    }
 }
 
 pub(crate) const ALIGNMENT: usize = 4;
@@ -59,13 +113,13 @@ impl IValue {
         }
     }
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
-    pub(crate) const unsafe fn new_ptr(p: *mut u8, tag: TypeTag) -> Self {
+    pub(crate) unsafe fn new_ptr(p: *mut u8, tag: TypeTag) -> Self {
         Self {
             ptr: NonNull::new_unchecked(p.offset(tag as isize)),
         }
     }
     // Safety: Reference must be aligned to at least ALIGNMENT
-    pub(crate) const unsafe fn new_ref<T>(r: &T, tag: TypeTag) -> Self {
+    pub(crate) unsafe fn new_ref<T>(r: &T, tag: TypeTag) -> Self {
         Self::new_ptr(r as *const _ as *mut u8, tag)
     }
     pub const NULL: Self = unsafe { Self::new_inline(TypeTag::StringOrNull) };
@@ -124,28 +178,76 @@ impl IValue {
         }
     }
 
+    pub fn destructure(self) -> Destructured {
+        match self.type_() {
+            ValueType::Null => Destructured::Null,
+            ValueType::Bool => Destructured::Bool(self.is_true()),
+            ValueType::Number => Destructured::Number(INumber(self)),
+            ValueType::String => Destructured::String(IString(self)),
+            ValueType::Array => Destructured::Array(IArray(self)),
+            ValueType::Object => Destructured::Object(IObject(self)),
+        }
+    }
+
+    pub fn destructure_ref(&self) -> DestructuredRef {
+        // Safety: we check the type
+        unsafe {
+            match self.type_() {
+                ValueType::Null => DestructuredRef::Null,
+                ValueType::Bool => DestructuredRef::Bool(self.is_true()),
+                ValueType::Number => DestructuredRef::Number(self.as_number_unchecked()),
+                ValueType::String => DestructuredRef::String(self.as_string_unchecked()),
+                ValueType::Array => DestructuredRef::Array(self.as_array_unchecked()),
+                ValueType::Object => DestructuredRef::Object(self.as_object_unchecked()),
+            }
+        }
+    }
+
+    pub fn destructure_mut(&mut self) -> DestructuredMut {
+        // Safety: we check the type
+        unsafe {
+            match self.type_() {
+                ValueType::Null => DestructuredMut::Null,
+                ValueType::Bool => DestructuredMut::Bool(BoolMut(self)),
+                ValueType::Number => DestructuredMut::Number(self.as_number_unchecked_mut()),
+                ValueType::String => DestructuredMut::String(self.as_string_unchecked_mut()),
+                ValueType::Array => DestructuredMut::Array(self.as_array_unchecked_mut()),
+                ValueType::Object => DestructuredMut::Object(self.as_object_unchecked_mut()),
+            }
+        }
+    }
+
+    pub fn get(&self, index: impl ValueIndex) -> Option<&IValue> {
+        index.index_into(self)
+    }
+    pub fn get_mut(&mut self, index: impl ValueIndex) -> Option<&mut IValue> {
+        index.index_into_mut(self)
+    }
+    pub fn remove(&mut self, index: impl ValueIndex) -> Option<IValue> {
+        index.remove(self)
+    }
+    pub fn take(&mut self) -> IValue {
+        mem::replace(self, IValue::NULL)
+    }
+
+    pub fn len(&self) -> Option<usize> {
+        match self.type_() {
+            // Safety: checked type
+            ValueType::Array => Some(unsafe { self.as_array_unchecked().len() }),
+            // Safety: checked type
+            ValueType::Object => Some(unsafe { self.as_object_unchecked().len() }),
+            _ => None,
+        }
+    }
+
+    // # Null methods
     pub fn is_null(&self) -> bool {
         self.ptr == Self::NULL.ptr
     }
 
+    // # Bool methods
     pub fn is_bool(&self) -> bool {
         self.ptr == Self::TRUE.ptr || self.ptr == Self::FALSE.ptr
-    }
-
-    pub fn is_number(&self) -> bool {
-        self.type_tag() == TypeTag::Number
-    }
-
-    pub fn is_string(&self) -> bool {
-        self.type_tag() == TypeTag::StringOrNull && self.is_ptr()
-    }
-
-    pub fn is_array(&self) -> bool {
-        self.type_tag() == TypeTag::ArrayOrFalse && self.is_ptr()
-    }
-
-    pub fn is_object(&self) -> bool {
-        self.type_tag() == TypeTag::ObjectOrTrue && self.is_ptr()
     }
 
     pub fn is_true(&self) -> bool {
@@ -162,6 +264,120 @@ impl IValue {
         } else {
             None
         }
+    }
+
+    // # Number methods
+    pub fn is_number(&self) -> bool {
+        self.type_tag() == TypeTag::Number
+    }
+
+    // Safety: Must be a string
+    unsafe fn as_number_unchecked(&self) -> &INumber {
+        mem::transmute(self)
+    }
+
+    // Safety: Must be a string
+    unsafe fn as_number_unchecked_mut(&mut self) -> &mut INumber {
+        mem::transmute(self)
+    }
+
+    pub fn as_number(&self) -> Option<&INumber> {
+        if self.is_number() {
+            // Safety: INumber is a `#[repr(transparent)]` wrapper around IValue
+            Some(unsafe { self.as_number_unchecked() })
+        } else {
+            None
+        }
+    }
+
+    pub fn as_number_mut(&mut self) -> Option<&mut INumber> {
+        if self.is_number() {
+            // Safety: INumber is a `#[repr(transparent)]` wrapper around IValue
+            Some(unsafe { self.as_number_unchecked_mut() })
+        } else {
+            None
+        }
+    }
+
+    pub fn into_number(self) -> Result<INumber, IValue> {
+        if self.is_number() {
+            Ok(INumber(self))
+        } else {
+            Err(self)
+        }
+    }
+
+    /// Converts this value to an i64 if it is a number that can be represented exactly
+    pub fn to_i64(&self) -> Option<i64> {
+        self.as_number()?.to_i64()
+    }
+    /// Converts this value to a u64 if it is a number that can be represented exactly
+    pub fn to_u64(&self) -> Option<u64> {
+        self.as_number()?.to_u64()
+    }
+    /// Converts this value to an f64 if it is a number that can be represented exactly
+    pub fn to_f64(&self) -> Option<f64> {
+        self.as_number()?.to_f64()
+    }
+    /// Converts this value to an f32 if it is a number that can be represented exactly
+    pub fn to_f32(&self) -> Option<f32> {
+        self.as_number()?.to_f32()
+    }
+    /// Converts this value to an i32 if it is a number that can be represented exactly
+    pub fn to_i32(&self) -> Option<i32> {
+        self.as_number()?.to_i32()
+    }
+    pub fn to_f64_lossy(&self) -> Option<f64> {
+        Some(self.as_number()?.to_f64_lossy())
+    }
+    pub fn to_f32_lossy(&self) -> Option<f32> {
+        Some(self.as_number()?.to_f32_lossy())
+    }
+
+    // # String methods
+    pub fn is_string(&self) -> bool {
+        self.type_tag() == TypeTag::StringOrNull && self.is_ptr()
+    }
+
+    // Safety: Must be a string
+    unsafe fn as_string_unchecked(&self) -> &IString {
+        mem::transmute(self)
+    }
+
+    // Safety: Must be a string
+    unsafe fn as_string_unchecked_mut(&mut self) -> &mut IString {
+        mem::transmute(self)
+    }
+
+    pub fn as_string(&self) -> Option<&IString> {
+        if self.is_string() {
+            // Safety: IString is a `#[repr(transparent)]` wrapper around IValue
+            Some(unsafe { self.as_string_unchecked() })
+        } else {
+            None
+        }
+    }
+
+    pub fn as_string_mut(&mut self) -> Option<&mut IString> {
+        if self.is_string() {
+            // Safety: IString is a `#[repr(transparent)]` wrapper around IValue
+            Some(unsafe { self.as_string_unchecked_mut() })
+        } else {
+            None
+        }
+    }
+
+    pub fn into_string(self) -> Result<IString, IValue> {
+        if self.is_string() {
+            Ok(IString(self))
+        } else {
+            Err(self)
+        }
+    }
+
+    // # Array methods
+    pub fn is_array(&self) -> bool {
+        self.type_tag() == TypeTag::ArrayOrFalse && self.is_ptr()
     }
 
     // Safety: Must be an array
@@ -192,6 +408,19 @@ impl IValue {
         }
     }
 
+    pub fn into_array(self) -> Result<IArray, IValue> {
+        if self.is_array() {
+            Ok(IArray(self))
+        } else {
+            Err(self)
+        }
+    }
+
+    // # Object methods
+    pub fn is_object(&self) -> bool {
+        self.type_tag() == TypeTag::ObjectOrTrue && self.is_ptr()
+    }
+
     // Safety: Must be an array
     unsafe fn as_object_unchecked(&self) -> &IObject {
         mem::transmute(self)
@@ -220,82 +449,12 @@ impl IValue {
         }
     }
 
-    // Safety: Must be a string
-    unsafe fn as_string_unchecked(&self) -> &IString {
-        mem::transmute(self)
-    }
-
-    // Safety: Must be a string
-    unsafe fn as_string_unchecked_mut(&mut self) -> &mut IString {
-        mem::transmute(self)
-    }
-
-    pub fn as_string(&self) -> Option<&IString> {
-        if self.is_string() {
-            // Safety: IString is a `#[repr(transparent)]` wrapper around IValue
-            Some(unsafe { self.as_string_unchecked() })
-        } else {
-            None
-        }
-    }
-
-    // Safety: Must be a string
-    unsafe fn as_number_unchecked(&self) -> &INumber {
-        mem::transmute(self)
-    }
-
-    // Safety: Must be a string
-    unsafe fn as_number_unchecked_mut(&mut self) -> &mut INumber {
-        mem::transmute(self)
-    }
-
-    pub fn as_number(&self) -> Option<&INumber> {
+    pub fn into_object(self) -> Result<IObject, IValue> {
         if self.is_number() {
-            // Safety: INumber is a `#[repr(transparent)]` wrapper around IValue
-            Some(unsafe { self.as_number_unchecked() })
+            Ok(IObject(self))
         } else {
-            None
+            Err(self)
         }
-    }
-
-    pub fn get(&self, index: impl ValueIndex) -> Option<&IValue> {
-        index.index_into(self)
-    }
-    pub fn get_mut(&mut self, index: impl ValueIndex) -> Option<&mut IValue> {
-        index.index_into_mut(self)
-    }
-    pub fn remove(&mut self, index: impl ValueIndex) -> Option<IValue> {
-        index.remove(self)
-    }
-    pub fn take(&mut self) -> IValue {
-        mem::replace(self, IValue::NULL)
-    }
-
-    /// Converts this value to an i64 if it is a number that can be represented exactly
-    pub fn to_i64(&self) -> Option<i64> {
-        self.as_number()?.to_i64()
-    }
-    /// Converts this value to a u64 if it is a number that can be represented exactly
-    pub fn to_u64(&self) -> Option<u64> {
-        self.as_number()?.to_u64()
-    }
-    /// Converts this value to an f64 if it is a number that can be represented exactly
-    pub fn to_f64(&self) -> Option<f64> {
-        self.as_number()?.to_f64()
-    }
-    /// Converts this value to an f32 if it is a number that can be represented exactly
-    pub fn to_f32(&self) -> Option<f32> {
-        self.as_number()?.to_f32()
-    }
-    /// Converts this value to an i32 if it is a number that can be represented exactly
-    pub fn to_i32(&self) -> Option<i32> {
-        self.as_number()?.to_i32()
-    }
-    pub fn to_f64_lossy(&self) -> Option<f64> {
-        Some(self.as_number()?.to_f64_lossy())
-    }
-    pub fn to_f32_lossy(&self) -> Option<f32> {
-        Some(self.as_number()?.to_f32_lossy())
     }
 }
 
@@ -522,18 +681,6 @@ impl Debug for IValue {
     }
 }
 
-macro_rules! typed_conversions {
-    ($interm:ty: $($src:ty),*) => {
-        $(
-            impl From<$src> for IValue {
-                fn from(other: $src) -> Self {
-                    <$interm>::from(other).into()
-                }
-            }
-        )*
-    }
-}
-
 impl<T: Into<IValue>> From<Option<T>> for IValue {
     fn from(other: Option<T>) -> Self {
         if let Some(v) = other {
@@ -555,41 +702,24 @@ impl From<bool> for IValue {
 }
 
 typed_conversions! {
-    INumber: INumber, i8, u8, i16, u16, i32, u32, i64, u64, isize, usize
+    INumber: i8, u8, i16, u16, i32, u32, i64, u64, isize, usize;
+    IString: String, &str;
+    IArray:
+        Vec<T> where (T: Into<IValue>),
+        &[T] where (T: Into<IValue> + Clone);
+    IObject:
+        HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
+        BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
 }
 
-typed_conversions! {
-    IString: IString, String, &str
-}
-
-typed_conversions! {
-    IArray: IArray
-}
-
-impl<T: Into<IValue>> From<Vec<T>> for IValue {
-    fn from(other: Vec<T>) -> Self {
-        IArray::from(other).into()
+impl From<f32> for IValue {
+    fn from(v: f32) -> Self {
+        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
     }
 }
 
-impl<T: Into<IValue> + Clone> From<&[T]> for IValue {
-    fn from(other: &[T]) -> Self {
-        IArray::from(other).into()
-    }
-}
-
-typed_conversions! {
-    IObject: IObject
-}
-
-impl<K: Into<IString>, V: Into<IValue>> From<HashMap<K, V>> for IValue {
-    fn from(other: HashMap<K, V>) -> Self {
-        IObject::from(other).into()
-    }
-}
-
-impl<K: Into<IString>, V: Into<IValue>> From<BTreeMap<K, V>> for IValue {
-    fn from(other: BTreeMap<K, V>) -> Self {
-        IObject::from(other).into()
+impl From<f64> for IValue {
+    fn from(v: f64) -> Self {
+        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
     }
 }

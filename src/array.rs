@@ -102,6 +102,8 @@ impl Drop for IntoIter {
 #[derive(Clone)]
 pub struct IArray(pub(crate) IValue);
 
+value_subtype_impls!(IArray, into_array, as_array, as_array_mut);
+
 static EMPTY_HEADER: Header = Header { len: 0, cap: 0 };
 
 impl IArray {
@@ -354,25 +356,27 @@ impl Hash for IArray {
     }
 }
 
-impl Extend<IValue> for IArray {
-    fn extend<T: IntoIterator<Item = IValue>>(&mut self, iter: T) {
+impl<U: Into<IValue>> Extend<U> for IArray {
+    fn extend<T: IntoIterator<Item = U>>(&mut self, iter: T) {
+        let iter = iter.into_iter();
+        self.reserve(iter.size_hint().0);
         for v in iter {
             self.push(v);
         }
     }
 }
 
-impl FromIterator<IValue> for IArray {
-    fn from_iter<T: IntoIterator<Item = IValue>>(iter: T) -> Self {
+impl<U: Into<IValue>> FromIterator<U> for IArray {
+    fn from_iter<T: IntoIterator<Item = U>>(iter: T) -> Self {
         let mut res = IArray::new();
         res.extend(iter);
         res
     }
 }
 
-impl AsRef<IValue> for IArray {
-    fn as_ref(&self) -> &IValue {
-        &self.0
+impl AsRef<[IValue]> for IArray {
+    fn as_ref(&self) -> &[IValue] {
+        self.as_slice()
     }
 }
 
@@ -457,7 +461,7 @@ impl<'a> IntoIterator for &'a mut IArray {
 mod tests {
     use super::*;
 
-    #[test]
+    #[mockalloc::test]
     fn can_create() {
         let x = IArray::new();
         let y = IArray::with_capacity(10);
@@ -465,7 +469,7 @@ mod tests {
         assert_eq!(x, y);
     }
 
-    #[test]
+    #[mockalloc::test]
     fn can_collect() {
         let x = vec![IValue::NULL, IValue::TRUE, IValue::FALSE];
         let y: IArray = x.iter().cloned().collect();
@@ -473,7 +477,7 @@ mod tests {
         assert_eq!(x.as_slice(), y.as_slice());
     }
 
-    #[test]
+    #[mockalloc::test]
     fn can_push_insert() {
         let mut x = IArray::new();
         x.insert(0, IValue::NULL);
@@ -483,7 +487,7 @@ mod tests {
         assert_eq!(x.as_slice(), &[IValue::NULL, IValue::FALSE, IValue::TRUE]);
     }
 
-    #[test]
+    #[mockalloc::test]
     fn can_nest() {
         let x: IArray = vec![IValue::NULL, IValue::TRUE, IValue::FALSE].into();
         let y: IArray = vec![
@@ -495,5 +499,42 @@ mod tests {
         .into();
 
         assert_eq!(&y[1], x.as_ref());
+    }
+
+    #[mockalloc::test]
+    fn can_pop_remove() {
+        let mut x: IArray = vec![IValue::NULL, IValue::TRUE, IValue::FALSE].into();
+        assert_eq!(x.remove(1), Some(IValue::TRUE));
+        assert_eq!(x.pop(), Some(IValue::FALSE));
+
+        assert_eq!(x.as_slice(), &[IValue::NULL]);
+    }
+
+    #[mockalloc::test]
+    fn can_swap_remove() {
+        let mut x: IArray = vec![IValue::NULL, IValue::TRUE, IValue::FALSE].into();
+        assert_eq!(x.swap_remove(0), Some(IValue::NULL));
+
+        assert_eq!(x.as_slice(), &[IValue::FALSE, IValue::TRUE]);
+    }
+
+    #[mockalloc::test]
+    fn can_index() {
+        let mut x: IArray = vec![IValue::NULL, IValue::TRUE, IValue::FALSE].into();
+        assert_eq!(x[1], IValue::TRUE);
+        x[1] = IValue::FALSE;
+        assert_eq!(x[1], IValue::FALSE);
+    }
+
+    #[mockalloc::test]
+    fn can_truncate_and_shrink() {
+        let mut x: IArray =
+            vec![IValue::NULL, IValue::TRUE, IArray::with_capacity(10).into()].into();
+        x.truncate(2);
+        assert_eq!(x.len(), 2);
+        assert_eq!(x.capacity(), 3);
+        x.shrink_to_fit();
+        assert_eq!(x.len(), 2);
+        assert_eq!(x.capacity(), 2);
     }
 }

@@ -31,7 +31,9 @@ fn hash_capacity(cap: usize) -> usize {
 fn hash_fn(s: &IString) -> usize {
     let v: &IValue = s.as_ref();
     // We know the bottom two bits are always the same
-    let p = v.ptr_usize() >> 2;
+    let mut p = v.ptr_usize() >> 2;
+    p = p.wrapping_mul(202529);
+    p = p ^ (p >> 13);
     p.wrapping_mul(202529)
 }
 
@@ -109,6 +111,7 @@ impl<'a> SplitHeaderMut<'a> {
     }
     unsafe fn unshift(&mut self, initial_bucket: usize) {
         let hash_cap = hash_capacity(*self.cap);
+        let mut prev_bucket = initial_bucket;
         for i in 1..hash_cap {
             let bucket = (initial_bucket + i) % hash_cap;
             let index = *self.table.get_unchecked(bucket);
@@ -126,7 +129,8 @@ impl<'a> SplitHeaderMut<'a> {
             }
 
             // Shift this element back one
-            self.table.swap(bucket - 1, bucket);
+            self.table.swap(prev_bucket, bucket);
+            prev_bucket = bucket;
         }
     }
     // Safety: item with this index must have just been pushed, and the bucket
@@ -210,8 +214,8 @@ impl Header {
         // Safety: Header `len` and `cap` must be accurate
         unsafe {
             std::slice::from_raw_parts_mut(
-                self.as_item_ptr().offset(self.len as isize) as *mut MaybeUninit<KeyValuePair>,
-                self.cap - self.len,
+                self.as_item_ptr() as *mut MaybeUninit<KeyValuePair>,
+                self.cap,
             )
         }
     }
@@ -429,6 +433,8 @@ impl Drop for IntoIter {
 #[derive(Clone)]
 pub struct IObject(pub(crate) IValue);
 
+value_subtype_impls!(IObject, into_object, as_object, as_object_mut);
+
 static EMPTY_HEADER: Header = Header { len: 0, cap: 0 };
 
 impl IObject {
@@ -586,6 +592,9 @@ impl IObject {
     pub fn remove(&mut self, k: impl ObjectIndex) -> Option<IValue> {
         self.remove_entry(k).map(|x| x.1)
     }
+    pub fn shrink_to_fit(&mut self) {
+        self.resize_internal(self.len());
+    }
     pub fn retain(&mut self, mut f: impl FnMut(&IString, &mut IValue) -> bool) {
         if self.is_static() {
             return;
@@ -627,12 +636,6 @@ impl IObject {
                 self.0.set_ref(&EMPTY_HEADER);
             }
         }
-    }
-}
-
-impl AsRef<IValue> for IObject {
-    fn as_ref(&self) -> &IValue {
-        &self.0
     }
 }
 
@@ -699,16 +702,18 @@ impl Hash for IObject {
     }
 }
 
-impl Extend<(IString, IValue)> for IObject {
-    fn extend<T: IntoIterator<Item = (IString, IValue)>>(&mut self, iter: T) {
+impl<K: Into<IString>, V: Into<IValue>> Extend<(K, V)> for IObject {
+    fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
+        let iter = iter.into_iter();
+        self.reserve(iter.size_hint().0);
         for (k, v) in iter {
             self.insert(k, v);
         }
     }
 }
 
-impl FromIterator<(IString, IValue)> for IObject {
-    fn from_iter<T: IntoIterator<Item = (IString, IValue)>>(iter: T) -> Self {
+impl<K: Into<IString>, V: Into<IValue>> FromIterator<(K, V)> for IObject {
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
         let mut res = IObject::new();
         res.extend(iter);
         res
@@ -905,5 +910,89 @@ impl<K: Into<IString>, V: Into<IValue>> From<BTreeMap<K, V>> for IObject {
         let mut res = Self::with_capacity(other.len());
         res.extend(other.into_iter().map(|(k, v)| (k.into(), v.into())));
         res
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[mockalloc::test]
+    fn can_create() {
+        let x = IObject::new();
+        let y = IObject::with_capacity(10);
+
+        assert_eq!(x, y);
+    }
+
+    #[mockalloc::test]
+    fn can_collect() {
+        let x = vec![
+            ("a", IValue::NULL),
+            ("b", IValue::TRUE),
+            ("c", IValue::FALSE),
+        ];
+        let y: IObject = x.into_iter().collect();
+
+        assert_eq!(y, y.clone());
+        assert_eq!(y.len(), 3);
+        assert_eq!(y["a"], IValue::NULL);
+        assert_eq!(y["b"], IValue::TRUE);
+        assert_eq!(y["c"], IValue::FALSE);
+    }
+
+    #[mockalloc::test]
+    fn can_insert() {
+        let mut x = IObject::new();
+        x.insert("a", IValue::NULL);
+        x.insert("b", IValue::TRUE);
+        x.insert("c", IValue::FALSE);
+
+        assert_eq!(x.len(), 3);
+        assert_eq!(x["a"], IValue::NULL);
+        assert_eq!(x["b"], IValue::TRUE);
+        assert_eq!(x["c"], IValue::FALSE);
+    }
+
+    #[mockalloc::test]
+    fn can_nest() {
+        let mut x = IObject::new();
+        x.insert("a", IValue::NULL);
+        x.insert("b", x.clone());
+        x.insert("c", IValue::FALSE);
+        x.insert("d", x.clone());
+
+        assert_eq!(x.len(), 4);
+        assert_eq!(x["a"], IValue::NULL);
+        assert_eq!(x["b"].len(), Some(1));
+        assert_eq!(x["c"], IValue::FALSE);
+        assert_eq!(x["d"].len(), Some(3));
+    }
+
+    #[mockalloc::test]
+    fn can_remove_and_shrink() {
+        let x = vec![
+            ("a", IValue::NULL),
+            ("b", IValue::TRUE),
+            ("c", IValue::FALSE),
+        ];
+        let mut y: IObject = x.into_iter().collect();
+        assert_eq!(y.len(), 3);
+        assert_eq!(y.capacity(), 3);
+
+        assert_eq!(y.remove("b"), Some(IValue::TRUE));
+        assert_eq!(y.remove("b"), None);
+        assert_eq!(y.remove("d"), None);
+
+        assert_eq!(y.len(), 2);
+        assert_eq!(y.capacity(), 3);
+        assert_eq!(y["a"], IValue::NULL);
+        assert_eq!(y["c"], IValue::FALSE);
+
+        y.shrink_to_fit();
+        assert_eq!(y.len(), 2);
+        assert_eq!(y.capacity(), 2);
+        assert_eq!(y["a"], IValue::NULL);
+        assert_eq!(y["c"], IValue::FALSE);
     }
 }

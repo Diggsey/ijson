@@ -34,7 +34,7 @@ fn can_represent_as_f32(x: u64) -> bool {
 
 fn cmp_i64_to_f64(a: i64, b: f64) -> Ordering {
     if a < 0 {
-        cmp_u64_to_f64((-a) as u64, -b).reverse()
+        cmp_u64_to_f64(a.wrapping_neg() as u64, -b).reverse()
     } else {
         cmp_u64_to_f64(a as u64, b)
     }
@@ -157,7 +157,7 @@ impl Header {
                 NumberType::I64 => {
                     let v = *self.as_i64_unchecked();
                     let can_represent = if v < 0 {
-                        can_represent_as_f64((-v) as u64)
+                        can_represent_as_f64(v.wrapping_neg() as u64)
                     } else {
                         can_represent_as_f64(v as u64)
                     };
@@ -188,7 +188,7 @@ impl Header {
                 NumberType::I64 => {
                     let v = *self.as_i64_unchecked();
                     let can_represent = if v < 0 {
-                        can_represent_as_f32((-v) as u64)
+                        can_represent_as_f32(v.wrapping_neg() as u64)
                     } else {
                         can_represent_as_f32(v as u64)
                     };
@@ -322,6 +322,8 @@ static STATIC_NUMBERS: [Header; 256] = define_static_numbers!(
 #[derive(Clone)]
 pub struct INumber(pub(crate) IValue);
 
+value_subtype_impls!(INumber, into_number, as_number, as_number_mut);
+
 impl INumber {
     fn layout(type_: NumberType) -> Result<Layout, LayoutErr> {
         let mut res = Layout::new::<Header>();
@@ -352,8 +354,11 @@ impl INumber {
         }
     }
 
-    pub fn new() -> Self {
+    pub fn zero() -> Self {
         Self::new_static(0)
+    }
+    pub fn one() -> Self {
+        Self::new_static(1)
     }
     fn new_static(value: i8) -> Self {
         unsafe {
@@ -602,11 +607,6 @@ impl PartialOrd for INumber {
         Some(self.cmp(other))
     }
 }
-impl AsRef<IValue> for INumber {
-    fn as_ref(&self) -> &IValue {
-        &self.0
-    }
-}
 
 impl Debug for INumber {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -619,5 +619,71 @@ impl Debug for INumber {
         } else {
             unreachable!()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[mockalloc::test]
+    fn can_create() {
+        let x = INumber::zero();
+        let y: INumber = (0.0).try_into().unwrap();
+
+        assert_eq!(x, y);
+        assert!(!x.has_decimal_point());
+        assert!(y.has_decimal_point());
+        assert_eq!(x.to_i32(), Some(0));
+        assert_eq!(y.to_i32(), Some(0));
+        assert!(INumber::try_from(f32::INFINITY).is_err());
+        assert!(INumber::try_from(f64::INFINITY).is_err());
+        assert!(INumber::try_from(f32::NEG_INFINITY).is_err());
+        assert!(INumber::try_from(f64::NEG_INFINITY).is_err());
+        assert!(INumber::try_from(f32::NAN).is_err());
+        assert!(INumber::try_from(f64::NAN).is_err());
+    }
+
+    #[mockalloc::test]
+    fn can_store_various_numbers() {
+        let x: INumber = 256.into();
+        assert_eq!(x.to_i64(), Some(256));
+        assert_eq!(x.to_u64(), Some(256));
+        assert_eq!(x.to_f64(), Some(256.0));
+
+        let x: INumber = 0x1000000.into();
+        assert_eq!(x.to_i64(), Some(0x1000000));
+        assert_eq!(x.to_u64(), Some(0x1000000));
+        assert_eq!(x.to_f64(), Some(16777216.0));
+
+        let x: INumber = i64::MIN.into();
+        assert_eq!(x.to_i64(), Some(i64::MIN));
+        assert_eq!(x.to_u64(), None);
+        assert_eq!(x.to_f64(), Some(-9223372036854775808.0));
+
+        let x: INumber = i64::MAX.into();
+        assert_eq!(x.to_i64(), Some(i64::MAX));
+        assert_eq!(x.to_u64(), Some(i64::MAX as u64));
+        assert_eq!(x.to_f64(), None);
+
+        let x: INumber = u64::MAX.into();
+        assert_eq!(x.to_i64(), None);
+        assert_eq!(x.to_u64(), Some(u64::MAX));
+        assert_eq!(x.to_f64(), None);
+    }
+
+    #[mockalloc::test]
+    fn can_compare_various_numbers() {
+        assert!(INumber::from(1) < INumber::try_from(1.5).unwrap());
+        assert!(INumber::from(2) > INumber::try_from(1.5).unwrap());
+        assert!(INumber::from(-2) < INumber::try_from(1.5).unwrap());
+        assert!(INumber::from(-2) < INumber::try_from(-1.5).unwrap());
+        assert!(INumber::from(-2) == INumber::try_from(-2.0).unwrap());
+        assert!(INumber::try_from(-1.5).unwrap() > INumber::from(-2));
+        assert!(INumber::try_from(1e30).unwrap() > INumber::from(u64::MAX));
+        assert!(INumber::try_from(1e30).unwrap() > INumber::from(i64::MAX));
+        assert!(INumber::try_from(-1e30).unwrap() < INumber::from(i64::MIN));
+        assert!(INumber::try_from(-1e30).unwrap() < INumber::from(i64::MIN));
+        assert!(INumber::try_from(99999999000.0).unwrap() < INumber::from(99999999001u64));
     }
 }

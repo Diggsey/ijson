@@ -9,3 +9,7 @@ edition = "2018"
 [dependencies]
 dashmap = { version = "3.11.10", features = ["raw-api"] }
 lazy_static = "1.4.0"
+serde = "1.0.117"
+
+[dev-dependencies]
+mockalloc = "0.1.1"

@@ -85,6 +85,8 @@ impl WeakIString {
 #[derive(Clone)]
 pub struct IString(pub(crate) IValue);
 
+value_subtype_impls!(IString, into_string, as_string, as_string_mut);
+
 static EMPTY_HEADER: Header = Header {
     len: 0,
     shard_index: 0,
@@ -230,12 +232,6 @@ impl From<String> for IString {
 impl From<IString> for String {
     fn from(other: IString) -> Self {
         other.as_str().into()
-    }
-}
-
-impl AsRef<IValue> for IString {
-    fn as_ref(&self) -> &IValue {
-        &self.0
     }
 }
 
