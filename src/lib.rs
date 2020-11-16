@@ -14,6 +14,8 @@ pub use value::{Destructured, DestructuredMut, DestructuredRef, IValue};
 
 mod de;
 mod ser;
+pub use de::from_value;
+pub use ser::to_value;
 
 #[cfg(test)]
 mod tests {

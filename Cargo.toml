@@ -10,6 +10,7 @@ edition = "2018"
 dashmap = { version = "3.11.10", features = ["raw-api"] }
 lazy_static = "1.4.0"
 serde = "1.0.117"
+serde_json = "1.0.59"
 
 [dev-dependencies]
 mockalloc = "0.1.1"

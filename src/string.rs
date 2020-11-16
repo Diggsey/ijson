@@ -223,6 +223,12 @@ impl From<&str> for IString {
     }
 }
 
+impl From<&mut str> for IString {
+    fn from(other: &mut str) -> Self {
+        Self::intern(other)
+    }
+}
+
 impl From<String> for IString {
     fn from(other: String) -> Self {
         Self::intern(other.as_str())

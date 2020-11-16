@@ -20,8 +20,8 @@ enum NumberType {
 #[repr(align(4))]
 struct Header {
     type_: NumberType,
-    static_: i8,
-    short: u16,
+    short: u8,
+    static_: i16,
 }
 
 fn can_represent_as_f64(x: u64) -> bool {
@@ -61,7 +61,7 @@ fn cmp_u64_to_f64(a: u64, b: f64) -> Ordering {
 
 impl Header {
     fn as_i24_unchecked(&self) -> i32 {
-        ((self.static_ as i32) << 16) | (self.short as i32)
+        ((self.static_ as i32) << 8) | (self.short as i32)
     }
     unsafe fn as_i64_unchecked(&self) -> &i64 {
         &*(self as *const _ as *const i64).offset(1)
@@ -290,33 +290,28 @@ impl Header {
 }
 
 macro_rules! define_static_numbers {
-    ($($v:expr)*) => {
+    (@recurse $from:ident ($($offset:expr,)*) ()) => {
         [$(Header {
             type_: NumberType::Static,
-            static_: ($v as u8) as i8,
             short: 0,
+            static_: $from + ($offset),
         }),*]
+    };
+    (@recurse $from:ident ($($offset:expr,)*) ($u:literal $($v:literal)*)) => {
+        define_static_numbers!(@recurse $from ($($offset,)* $($offset | (1 << $u),)*) ($($v)*))
+    };
+    ($from:ident $($v:literal)*) => {
+        define_static_numbers!(@recurse $from (0,) ($($v)*))
     };
 }
 
-static STATIC_NUMBERS: [Header; 256] = define_static_numbers!(
-    0x00 0x01 0x02 0x03 0x04 0x05 0x06 0x07 0x08 0x09 0x0a 0x0b 0x0c 0x0d 0x0e 0x0f
-    0x10 0x11 0x12 0x13 0x14 0x15 0x16 0x17 0x18 0x19 0x1a 0x1b 0x1c 0x1d 0x1e 0x1f
-    0x20 0x21 0x22 0x23 0x24 0x25 0x26 0x27 0x28 0x29 0x2a 0x2b 0x2c 0x2d 0x2e 0x2f
-    0x30 0x31 0x32 0x33 0x34 0x35 0x36 0x37 0x38 0x39 0x3a 0x3b 0x3c 0x3d 0x3e 0x3f
-    0x40 0x41 0x42 0x43 0x44 0x45 0x46 0x47 0x48 0x49 0x4a 0x4b 0x4c 0x4d 0x4e 0x4f
-    0x50 0x51 0x52 0x53 0x54 0x55 0x56 0x57 0x58 0x59 0x5a 0x5b 0x5c 0x5d 0x5e 0x5f
-    0x60 0x61 0x62 0x63 0x64 0x65 0x66 0x67 0x68 0x69 0x6a 0x6b 0x6c 0x6d 0x6e 0x6f
-    0x70 0x71 0x72 0x73 0x74 0x75 0x76 0x77 0x78 0x79 0x7a 0x7b 0x7c 0x7d 0x7e 0x7f
-    0x80 0x81 0x82 0x83 0x84 0x85 0x86 0x87 0x88 0x89 0x8a 0x8b 0x8c 0x8d 0x8e 0x8f
-    0x90 0x91 0x92 0x93 0x94 0x95 0x96 0x97 0x98 0x99 0x9a 0x9b 0x9c 0x9d 0x9e 0x9f
-    0xa0 0xa1 0xa2 0xa3 0xa4 0xa5 0xa6 0xa7 0xa8 0xa9 0xaa 0xab 0xac 0xad 0xae 0xaf
-    0xb0 0xb1 0xb2 0xb3 0xb4 0xb5 0xb6 0xb7 0xb8 0xb9 0xba 0xbb 0xbc 0xbd 0xbe 0xbf
-    0xc0 0xc1 0xc2 0xc3 0xc4 0xc5 0xc6 0xc7 0xc8 0xc9 0xca 0xcb 0xcc 0xcd 0xce 0xcf
-    0xd0 0xd1 0xd2 0xd3 0xd4 0xd5 0xd6 0xd7 0xd8 0xd9 0xda 0xdb 0xdc 0xdd 0xde 0xdf
-    0xe0 0xe1 0xe2 0xe3 0xe4 0xe5 0xe6 0xe7 0xe8 0xe9 0xea 0xeb 0xec 0xed 0xee 0xef
-    0xf0 0xf1 0xf2 0xf3 0xf4 0xf5 0xf6 0xf7 0xf8 0xf9 0xfa 0xfb 0xfc 0xfd 0xfe 0xff
-);
+// We want to cover the range -128..256 with static numbers so that arrays of i8 and u8 can be
+// stored reasonably efficiently. In practice, we end up covering -128..384.
+const STATIC_LOWER: i16 = -128;
+const STATIC_LEN: usize = 512;
+const STATIC_UPPER: i16 = STATIC_LOWER + STATIC_LEN as i16;
+static STATIC_NUMBERS: [Header; STATIC_LEN] =
+    define_static_numbers!(STATIC_LOWER 0 1 2 3 4 5 6 7 8);
 
 #[repr(transparent)]
 #[derive(Clone)]
@@ -355,18 +350,19 @@ impl INumber {
     }
 
     pub fn zero() -> Self {
-        Self::new_static(0)
+        // Safety: 0 is in the static range
+        unsafe { Self::new_static(0) }
     }
     pub fn one() -> Self {
-        Self::new_static(1)
+        // Safety: 1 is in the static range
+        unsafe { Self::new_static(1) }
     }
-    fn new_static(value: i8) -> Self {
-        unsafe {
-            INumber(IValue::new_ref(
-                &STATIC_NUMBERS[value as u8 as usize],
-                TypeTag::Number,
-            ))
-        }
+    // Safety: Value must be in the range STATIC_LOWER..STATIC_UPPER
+    unsafe fn new_static(value: i16) -> Self {
+        INumber(IValue::new_ref(
+            &STATIC_NUMBERS[(value - STATIC_LOWER) as usize],
+            TypeTag::Number,
+        ))
     }
     fn new_ptr(type_: NumberType) -> Self {
         unsafe {
@@ -390,11 +386,12 @@ impl INumber {
 
     // Value must fit in an i24
     fn new_short(value: i32) -> Self {
-        if value >= i8::MIN as i32 && value <= i8::MAX as i32 {
-            Self::new_static(value as i8)
+        if value >= STATIC_LOWER as i32 && value < STATIC_UPPER as i32 {
+            // Safety: We checked the value is in the static range
+            unsafe { Self::new_static(value as i16) }
         } else {
-            let lo_bits = value as u32 as u16;
-            let hi_bits = (value >> 16) as i8;
+            let lo_bits = value as u8;
+            let hi_bits = (value >> 8) as i16;
             let mut res = Self::new_ptr(NumberType::I24);
             let hd = res.header_mut();
             hd.short = lo_bits;
@@ -529,7 +526,8 @@ impl From<u16> for INumber {
 }
 impl From<u8> for INumber {
     fn from(v: u8) -> Self {
-        Self::new_short(v as i32)
+        // Safety: All u8s are in the static range
+        unsafe { Self::new_static(v as i16) }
     }
 }
 impl From<usize> for INumber {
@@ -555,7 +553,8 @@ impl From<i16> for INumber {
 }
 impl From<i8> for INumber {
     fn from(v: i8) -> Self {
-        Self::new_static(v)
+        // Safety: All i8s are in the static range
+        unsafe { Self::new_static(v as i16) }
     }
 }
 impl From<isize> for INumber {

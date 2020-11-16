@@ -423,6 +423,17 @@ impl Iterator for IntoIter {
     }
 }
 
+impl ExactSizeIterator for IntoIter {
+    fn len(&self) -> usize {
+        if self.header.is_null() {
+            0
+        } else {
+            // Safety: we set the pointer to null when it's deallocated
+            unsafe { (*self.header).len - self.index }
+        }
+    }
+}
+
 impl Drop for IntoIter {
     fn drop(&mut self) {
         while self.next().is_some() {}
@@ -869,6 +880,12 @@ impl<'a> Iterator for Iter<'a> {
     }
 }
 
+impl<'a> ExactSizeIterator for Iter<'a> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
 pub struct IterMut<'a>(std::slice::IterMut<'a, KeyValuePair>);
 
 impl<'a> Iterator for IterMut<'a> {
@@ -876,6 +893,12 @@ impl<'a> Iterator for IterMut<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next().map(|x| (&x.key, &mut x.value))
+    }
+}
+
+impl<'a> ExactSizeIterator for IterMut<'a> {
+    fn len(&self) -> usize {
+        self.0.len()
     }
 }
 

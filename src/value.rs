@@ -28,6 +28,20 @@ pub enum Destructured {
     Object(IObject),
 }
 
+impl Destructured {
+    pub fn as_ref(&self) -> DestructuredRef {
+        use DestructuredRef::*;
+        match self {
+            Self::Null => Null,
+            Self::Bool(b) => Bool(*b),
+            Self::Number(v) => Number(v),
+            Self::String(v) => String(v),
+            Self::Array(v) => Array(v),
+            Self::Object(v) => Object(v),
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum DestructuredRef<'a> {
     Null,
@@ -703,7 +717,7 @@ impl From<bool> for IValue {
 
 typed_conversions! {
     INumber: i8, u8, i16, u16, i32, u32, i64, u64, isize, usize;
-    IString: String, &str;
+    IString: String, &str, &mut str;
     IArray:
         Vec<T> where (T: Into<IValue>),
         &[T] where (T: Into<IValue> + Clone);

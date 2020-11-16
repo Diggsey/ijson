@@ -92,6 +92,17 @@ impl Iterator for IntoIter {
     }
 }
 
+impl ExactSizeIterator for IntoIter {
+    fn len(&self) -> usize {
+        if self.header.is_null() {
+            0
+        } else {
+            // Safety: we set the pointer to null when it's deallocated
+            unsafe { (*self.header).len - self.index }
+        }
+    }
+}
+
 impl Drop for IntoIter {
     fn drop(&mut self) {
         while self.next().is_some() {}
