@@ -738,6 +738,12 @@ impl From<f64> for IValue {
     }
 }
 
+impl Default for IValue {
+    fn default() -> Self {
+        Self::NULL
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

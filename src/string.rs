@@ -280,6 +280,12 @@ impl PartialEq for IString {
     }
 }
 
+impl Default for IString {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Eq for IString {}
 impl Ord for IString {
     fn cmp(&self, other: &Self) -> Ordering {

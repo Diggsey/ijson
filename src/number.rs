@@ -621,6 +621,12 @@ impl Debug for INumber {
     }
 }
 
+impl Default for INumber {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

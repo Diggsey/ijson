@@ -468,6 +468,12 @@ impl<'a> IntoIterator for &'a mut IArray {
     }
 }
 
+impl Default for IArray {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

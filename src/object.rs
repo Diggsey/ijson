@@ -936,6 +936,12 @@ impl<K: Into<IString>, V: Into<IValue>> From<BTreeMap<K, V>> for IObject {
     }
 }
 
+impl Default for IObject {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
