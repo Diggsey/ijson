@@ -1,5 +1,7 @@
 # ijson
 
+! Warning: This crate is still a work-in-progress !
+
 This crate offers a replacement for `serde-json`'s `Value` type, which is
 significantly more memory efficient.
 
