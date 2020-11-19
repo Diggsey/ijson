@@ -85,37 +85,37 @@ macro_rules! ijson_internal {
     // Next element is `null`.
     (@array $array:ident , null $($rest:tt)*) => {
         $array.push(ijson_internal!(null));
-        ijson_internal!(@array $($rest)*)
+        ijson_internal!(@array $array $($rest)*)
     };
 
     // Next element is `true`.
     (@array $array:ident , true $($rest:tt)*) => {
         $array.push(ijson_internal!(true));
-        ijson_internal!(@array $($rest)*)
+        ijson_internal!(@array $array $($rest)*)
     };
 
     // Next element is `false`.
     (@array $array:ident , false $($rest:tt)*) => {
         $array.push(ijson_internal!(false));
-        ijson_internal!(@array $($rest)*)
+        ijson_internal!(@array $array $($rest)*)
     };
 
     // Next element is an array.
     (@array $array:ident , [$($arr:tt)*] $($rest:tt)*) => {
         $array.push(ijson_internal!([$($arr)*]));
-        ijson_internal!(@array $($rest)*)
+        ijson_internal!(@array $array $($rest)*)
     };
 
     // Next element is an object.
     (@array $array:ident , {$($obj:tt)*} $($rest:tt)*) => {
         $array.push(ijson_internal!({$($obj)*}));
-        ijson_internal!(@array $($rest)*)
+        ijson_internal!(@array $array $($rest)*)
     };
 
     // Next element is an expression followed by comma.
     (@array $array:ident , $next:expr , $($rest:tt)*) => {
         $array.push(ijson_internal!($next));
-        ijson_internal!(@array , $($rest)*)
+        ijson_internal!(@array $array , $($rest)*)
     };
 
     // Last element is an expression with no trailing comma.
@@ -138,7 +138,7 @@ macro_rules! ijson_internal {
 
     // Insert the current entry followed by trailing comma.
     (@object $object:ident [$($key:tt)+] ($value:expr) , $($rest:tt)*) => {
-        let _ = $object.insert(($($key)+).into(), $value);
+        let _ = $object.insert(($($key)+), $value);
         ijson_internal!(@object $object () ($($rest)*) ($($rest)*));
     };
 
@@ -149,7 +149,7 @@ macro_rules! ijson_internal {
 
     // Insert the last entry without trailing comma.
     (@object $object:ident [$($key:tt)+] ($value:expr)) => {
-        let _ = $object.insert(($($key)+).into(), $value);
+        let _ = $object.insert(($($key)+), $value);
     };
 
     // Next value is `null`.

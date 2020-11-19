@@ -15,19 +15,27 @@ use super::value::{IValue, TypeTag};
 #[repr(C)]
 #[repr(align(4))]
 struct Header {
-    len: usize,
-    shard_index: usize,
     rc: AtomicUsize,
+    // We use 48 bits for the length and 16 bits for the shard index.
+    len_lower: u32,
+    len_upper: u16,
+    shard_index: u16,
 }
 
 impl Header {
+    fn len(&self) -> usize {
+        ((self.len_lower as u64) | ((self.len_upper as u64) << 32)) as usize
+    }
+    fn shard_index(&self) -> usize {
+        self.shard_index as usize
+    }
     fn as_ptr(&self) -> *const u8 {
         // Safety: pointers to the end of structs are allowed
         unsafe { (self as *const Header).offset(1) as *const u8 }
     }
     fn as_bytes(&self) -> &[u8] {
         // Safety: Header `len` must be accurate
-        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len) }
+        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len()) }
     }
     fn as_str(&self) -> &str {
         // Safety: UTF-8 enforced on construction
@@ -37,6 +45,19 @@ impl Header {
 
 lazy_static! {
     static ref STRING_CACHE: DashSet<WeakIString> = DashSet::new();
+}
+
+// Eagerly initialize the string cache during tests or when the
+// `ctor` feature is enabled.
+#[cfg(any(test, feature = "ctor"))]
+#[ctor::ctor]
+fn ctor_init_string_cache() {
+    lazy_static::initialize(&STRING_CACHE);
+}
+
+#[doc(hidden)]
+pub fn init_string_cache() {
+    lazy_static::initialize(&STRING_CACHE);
 }
 
 struct WeakIString {
@@ -88,7 +109,8 @@ pub struct IString(pub(crate) IValue);
 value_subtype_impls!(IString, into_string, as_string, as_string_mut);
 
 static EMPTY_HEADER: Header = Header {
-    len: 0,
+    len_lower: 0,
+    len_upper: 0,
     shard_index: 0,
     rc: AtomicUsize::new(0),
 };
@@ -102,10 +124,13 @@ impl IString {
     }
 
     fn alloc(s: &str, shard_index: usize) -> *mut Header {
+        assert!((s.len() as u64) < (1 << 48));
+        assert!(shard_index < (1 << 16));
         unsafe {
             let ptr = alloc(Self::layout(s.len()).unwrap()) as *mut Header;
-            (*ptr).len = s.len();
-            (*ptr).shard_index = shard_index;
+            (*ptr).len_lower = s.len() as u32;
+            (*ptr).len_upper = ((s.len() as u64) >> 32) as u16;
+            (*ptr).shard_index = shard_index as u16;
             (*ptr).rc = AtomicUsize::new(0);
             copy_nonoverlapping(s.as_ptr(), (*ptr).as_ptr() as *mut u8, s.len());
             ptr
@@ -114,7 +139,7 @@ impl IString {
 
     fn dealloc(ptr: *mut Header) {
         unsafe {
-            let layout = Self::layout((*ptr).len).unwrap();
+            let layout = Self::layout((*ptr).len()).unwrap();
             dealloc(ptr as *mut u8, layout);
         }
     }
@@ -145,7 +170,7 @@ impl IString {
     }
 
     pub fn len(&self) -> usize {
-        self.header().len
+        self.header().len()
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -191,11 +216,19 @@ impl IString {
             // Slow path: we observed a reference count of 1, so we need to lock the string cache
             let cache = &*STRING_CACHE;
             // Safety: the number of shards is fixed
-            let shard = unsafe { cache.shards().get_unchecked(hd.shard_index) };
+            let shard = unsafe { cache.shards().get_unchecked(hd.shard_index()) };
             let mut guard = shard.write();
             if hd.rc.fetch_sub(1, AtomicOrdering::Relaxed) == 1 {
                 // Reference count reached zero, free the string
-                guard.remove(hd.as_str());
+                assert!(guard.remove(hd.as_str()).is_some());
+
+                // Shrink the shard if it's mostly empty.
+                // The second condition is necessary because `HashMap` sometimes
+                // reports a capacity of zero even when it's still backed by an
+                // allocation.
+                if guard.len() * 3 < guard.capacity() || guard.is_empty() {
+                    guard.shrink_to_fit();
+                }
                 drop(guard);
 
                 Self::dealloc(hd as *const _ as *mut _);
@@ -271,5 +304,22 @@ impl Hash for IString {
 impl Debug for IString {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Debug::fmt(self.as_str(), f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[mockalloc::test]
+    fn can_intern() {
+        let x = IString::intern("foo");
+        let y = IString::intern("bar");
+        let z = IString::intern("foo");
+
+        assert_eq!(x.as_ptr(), z.as_ptr());
+        assert_ne!(x.as_ptr(), y.as_ptr());
+        assert_eq!(x.as_str(), "foo");
+        assert_eq!(y.as_str(), "bar");
     }
 }

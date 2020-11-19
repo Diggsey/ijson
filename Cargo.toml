@@ -5,12 +5,16 @@ authors = ["Diggory Blake <diggsey@googlemail.com>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+tracing = ["mockalloc/tracing"]
 
 [dependencies]
 dashmap = { version = "3.11.10", features = ["raw-api"] }
 lazy_static = "1.4.0"
 serde = "1.0.117"
 serde_json = "1.0.59"
+ctor = { version = "0.1.16", optional = true }
 
 [dev-dependencies]
-mockalloc = "0.1.1"
+mockalloc = "0.1.2"
+ctor = "0.1.16"

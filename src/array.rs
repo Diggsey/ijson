@@ -211,7 +211,7 @@ impl IArray {
         if current_capacity >= desired_capacity {
             return;
         }
-        self.resize_internal(cmp::max(current_capacity * 2, desired_capacity));
+        self.resize_internal(cmp::max(current_capacity * 2, desired_capacity.max(4)));
     }
     pub fn truncate(&mut self, len: usize) {
         if self.is_static() {

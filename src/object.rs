@@ -532,7 +532,7 @@ impl IObject {
         if current_capacity >= desired_capacity {
             return;
         }
-        self.resize_internal(cmp::max(current_capacity * 2, desired_capacity));
+        self.resize_internal(cmp::max(current_capacity * 2, desired_capacity.max(4)));
     }
 
     pub fn entry(&mut self, key: impl Into<IString>) -> Entry {
@@ -1001,14 +1001,14 @@ mod tests {
         ];
         let mut y: IObject = x.into_iter().collect();
         assert_eq!(y.len(), 3);
-        assert_eq!(y.capacity(), 3);
+        assert_eq!(y.capacity(), 4);
 
         assert_eq!(y.remove("b"), Some(IValue::TRUE));
         assert_eq!(y.remove("b"), None);
         assert_eq!(y.remove("d"), None);
 
         assert_eq!(y.len(), 2);
-        assert_eq!(y.capacity(), 3);
+        assert_eq!(y.capacity(), 4);
         assert_eq!(y["a"], IValue::NULL);
         assert_eq!(y["c"], IValue::FALSE);
 

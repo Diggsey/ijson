@@ -737,3 +737,32 @@ impl From<f64> for IValue {
         INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[mockalloc::test]
+    fn can_use_literal() {
+        let x: IValue = ijson!({
+            "foo": "bar",
+            "x": [],
+            "y": ["hi", "there", 1, 2, null, false, true, 63.5],
+            "z": [false, {
+                "a": null
+            }, {}]
+        });
+        let y: IValue = serde_json::from_str(
+            r#"{
+                "foo": "bar",
+                "x": [],
+                "y": ["hi", "there", 1, 2, null, false, true, 63.5],
+                "z": [false, {
+                    "a": null
+                }, {}]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(x, y);
+    }
+}
