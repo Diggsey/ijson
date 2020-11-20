@@ -70,7 +70,7 @@ impl<'a> SplitHeader<'a> {
 
                 // If the bucket contains a different key, and its probe length is less than
                 // ours, then we know our key is not present or we would have evicted this one.
-                let key_dist = (hash_bucket(k, hash_cap) + hash_cap - bucket) % hash_cap;
+                let key_dist = (bucket + hash_cap - hash_bucket(k, hash_cap)) % hash_cap;
                 if key_dist < i {
                     return Err(bucket);
                 }
@@ -109,6 +109,9 @@ impl<'a> SplitHeaderMut<'a> {
             table: self.table,
         }
     }
+    // Safety: Bucket must be valid and empty.
+    //
+    // Shifts elements up to fill the empty space if they are not at their ideal location.
     unsafe fn unshift(&mut self, initial_bucket: usize) {
         let hash_cap = hash_capacity(*self.cap);
         let mut prev_bucket = initial_bucket;
@@ -123,8 +126,7 @@ impl<'a> SplitHeaderMut<'a> {
 
             // If the probe length is zero, we're done
             let k = &self.items.get_unchecked(index).key;
-            let key_dist = (hash_bucket(k, hash_cap) + hash_cap - bucket) % hash_cap;
-            if key_dist == 0 {
+            if hash_bucket(k, hash_cap) == bucket {
                 return;
             }
 
@@ -135,6 +137,9 @@ impl<'a> SplitHeaderMut<'a> {
     }
     // Safety: item with this index must have just been pushed, and the bucket
     // index must be correct.
+    //
+    // Inserts an index into the table, shifting existing elements down until
+    // there's an empty slot.
     unsafe fn shift(&mut self, initial_bucket: usize, mut index: usize) {
         let hash_cap = hash_capacity(*self.cap);
         for i in 0..hash_cap {
@@ -559,7 +564,7 @@ impl IObject {
     }
     pub fn iter_mut(&mut self) -> IterMut {
         IterMut(
-            if self.is_static() {
+            if self.is_empty() {
                 &mut []
             } else {
                 // Safety: not static
@@ -569,7 +574,7 @@ impl IObject {
         )
     }
     pub fn clear(&mut self) {
-        if !self.is_static() {
+        if !self.is_empty() {
             // Safety: not static
             unsafe {
                 self.header_mut().clear();
@@ -587,6 +592,9 @@ impl IObject {
     }
     pub fn get_mut(&mut self, k: impl ObjectIndex) -> Option<&mut IValue> {
         self.get_key_value_mut(k).map(|x| x.1)
+    }
+    pub fn contains_key(&self, k: impl ObjectIndex) -> bool {
+        self.get(k).is_some()
     }
     pub fn insert(&mut self, k: impl Into<IString>, v: impl Into<IValue>) -> Option<IValue> {
         match self.entry(k) {
@@ -607,7 +615,7 @@ impl IObject {
         self.resize_internal(self.len());
     }
     pub fn retain(&mut self, mut f: impl FnMut(&IString, &mut IValue) -> bool) {
-        if self.is_static() {
+        if self.is_empty() {
             return;
         } else {
             // Safety: not static
@@ -655,7 +663,7 @@ impl IntoIterator for IObject {
     type IntoIter = IntoIter;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        if self.is_static() {
+        if self.is_empty() {
             IntoIter {
                 header: std::ptr::null_mut(),
                 index: 0,
@@ -790,6 +798,9 @@ impl ObjectIndex for &str {
 
 impl ObjectIndex for &IString {
     fn index_into(self, v: &IObject) -> Option<(&IString, &IValue)> {
+        if v.is_empty() {
+            return None;
+        }
         let hd = v.header().split();
         if let Ok(bucket) = hd.find_bucket(self) {
             // Safety: Bucket index is valid
@@ -804,7 +815,7 @@ impl ObjectIndex for &IString {
     }
 
     fn index_into_mut(self, v: &mut IObject) -> Option<(&IString, &mut IValue)> {
-        if v.is_static() {
+        if v.is_empty() {
             return None;
         } else {
             // Safety: not static
@@ -827,7 +838,7 @@ impl ObjectIndex for &IString {
     }
 
     fn remove(self, v: &mut IObject) -> Option<(IString, IValue)> {
-        if v.is_static() {
+        if v.is_empty() {
             return None;
         } else {
             // Safety: not static
@@ -945,6 +956,7 @@ impl Default for IObject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::prelude::*;
 
     #[mockalloc::test]
     fn can_create() {
@@ -1023,5 +1035,27 @@ mod tests {
         assert_eq!(y.capacity(), 2);
         assert_eq!(y["a"], IValue::NULL);
         assert_eq!(y["c"], IValue::FALSE);
+    }
+
+    #[mockalloc::test]
+    fn stress_test() {
+        for i in 0..10 {
+            // We want our test to be random but for errors to be reproducible
+            let mut rng = StdRng::seed_from_u64(i);
+            let range = 0..10000;
+            let mut ops: Vec<i32> = range.clone().chain(range).collect();
+            ops.shuffle(&mut rng);
+
+            let mut x = IObject::new();
+            for op in ops {
+                let k = IString::intern(&op.to_string());
+                if x.contains_key(&k) {
+                    x.remove(&k);
+                } else {
+                    x.insert(k, op);
+                }
+            }
+            assert_eq!(x, IObject::new());
+        }
     }
 }
