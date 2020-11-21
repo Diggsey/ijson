@@ -30,14 +30,15 @@ impl Header {
         // Safety: Header `len` must be accurate
         unsafe { std::slice::from_raw_parts_mut(self.as_ptr() as *mut _, self.len) }
     }
-    fn as_mut_uninit_slice(&self) -> &mut [MaybeUninit<IValue>] {
+    fn as_mut_uninit_slice(&mut self) -> &mut [MaybeUninit<IValue>] {
         // Safety: Header `len` must be accurate
         unsafe { std::slice::from_raw_parts_mut(self.as_ptr() as *mut _, self.cap) }
     }
     // Safety: Space must already be allocated for the item
     unsafe fn push(&mut self, item: IValue) {
+        let index = self.len;
         self.as_mut_uninit_slice()
-            .get_unchecked_mut(self.len)
+            .get_unchecked_mut(index)
             .as_mut_ptr()
             .write(item);
         self.len += 1;
@@ -47,12 +48,13 @@ impl Header {
             None
         } else {
             self.len -= 1;
+            let index = self.len;
 
             // Safety: We just checked that an item exists
             unsafe {
                 Some(
                     self.as_mut_uninit_slice()
-                        .get_unchecked_mut(self.len)
+                        .get_unchecked_mut(index)
                         .as_mut_ptr()
                         .read(),
                 )

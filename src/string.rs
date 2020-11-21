@@ -31,7 +31,7 @@ impl Header {
     }
     fn as_ptr(&self) -> *const u8 {
         // Safety: pointers to the end of structs are allowed
-        unsafe { (self as *const Header).offset(1) as *const u8 }
+        unsafe { (self as *const Header).add(1) as *const u8 }
     }
     fn as_bytes(&self) -> &[u8] {
         // Safety: Header `len` must be accurate
@@ -68,7 +68,7 @@ unsafe impl Send for WeakIString {}
 unsafe impl Sync for WeakIString {}
 impl PartialEq for WeakIString {
     fn eq(&self, other: &Self) -> bool {
-        &**self == &**other
+        **self == **other
     }
 }
 impl Eq for WeakIString {}

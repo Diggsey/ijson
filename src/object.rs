@@ -180,15 +180,15 @@ impl<'a> SplitHeaderMut<'a> {
 impl Header {
     fn as_item_ptr(&self) -> *const KeyValuePair {
         // Safety: pointers to the end of structs are allowed
-        unsafe { (self as *const Header).offset(1) as *const KeyValuePair }
+        unsafe { (self as *const Header).add(1) as *const KeyValuePair }
     }
     fn as_hash_ptr(&self) -> *const usize {
         // Safety: pointers to the end of structs are allowed
-        unsafe { self.as_item_ptr().offset(self.cap as isize) as *const usize }
+        unsafe { self.as_item_ptr().add(self.cap) as *const usize }
     }
     // Safety: len < cap
     unsafe fn end_item_mut(&mut self) -> &mut MaybeUninit<KeyValuePair> {
-        &mut *(self.as_item_ptr().offset(self.len as isize) as *mut MaybeUninit<KeyValuePair>)
+        &mut *(self.as_item_ptr().add(self.len) as *mut MaybeUninit<KeyValuePair>)
     }
     fn split(&self) -> SplitHeader {
         // Safety: Header `len` and `cap` must be accurate
@@ -615,9 +615,7 @@ impl IObject {
         self.resize_internal(self.len());
     }
     pub fn retain(&mut self, mut f: impl FnMut(&IString, &mut IValue) -> bool) {
-        if self.is_empty() {
-            return;
-        } else {
+        if !self.is_empty() {
             // Safety: not static
             let hd = unsafe { self.header_mut() };
             let mut index = 0;
@@ -816,7 +814,7 @@ impl ObjectIndex for &IString {
 
     fn index_into_mut(self, v: &mut IObject) -> Option<(&IString, &mut IValue)> {
         if v.is_empty() {
-            return None;
+            None
         } else {
             // Safety: not static
             let hd = unsafe { v.header_mut().split_mut() };
@@ -833,13 +831,13 @@ impl ObjectIndex for &IString {
         }
     }
 
-    fn index_or_insert<'v>(self, v: &'v mut IObject) -> &'v mut IValue {
+    fn index_or_insert(self, v: &mut IObject) -> &mut IValue {
         v.entry_or_clone(self).or_insert(IValue::NULL)
     }
 
     fn remove(self, v: &mut IObject) -> Option<(IString, IValue)> {
         if v.is_empty() {
-            return None;
+            None
         } else {
             // Safety: not static
             let hd = unsafe { v.header_mut() };
@@ -956,7 +954,6 @@ impl Default for IObject {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::prelude::*;
 
     #[mockalloc::test]
     fn can_create() {
@@ -1037,8 +1034,12 @@ mod tests {
         assert_eq!(y["c"], IValue::FALSE);
     }
 
+    // Too slow for miri
+    #[cfg(not(miri))]
     #[mockalloc::test]
     fn stress_test() {
+        use rand::prelude::*;
+
         for i in 0..10 {
             // We want our test to be random but for errors to be reproducible
             let mut rng = StdRng::seed_from_u64(i);

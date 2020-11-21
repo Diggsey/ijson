@@ -129,7 +129,7 @@ impl IValue {
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
     pub(crate) unsafe fn new_ptr(p: *mut u8, tag: TypeTag) -> Self {
         Self {
-            ptr: NonNull::new_unchecked(p.offset(tag as isize)),
+            ptr: NonNull::new_unchecked(p.add(tag as usize)),
         }
     }
     // Safety: Reference must be aligned to at least ALIGNMENT
@@ -152,7 +152,7 @@ impl IValue {
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
     pub(crate) unsafe fn set_ptr(&mut self, ptr: *mut u8) {
         let tag = self.type_tag();
-        self.ptr = NonNull::new_unchecked(ptr.offset(tag as isize));
+        self.ptr = NonNull::new_unchecked(ptr.add(tag as usize));
     }
     // Safety: Reference must be aligned to at least ALIGNMENT
     pub(crate) unsafe fn set_ref<T>(&mut self, r: &T) {
@@ -254,6 +254,16 @@ impl IValue {
         }
     }
 
+    pub fn is_empty(&self) -> Option<bool> {
+        match self.type_() {
+            // Safety: checked type
+            ValueType::Array => Some(unsafe { self.as_array_unchecked().is_empty() }),
+            // Safety: checked type
+            ValueType::Object => Some(unsafe { self.as_object_unchecked().is_empty() }),
+            _ => None,
+        }
+    }
+
     // # Null methods
     pub fn is_null(&self) -> bool {
         self.ptr == Self::NULL.ptr
@@ -285,14 +295,22 @@ impl IValue {
         self.type_tag() == TypeTag::Number
     }
 
+    unsafe fn unchecked_cast_ref<T>(&self) -> &T {
+        &*(self as *const Self as *const T)
+    }
+
+    unsafe fn unchecked_cast_mut<T>(&mut self) -> &mut T {
+        &mut *(self as *mut Self as *mut T)
+    }
+
     // Safety: Must be a string
     unsafe fn as_number_unchecked(&self) -> &INumber {
-        mem::transmute(self)
+        self.unchecked_cast_ref()
     }
 
     // Safety: Must be a string
     unsafe fn as_number_unchecked_mut(&mut self) -> &mut INumber {
-        mem::transmute(self)
+        self.unchecked_cast_mut()
     }
 
     pub fn as_number(&self) -> Option<&INumber> {
@@ -355,12 +373,12 @@ impl IValue {
 
     // Safety: Must be a string
     unsafe fn as_string_unchecked(&self) -> &IString {
-        mem::transmute(self)
+        self.unchecked_cast_ref()
     }
 
     // Safety: Must be a string
     unsafe fn as_string_unchecked_mut(&mut self) -> &mut IString {
-        mem::transmute(self)
+        self.unchecked_cast_mut()
     }
 
     pub fn as_string(&self) -> Option<&IString> {
@@ -396,12 +414,12 @@ impl IValue {
 
     // Safety: Must be an array
     unsafe fn as_array_unchecked(&self) -> &IArray {
-        mem::transmute(self)
+        self.unchecked_cast_ref()
     }
 
     // Safety: Must be an array
     unsafe fn as_array_unchecked_mut(&mut self) -> &mut IArray {
-        mem::transmute(self)
+        self.unchecked_cast_mut()
     }
 
     pub fn as_array(&self) -> Option<&IArray> {
@@ -437,12 +455,12 @@ impl IValue {
 
     // Safety: Must be an array
     unsafe fn as_object_unchecked(&self) -> &IObject {
-        mem::transmute(self)
+        self.unchecked_cast_ref()
     }
 
     // Safety: Must be an array
     unsafe fn as_object_unchecked_mut(&mut self) -> &mut IObject {
-        mem::transmute(self)
+        self.unchecked_cast_mut()
     }
 
     pub fn as_object(&self) -> Option<&IObject> {
@@ -555,7 +573,7 @@ impl PartialOrd for IValue {
                     ValueType::Array => self
                         .as_array_unchecked()
                         .partial_cmp(other.as_array_unchecked()),
-                    ValueType::Object => return None,
+                    ValueType::Object => None,
                 }
             }
         } else {

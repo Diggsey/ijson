@@ -441,7 +441,6 @@ impl<'de> Deserializer<'de> for &'de IValue {
     where
         V: Visitor<'de>,
     {
-        drop(self);
         visitor.visit_unit()
     }
 }

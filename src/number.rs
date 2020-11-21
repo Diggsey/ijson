@@ -1,3 +1,5 @@
+#![allow(clippy::float_cmp)]
+
 use std::alloc::{alloc, dealloc, Layout, LayoutErr};
 use std::cmp::Ordering;
 use std::convert::{TryFrom, TryInto};
@@ -98,12 +100,11 @@ impl Header {
                 }
                 NumberType::F64 => {
                     let v = *self.as_f64_unchecked();
-                    if v.fract() == 0.0 {
-                        if v > i64::MIN as f64 && v < i64::MAX as f64 {
-                            return Some(v as i64);
-                        }
+                    if v.fract() == 0.0 && v > i64::MIN as f64 && v < i64::MAX as f64 {
+                        Some(v as i64)
+                    } else {
+                        None
                     }
-                    None
                 }
             }
         }
@@ -138,12 +139,11 @@ impl Header {
                 NumberType::U64 => Some(*self.as_u64_unchecked()),
                 NumberType::F64 => {
                     let v = *self.as_f64_unchecked();
-                    if v.fract() == 0.0 {
-                        if v > 0.0 && v < u64::MAX as f64 {
-                            return Some(v as u64);
-                        }
+                    if v.fract() == 0.0 && v > 0.0 && v < u64::MAX as f64 {
+                        Some(v as u64)
+                    } else {
+                        None
                     }
-                    None
                 }
             }
         }
