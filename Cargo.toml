@@ -1,12 +1,12 @@
 [package]
 name = "ijson"
-version = "0.0.1"
+version = "0.1.0"
 authors = ["Diggory Blake <diggsey@googlemail.com>"]
 edition = "2018"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Diggsey/ijson"
-description = "A more memory efficient replacement for serde_json::Value (work-in-progress)"
+description = "A more memory efficient replacement for serde_json::Value"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]

@@ -8,6 +8,15 @@
 //! The primary type exposed by this crate is the [`IValue`] type. It is guaranteed
 //! to be pointer-sized and has a niche (so `Option<IValue>` is also guaranteed
 //! to be pointer-sized).
+//!
+//! Cargo features:
+//!
+//! - `ctor`
+//!   A global string cache is used when interning strings. This cache is normally
+//!   initialized lazily on first use. Enabling the `ctor` feature will cause it
+//!   to be eagerly initialized on startup.
+//!   There is no performance benefit to this, but it can help avoid false positives
+//!   from tools like `mockalloc` which try to detect memory leaks during tests.
 #![deny(missing_docs, missing_debug_implementations)]
 
 #[macro_use]
