@@ -66,22 +66,22 @@ impl Header {
         ((self.static_ as i32) << 8) | (self.short as i32)
     }
     unsafe fn as_i64_unchecked(&self) -> &i64 {
-        &*(self as *const _ as *const i64).offset(1)
+        &*(self as *const _ as *const i64).add(1)
     }
     unsafe fn as_u64_unchecked(&self) -> &u64 {
-        &*(self as *const _ as *const u64).offset(1)
+        &*(self as *const _ as *const u64).add(1)
     }
     unsafe fn as_f64_unchecked(&self) -> &f64 {
-        &*(self as *const _ as *const f64).offset(1)
+        &*(self as *const _ as *const f64).add(1)
     }
     unsafe fn as_i64_unchecked_mut(&mut self) -> &mut i64 {
-        &mut *(self as *mut _ as *mut i64).offset(1)
+        &mut *(self as *mut _ as *mut i64).add(1)
     }
     unsafe fn as_u64_unchecked_mut(&mut self) -> &mut u64 {
-        &mut *(self as *mut _ as *mut u64).offset(1)
+        &mut *(self as *mut _ as *mut u64).add(1)
     }
     unsafe fn as_f64_unchecked_mut(&mut self) -> &mut f64 {
-        &mut *(self as *mut _ as *mut f64).offset(1)
+        &mut *(self as *mut _ as *mut f64).add(1)
     }
     fn to_i64(&self) -> Option<i64> {
         // Safety: We only call methods appropriate for the type
