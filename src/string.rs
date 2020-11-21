@@ -293,6 +293,18 @@ impl From<String> for IString {
     }
 }
 
+impl From<&String> for IString {
+    fn from(other: &String) -> Self {
+        Self::intern(other.as_str())
+    }
+}
+
+impl From<&mut String> for IString {
+    fn from(other: &mut String) -> Self {
+        Self::intern(other.as_str())
+    }
+}
+
 impl From<IString> for String {
     fn from(other: IString) -> Self {
         other.as_str().into()
@@ -302,6 +314,30 @@ impl From<IString> for String {
 impl PartialEq for IString {
     fn eq(&self, other: &Self) -> bool {
         self.0.raw_eq(&other.0)
+    }
+}
+
+impl PartialEq<str> for IString {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<IString> for str {
+    fn eq(&self, other: &IString) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl PartialEq<String> for IString {
+    fn eq(&self, other: &String) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<IString> for String {
+    fn eq(&self, other: &IString) -> bool {
+        self == other.as_str()
     }
 }
 

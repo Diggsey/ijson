@@ -621,4 +621,26 @@ mod tests {
         assert_eq!(x.len(), 2);
         assert_eq!(x.capacity(), 2);
     }
+
+    // Too slow for miri
+    #[cfg(not(miri))]
+    #[mockalloc::test]
+    fn stress_test() {
+        use rand::prelude::*;
+
+        for i in 0..10 {
+            // We want our test to be random but for errors to be reproducible
+            let mut rng = StdRng::seed_from_u64(i);
+            let mut arr = IArray::new();
+
+            for j in 0..1000 {
+                let index = rng.gen_range(0, arr.len() + 1);
+                if rng.gen() {
+                    arr.insert(index, j);
+                } else {
+                    arr.remove(index);
+                }
+            }
+        }
+    }
 }

@@ -469,25 +469,37 @@ impl IValue {
         }
     }
 
-    /// Converts this value to an i64 if it is a number that can be represented exactly
+    /// Converts this value to an i64 if it is a number that can be represented exactly.
     pub fn to_i64(&self) -> Option<i64> {
         self.as_number()?.to_i64()
     }
-    /// Converts this value to a u64 if it is a number that can be represented exactly
+    /// Converts this value to a u64 if it is a number that can be represented exactly.
     pub fn to_u64(&self) -> Option<u64> {
         self.as_number()?.to_u64()
     }
-    /// Converts this value to an f64 if it is a number that can be represented exactly
+    /// Converts this value to an f64 if it is a number that can be represented exactly.
     pub fn to_f64(&self) -> Option<f64> {
         self.as_number()?.to_f64()
     }
-    /// Converts this value to an f32 if it is a number that can be represented exactly
+    /// Converts this value to an f32 if it is a number that can be represented exactly.
     pub fn to_f32(&self) -> Option<f32> {
         self.as_number()?.to_f32()
     }
-    /// Converts this value to an i32 if it is a number that can be represented exactly
+    /// Converts this value to an i32 if it is a number that can be represented exactly.
     pub fn to_i32(&self) -> Option<i32> {
         self.as_number()?.to_i32()
+    }
+    /// Converts this value to a u32 if it is a number that can be represented exactly.
+    pub fn to_u32(&self) -> Option<u32> {
+        self.as_number()?.to_u32()
+    }
+    /// Converts this value to an isize if it is a number that can be represented exactly.
+    pub fn to_isize(&self) -> Option<isize> {
+        self.as_number()?.to_isize()
+    }
+    /// Converts this value to a usize if it is a number that can be represented exactly.
+    pub fn to_usize(&self) -> Option<usize> {
+        self.as_number()?.to_usize()
     }
     /// Converts this value to an f64 if it is a number, potentially losing precision
     /// in the process.
@@ -892,7 +904,7 @@ impl From<bool> for IValue {
 
 typed_conversions! {
     INumber: i8, u8, i16, u16, i32, u32, i64, u64, isize, usize;
-    IString: String, &str, &mut str;
+    IString: String, &String, &mut String, &str, &mut str;
     IArray:
         Vec<T> where (T: Into<IValue>),
         &[T] where (T: Into<IValue> + Clone);
@@ -945,5 +957,105 @@ mod tests {
         )
         .unwrap();
         assert_eq!(x, y);
+    }
+
+    #[test]
+    fn test_null() {
+        let x: IValue = IValue::NULL;
+        assert!(x.is_null());
+        assert_eq!(x.type_(), ValueType::Null);
+        assert!(matches!(x.clone().destructure(), Destructured::Null));
+        assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Null));
+        assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Null));
+    }
+
+    #[test]
+    fn test_bool() {
+        for v in [true, false].iter().copied() {
+            let mut x = IValue::from(v);
+            assert!(x.is_bool());
+            assert_eq!(x.type_(), ValueType::Bool);
+            assert_eq!(x.to_bool(), Some(v));
+            assert!(matches!(x.clone().destructure(), Destructured::Bool(u) if u == v));
+            assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Bool(u) if u == v));
+            assert!(
+                matches!(x.clone().destructure_mut(), DestructuredMut::Bool(u) if u.get() == v)
+            );
+
+            if let DestructuredMut::Bool(mut b) = x.destructure_mut() {
+                b.set(!v);
+            }
+
+            assert_eq!(x.to_bool(), Some(!v));
+        }
+    }
+
+    #[mockalloc::test]
+    fn test_number() {
+        for v in 300..400 {
+            let mut x = IValue::from(v);
+            assert!(x.is_number());
+            assert_eq!(x.type_(), ValueType::Number);
+            assert_eq!(x.to_i32(), Some(v));
+            assert_eq!(x.to_u32(), Some(v as u32));
+            assert_eq!(x.to_i64(), Some(v as i64));
+            assert_eq!(x.to_u64(), Some(v as u64));
+            assert_eq!(x.to_isize(), Some(v as isize));
+            assert_eq!(x.to_usize(), Some(v as usize));
+            assert_eq!(x.as_number(), Some(&v.into()));
+            assert_eq!(x.as_number_mut(), Some(&mut v.into()));
+            assert!(matches!(x.clone().destructure(), Destructured::Number(u) if u == v.into()));
+            assert!(
+                matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == v.into())
+            );
+            assert!(
+                matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == v.into())
+            );
+        }
+    }
+
+    #[mockalloc::test]
+    fn test_string() {
+        for v in 0..10 {
+            let s = v.to_string();
+            let mut x = IValue::from(&s);
+            assert!(x.is_string());
+            assert_eq!(x.type_(), ValueType::String);
+            assert_eq!(x.as_string(), Some(&IString::intern(&s)));
+            assert_eq!(x.as_string_mut(), Some(&mut IString::intern(&s)));
+            assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
+            assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
+            assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
+        }
+    }
+
+    #[mockalloc::test]
+    fn test_array() {
+        for v in 0..10 {
+            let mut a: IArray = (0..v).collect();
+            let mut x = IValue::from(a.clone());
+            assert!(x.is_array());
+            assert_eq!(x.type_(), ValueType::Array);
+            assert_eq!(x.as_array(), Some(&a));
+            assert_eq!(x.as_array_mut(), Some(&mut a));
+            assert!(matches!(x.clone().destructure(), Destructured::Array(u) if u == a));
+            assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Array(u) if *u == a));
+            assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Array(u) if *u == a));
+        }
+    }
+
+    #[mockalloc::test]
+    fn test_object() {
+        for v in 0..10 {
+            let mut o: IObject = (0..v).map(|i| (i.to_string(), i)).collect();
+            let mut x = IValue::from(o.clone());
+            assert!(x.is_object());
+            assert_eq!(x.type_(), ValueType::Object);
+            assert_eq!(x.as_object(), Some(&o));
+            assert_eq!(x.as_object_mut(), Some(&mut o));
+            assert!(matches!(x.clone().destructure(), Destructured::Object(u) if u == o));
+            assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Object(u) if *u == o));
+            assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Object(u) if *u == o));
+        }
     }
 }

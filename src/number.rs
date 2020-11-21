@@ -482,25 +482,37 @@ impl INumber {
         }
     }
 
-    /// Converts this number to an i64 if it can be represented exactly
+    /// Converts this number to an i64 if it can be represented exactly.
     pub fn to_i64(&self) -> Option<i64> {
         self.header().to_i64()
     }
-    /// Converts this number to an f64 if it can be represented exactly
+    /// Converts this number to an f64 if it can be represented exactly.
     pub fn to_u64(&self) -> Option<u64> {
         self.header().to_u64()
     }
-    /// Converts this number to an f64 if it can be represented exactly
+    /// Converts this number to an f64 if it can be represented exactly.
     pub fn to_f64(&self) -> Option<f64> {
         self.header().to_f64()
     }
-    /// Converts this number to an f32 if it can be represented exactly
+    /// Converts this number to an f32 if it can be represented exactly.
     pub fn to_f32(&self) -> Option<f32> {
         self.header().to_f32()
     }
-    /// Converts this number to an i32 if it can be represented exactly
+    /// Converts this number to an i32 if it can be represented exactly.
     pub fn to_i32(&self) -> Option<i32> {
         self.header().to_i64().and_then(|x| x.try_into().ok())
+    }
+    /// Converts this number to a u32 if it can be represented exactly.
+    pub fn to_u32(&self) -> Option<u32> {
+        self.header().to_u64().and_then(|x| x.try_into().ok())
+    }
+    /// Converts this number to an isize if it can be represented exactly.
+    pub fn to_isize(&self) -> Option<isize> {
+        self.header().to_i64().and_then(|x| x.try_into().ok())
+    }
+    /// Converts this number to a usize if it can be represented exactly.
+    pub fn to_usize(&self) -> Option<usize> {
+        self.header().to_u64().and_then(|x| x.try_into().ok())
     }
     /// Converts this number to an f64, potentially losing precision in the process.
     pub fn to_f64_lossy(&self) -> f64 {
