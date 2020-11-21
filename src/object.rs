@@ -1,3 +1,5 @@
+//! Functionality relating to the JSON object type
+
 use std::alloc::{alloc, dealloc, Layout, LayoutErr};
 use std::cmp::{self, Ordering};
 use std::collections::hash_map::DefaultHasher;
@@ -19,6 +21,7 @@ struct Header {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 struct KeyValuePair {
     key: IString,
     value: IValue,
@@ -280,9 +283,19 @@ impl Header {
     }
 }
 
+/// A view into an occupied entry in an [`IObject`]. It is part of the [`Entry`] enum.
 pub struct OccupiedEntry<'a> {
     header: &'a mut Header,
     bucket: usize,
+}
+
+impl<'a> Debug for OccupiedEntry<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OccupiedEntry")
+            .field("key", self.key())
+            .field("value", &self.get())
+            .finish()
+    }
 }
 
 impl<'a> OccupiedEntry<'a> {
@@ -313,9 +326,12 @@ impl<'a> OccupiedEntry<'a> {
             (&kvp.key, &mut kvp.value)
         }
     }
+    /// Returns a reference to the key at this entry
     pub fn key(&self) -> &IString {
         self.get_key_value().0
     }
+
+    /// Removes and returns the entry as a (key, value) pair.
     pub fn remove_entry(self) -> (IString, IValue) {
         // Safety: Bucket is known to be correct
         unsafe {
@@ -323,36 +339,57 @@ impl<'a> OccupiedEntry<'a> {
             self.header.pop()
         }
     }
+    /// Returns a reference to the value in this entry
     pub fn get(&self) -> &IValue {
         self.get_key_value().1
     }
+    /// Returns a mutable reference to the value in this entry
     pub fn get_mut(&mut self) -> &mut IValue {
         self.get_key_value_mut().1
     }
+    /// Converts this into a mutable reference to the value in the entry
+    /// with a lifetime bound to the [`IObject`] itself.
     pub fn into_mut(self) -> &'a mut IValue {
         self.into_get_key_value_mut().1
     }
+
+    /// Sets the value in this entry, and returns the previous value.
     pub fn insert(&mut self, value: impl Into<IValue>) -> IValue {
         mem::replace(self.get_mut(), value.into())
     }
+
+    /// Removes this entry and returns its value.
     pub fn remove(self) -> IValue {
         self.remove_entry().1
     }
 }
 
+/// A view into a vacant entry in an [`IObject`]. It is part of the [`Entry`] enum.
 pub struct VacantEntry<'a> {
     header: &'a mut Header,
     bucket: usize,
     key: IString,
 }
 
+impl<'a> Debug for VacantEntry<'a> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OccupiedEntry")
+            .field("key", self.key())
+            .finish()
+    }
+}
+
 impl<'a> VacantEntry<'a> {
+    /// Returns a reference to the key at this entry.
     pub fn key(&self) -> &IString {
         &self.key
     }
+    /// Takes ownership of the key.
     pub fn into_key(self) -> IString {
         self.key
     }
+    /// Inserts a value into this entry and returns a mutable reference
+    /// to it.
     pub fn insert(self, value: impl Into<IValue>) -> &'a mut IValue {
         // Safety: we reserve space when the entry is initially created.
         // We know the bucket index is correct.
@@ -365,30 +402,48 @@ impl<'a> VacantEntry<'a> {
     }
 }
 
+/// A view into a single entry in an [`IObject`], which may be either vacant
+/// or occupied.
+///
+/// Obtained using [`IObject::entry`].
+#[derive(Debug)]
 pub enum Entry<'a> {
+    /// An occupied entry.
     Occupied(OccupiedEntry<'a>),
+    /// A vacant entry.
     Vacant(VacantEntry<'a>),
 }
 
 impl<'a> Entry<'a> {
+    /// Fills this entry if it's currently vacant, and then
+    /// returns a mutable reference to the value at this entry.
     pub fn or_insert(self, default: IValue) -> &'a mut IValue {
         match self {
             Entry::Occupied(occ) => occ.into_mut(),
             Entry::Vacant(vac) => vac.insert(default),
         }
     }
+
+    /// Fills this entry by calling the specified function if it's
+    /// currently vacant, and then returns a mutable reference to
+    /// the value at this entry.
     pub fn or_insert_with(self, default: impl FnOnce() -> IValue) -> &'a mut IValue {
         match self {
             Entry::Occupied(occ) => occ.into_mut(),
             Entry::Vacant(vac) => vac.insert(default()),
         }
     }
+
+    /// Returns a reference to the key at this entry.
     pub fn key(&self) -> &IString {
         match self {
             Entry::Occupied(occ) => occ.key(),
             Entry::Vacant(vac) => vac.key(),
         }
     }
+
+    /// Updates the value in this entry by calling the specified mutation
+    /// function if the entry is occupied.
     pub fn and_modify(mut self, f: impl FnOnce(&mut IValue)) -> Self {
         if let Entry::Occupied(occ) = &mut self {
             f(occ.get_mut());
@@ -397,9 +452,19 @@ impl<'a> Entry<'a> {
     }
 }
 
+/// Iterator over ([`IString`], [`IValue`]) pairs returned from
+/// [`IObject::into_iter`]
 pub struct IntoIter {
     header: *mut Header,
     index: usize,
+}
+
+impl Debug for IntoIter {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IntoIter")
+            .field("index", &self.index)
+            .finish()
+    }
 }
 
 impl Iterator for IntoIter {
@@ -445,6 +510,14 @@ impl Drop for IntoIter {
     }
 }
 
+/// The `IObject` type is similar to a `HashMap<IString, IValue>`. As with the
+/// [`IArray`], the length and capacity are stored _inside_ the heap allocation.
+/// In addition, `IObject`s preserve the insertion order of their elements, in
+/// case that is important in the original JSON.
+///
+/// Removing from an `IObject` will disrupt the insertion order.
+///
+/// [`IArray`]: super::IArray
 #[repr(transparent)]
 #[derive(Clone)]
 pub struct IObject(pub(crate) IValue);
@@ -482,10 +555,13 @@ impl IObject {
         }
     }
 
+    /// Constructs a new empty `IObject`. Does not allocate.
     pub fn new() -> Self {
         unsafe { Self(IValue::new_ref(&EMPTY_HEADER, TypeTag::ObjectOrTrue)) }
     }
 
+    /// Constructs a new `IObject` with the specified capacity. At least that many entries
+    /// can be added to the object without reallocating.
     pub fn with_capacity(cap: usize) -> Self {
         if cap == 0 {
             Self::new()
@@ -506,12 +582,16 @@ impl IObject {
     fn is_static(&self) -> bool {
         self.capacity() == 0
     }
+    /// Returns the capacity of the object. This is the maximum number of entries the object
+    /// can hold without reallocating.
     pub fn capacity(&self) -> usize {
         self.header().cap
     }
+    /// Returns the number of entries currently stored in the object.
     pub fn len(&self) -> usize {
         self.header().len
     }
+    /// Returns `true` if the object is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -530,6 +610,8 @@ impl IObject {
             }
         }
     }
+
+    /// Reserves space for at least this many additional entries.
     pub fn reserve(&mut self, additional: usize) {
         let hd = self.header();
         let current_capacity = hd.cap;
@@ -540,28 +622,37 @@ impl IObject {
         self.resize_internal(cmp::max(current_capacity * 2, desired_capacity.max(4)));
     }
 
+    /// Returns a view of an entry within this object.
     pub fn entry(&mut self, key: impl Into<IString>) -> Entry {
         self.reserve(1);
         // Safety: cannot be static after reserving space
         unsafe { self.header_mut().entry(key.into()) }
     }
+    /// Returns a view of an entry within this object, whilst avoiding
+    /// cloning the key if the entry is already occupied.
     pub fn entry_or_clone(&mut self, key: &IString) -> Entry {
         self.reserve(1);
         // Safety: cannot be static after reserving space
         unsafe { self.header_mut().entry_or_clone(key) }
     }
+    /// Returns an iterator over references to the keys in this object.
     pub fn keys(&self) -> impl Iterator<Item = &IString> {
         self.iter().map(|x| x.0)
     }
+    /// Returns an iterator over references to the values in this object.
     pub fn values(&self) -> impl Iterator<Item = &IValue> {
         self.iter().map(|x| x.1)
     }
+    /// Returns an iterator over (&key, &value) pairs in this object.
     pub fn iter(&self) -> Iter {
         Iter(self.header().split().items.iter())
     }
+    /// Returns an iterator over mutable references to the values in
+    /// this object.
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut IValue> {
         self.iter_mut().map(|x| x.1)
     }
+    /// Returns an iterator over (&key, &mut value) pairs in this object.
     pub fn iter_mut(&mut self) -> IterMut {
         IterMut(
             if self.is_empty() {
@@ -573,6 +664,8 @@ impl IObject {
             .iter_mut(),
         )
     }
+
+    /// Removes all entries from the object. The capacity is unchanged.
     pub fn clear(&mut self) {
         if !self.is_empty() {
             // Safety: not static
@@ -581,21 +674,37 @@ impl IObject {
             }
         }
     }
+    /// Looks up the specified key in this object and returns a (&key, &value) pair
+    /// if found.
     pub fn get_key_value(&self, k: impl ObjectIndex) -> Option<(&IString, &IValue)> {
         k.index_into(self)
     }
+
+    /// Looks up the specified key in this object and returns a (&key, &mut value) pair
+    /// if found.
     pub fn get_key_value_mut(&mut self, k: impl ObjectIndex) -> Option<(&IString, &mut IValue)> {
         k.index_into_mut(self)
     }
+
+    /// Looks up the specified key in this object and returns a reference to the
+    /// corresponding value if found.
     pub fn get(&self, k: impl ObjectIndex) -> Option<&IValue> {
         self.get_key_value(k).map(|x| x.1)
     }
+
+    /// Looks up the specified key in this object and returns a mutable reference to
+    /// the corresponding value if found.
     pub fn get_mut(&mut self, k: impl ObjectIndex) -> Option<&mut IValue> {
         self.get_key_value_mut(k).map(|x| x.1)
     }
+
+    /// Returns `true` if the specified key exists in the object.
     pub fn contains_key(&self, k: impl ObjectIndex) -> bool {
         self.get(k).is_some()
     }
+
+    /// Inserts a new value into this object with the specified key. If a value already
+    /// existed at this key, that value is replaced and returend.
     pub fn insert(&mut self, k: impl Into<IString>, v: impl Into<IValue>) -> Option<IValue> {
         match self.entry(k) {
             Entry::Occupied(mut occ) => Some(occ.insert(v)),
@@ -605,15 +714,28 @@ impl IObject {
             }
         }
     }
+
+    /// Removes the entry at the specified key, returning both the key and value if
+    /// found.
     pub fn remove_entry(&mut self, k: impl ObjectIndex) -> Option<(IString, IValue)> {
         k.remove(self)
     }
+
+    /// Removes the entry at the specified key, returning the value if found.
     pub fn remove(&mut self, k: impl ObjectIndex) -> Option<IValue> {
         self.remove_entry(k).map(|x| x.1)
     }
+
+    /// Shrinks the memory allocation used by the object such that its
+    /// capacity becomes equal to its length.
     pub fn shrink_to_fit(&mut self) {
         self.resize_internal(self.len());
     }
+
+    /// Calls the specified function for each entry in the object. Each entry
+    /// where the function returns `false` is removed from the object.
+    ///
+    /// The function also has the ability to modify the values in-place.
     pub fn retain(&mut self, mut f: impl FnMut(&IString, &mut IValue) -> bool) {
         if !self.is_empty() {
             // Safety: not static
@@ -762,6 +884,8 @@ mod private {
     impl<T: Sealed> Sealed for &T {}
 }
 
+/// Trait which abstracts over the various string types which can be used
+/// to index into an [`IObject`].
 pub trait ObjectIndex: private::Sealed + Copy {
     #[doc(hidden)]
     fn index_into(self, v: &IObject) -> Option<(&IString, &IValue)>;
@@ -879,6 +1003,9 @@ impl Debug for IObject {
     }
 }
 
+/// Iterator over (&[`IString`], &[`IValue`]) pairs returned from
+/// [`IObject::iter`]
+#[derive(Debug)]
 pub struct Iter<'a>(std::slice::Iter<'a, KeyValuePair>);
 
 impl<'a> Iterator for Iter<'a> {
@@ -895,6 +1022,9 @@ impl<'a> ExactSizeIterator for Iter<'a> {
     }
 }
 
+/// Iterator over (&[`IString`], &mut [`IValue`]) pairs returned from
+/// [`IObject::iter_mut`]
+#[derive(Debug)]
 pub struct IterMut<'a>(std::slice::IterMut<'a, KeyValuePair>);
 
 impl<'a> Iterator for IterMut<'a> {

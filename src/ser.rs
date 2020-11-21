@@ -616,6 +616,8 @@ impl SerializeStructVariant for SerializeObjectVariant {
     }
 }
 
+/// Converts an arbitrary type to an [`IValue`] using that type's [`serde::Serialize`]
+/// implementation.
 pub fn to_value<T>(value: T) -> Result<IValue, Error>
 where
     T: Serialize,

@@ -13,22 +13,72 @@ use super::number::INumber;
 use super::object::IObject;
 use super::string::IString;
 
+/// Stores an arbitrary JSON value.
+///
+/// Compared to [`serde_json::Value`] this type is a struct rather than an enum, as
+/// this is necessary to achieve the important size reductions. This means that
+/// you cannot directly `match` on an `IValue` to determine its type.
+///
+/// Instead, an `IValue` offers several ways to get at the inner type:
+///
+/// - Destructuring using `IValue::destructure[{_ref,_mut}]()`
+///
+///   These methods return wrapper enums which you _can_ directly match on, so
+///   these methods are the most direct replacement for matching on a `Value`.
+///
+/// - Borrowing using `IValue::as_{array,object,string,number}[_mut]()`
+///
+///   These methods return an `Option` of the corresponding reference if the
+///   type matches the one expected. These methods exist for the variants
+///   which are not `Copy`.
+///
+/// - Converting using `IValue::into_{array,object,string,number}()`
+///
+///   These methods return a `Result` of the corresponding type (or the
+///   original `IValue` if the type is not the one expected). These methods
+///   also exist for the variants which are not `Copy`.
+///
+/// - Getting using `IValue::to_{bool,{i,u,f}{32,64}}[_lossy]}()`
+///
+///   These methods return an `Option` of the corresponding type. These
+///   methods exist for types where the return value would be `Copy`.
+///
+/// You can also check the type of the inner value without specifically
+/// accessing it using one of these methods:
+///
+/// - Checking using `IValue::is_{null,bool,number,string,array,object,true,false}()`
+///
+///   These methods exist for all types.
+///
+/// - Getting the type with [`IValue::type_`]
+///
+///   This method returns the [`ValueType`] enum, which has a variant for each of the
+///   six JSON types.
 #[repr(transparent)]
 pub struct IValue {
     ptr: NonNull<u8>,
 }
 
+/// Enum returned by [`IValue::destructure`] to allow matching on the type of
+/// an owned [`IValue`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Destructured {
+    /// Null.
     Null,
+    /// Boolean.
     Bool(bool),
+    /// Number.
     Number(INumber),
+    /// String.
     String(IString),
+    /// Array.
     Array(IArray),
+    /// Object.
     Object(IObject),
 }
 
 impl Destructured {
+    /// Convert to the borrowed form of thie enum.
     pub fn as_ref(&self) -> DestructuredRef {
         use DestructuredRef::*;
         match self {
@@ -42,33 +92,59 @@ impl Destructured {
     }
 }
 
+/// Enum returned by [`IValue::destructure_ref`] to allow matching on the type of
+/// a reference to an [`IValue`].
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum DestructuredRef<'a> {
+    /// Null.
     Null,
+    /// Boolean.
+    /// [`IValue`]s do not directly contain booleans, so the value is returned
+    /// directly instead of as a reference.
     Bool(bool),
+    /// Number.
     Number(&'a INumber),
+    /// String.
     String(&'a IString),
+    /// Array.
     Array(&'a IArray),
+    /// Object.
     Object(&'a IObject),
 }
 
+/// Enum returned by [`IValue::destructure_mut`] to allow matching on the type of
+/// a mutable reference to an [`IValue`].
 #[derive(Debug)]
 pub enum DestructuredMut<'a> {
+    /// Null.
     Null,
+    /// Boolean.
+    /// [`IValue`]s do not directly contain booleans, so this variant contains
+    /// a proxy type which allows getting and setting the original [`IValue`]
+    /// as a `bool`.
     Bool(BoolMut<'a>),
+    /// Number.
     Number(&'a mut INumber),
+    /// String.
     String(&'a mut IString),
+    /// Array.
     Array(&'a mut IArray),
+    /// Object.
     Object(&'a mut IObject),
 }
 
+/// A proxy type which imitates a `&mut bool`.
 #[derive(Debug)]
 pub struct BoolMut<'a>(&'a mut IValue);
 
 impl<'a> BoolMut<'a> {
+    /// Set the [`IValue`] referenced by this proxy type to either
+    /// `true` or `false`.
     pub fn set(&mut self, value: bool) {
         *self.0 = value.into();
     }
+    /// Get the boolean value stored in the [`IValue`] from which
+    /// this proxy was obtained.
     pub fn get(&self) -> bool {
         self.0.is_true()
     }
@@ -103,16 +179,23 @@ impl From<usize> for TypeTag {
     }
 }
 
+/// Enum which distinguishes the six JSON types.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ValueType {
     // Stored inline
+    /// Null.
     Null,
+    /// Boolean.
     Bool,
 
     // Stored behind pointer
+    /// Number.
     Number,
+    /// String.
     String,
+    /// Array.
     Array,
+    /// Object.
     Object,
 }
 
@@ -136,8 +219,12 @@ impl IValue {
     pub(crate) unsafe fn new_ref<T>(r: &T, tag: TypeTag) -> Self {
         Self::new_ptr(r as *const _ as *mut u8, tag)
     }
+
+    /// JSON `null`.
     pub const NULL: Self = unsafe { Self::new_inline(TypeTag::StringOrNull) };
+    /// JSON `false`.
     pub const FALSE: Self = unsafe { Self::new_inline(TypeTag::ArrayOrFalse) };
+    /// JSON `true`.
     pub const TRUE: Self = unsafe { Self::new_inline(TypeTag::ObjectOrTrue) };
 
     pub(crate) fn ptr_usize(&self) -> usize {
@@ -174,6 +261,7 @@ impl IValue {
         self.ptr_usize().into()
     }
 
+    /// Returns the type of this value.
     pub fn type_(&self) -> ValueType {
         match (self.type_tag(), self.is_ptr()) {
             // Pointers
@@ -192,6 +280,7 @@ impl IValue {
         }
     }
 
+    /// Destructures this value into an enum which can be `match`ed on.
     pub fn destructure(self) -> Destructured {
         match self.type_() {
             ValueType::Null => Destructured::Null,
@@ -203,6 +292,7 @@ impl IValue {
         }
     }
 
+    /// Destructures a reference to this value into an enum which can be `match`ed on.
     pub fn destructure_ref(&self) -> DestructuredRef {
         // Safety: we check the type
         unsafe {
@@ -217,6 +307,7 @@ impl IValue {
         }
     }
 
+    /// Destructures a mutable reference to this value into an enum which can be `match`ed on.
     pub fn destructure_mut(&mut self) -> DestructuredMut {
         // Safety: we check the type
         unsafe {
@@ -231,19 +322,43 @@ impl IValue {
         }
     }
 
+    /// Indexes into this value with a number or string.
+    /// Panics if the value is not an array or object.
+    /// Panics if attempting to index an array with a string.
+    /// Panics if attempting to index an object with a number.
+    /// Returns `None` if the index type is correct, but there is
+    /// no value at this index.
     pub fn get(&self, index: impl ValueIndex) -> Option<&IValue> {
         index.index_into(self)
     }
+
+    /// Mutably indexes into this value with a number or string.
+    /// Panics if the value is not an array or object.
+    /// Panics if attempting to index an array with a string.
+    /// Panics if attempting to index an object with a number.
+    /// Returns `None` if the index type is correct, but there is
+    /// no value at this index.
     pub fn get_mut(&mut self, index: impl ValueIndex) -> Option<&mut IValue> {
         index.index_into_mut(self)
     }
+
+    /// Removes a value at the specified numberic or string index.
+    /// Panics if this is not an array or object.
+    /// Panics if attempting to index an array with a string.
+    /// Panics if attempting to index an object with a number.
+    /// Returns `None` if the index type is correct, but there is
+    /// no value at this index.
     pub fn remove(&mut self, index: impl ValueIndex) -> Option<IValue> {
         index.remove(self)
     }
+
+    /// Takes this value, replacing it with [`IValue::NULL`].
     pub fn take(&mut self) -> IValue {
         mem::replace(self, IValue::NULL)
     }
 
+    /// Returns the length of this value if it is an array or object.
+    /// Returns `None` for other types.
     pub fn len(&self) -> Option<usize> {
         match self.type_() {
             // Safety: checked type
@@ -254,6 +369,8 @@ impl IValue {
         }
     }
 
+    /// Returns whether this value is empty if it is an array or object.
+    /// Returns `None` for other types.
     pub fn is_empty(&self) -> Option<bool> {
         match self.type_() {
             // Safety: checked type
@@ -265,23 +382,29 @@ impl IValue {
     }
 
     // # Null methods
+    /// Returns `true` if this is the `null` value.
     pub fn is_null(&self) -> bool {
         self.ptr == Self::NULL.ptr
     }
 
     // # Bool methods
+    /// Returns `true` if this is a boolean.
     pub fn is_bool(&self) -> bool {
         self.ptr == Self::TRUE.ptr || self.ptr == Self::FALSE.ptr
     }
 
+    /// Returns `true` if this is the `true` value.
     pub fn is_true(&self) -> bool {
         self.ptr == Self::TRUE.ptr
     }
 
+    /// Returns `true` if this is the `false` value.
     pub fn is_false(&self) -> bool {
         self.ptr == Self::FALSE.ptr
     }
 
+    /// Converts this value to a `bool`.
+    /// Returns `None` if it's not a boolean.
     pub fn to_bool(&self) -> Option<bool> {
         if self.is_bool() {
             Some(self.is_true())
@@ -291,6 +414,7 @@ impl IValue {
     }
 
     // # Number methods
+    /// Returns `true` if this is a number.
     pub fn is_number(&self) -> bool {
         self.type_tag() == TypeTag::Number
     }
@@ -313,6 +437,8 @@ impl IValue {
         self.unchecked_cast_mut()
     }
 
+    /// Gets a reference to this value as an [`INumber`].
+    /// Returns `None` if it's not a number.
     pub fn as_number(&self) -> Option<&INumber> {
         if self.is_number() {
             // Safety: INumber is a `#[repr(transparent)]` wrapper around IValue
@@ -322,6 +448,8 @@ impl IValue {
         }
     }
 
+    /// Gets a mutable reference to this value as an [`INumber`].
+    /// Returns `None` if it's not a number.
     pub fn as_number_mut(&mut self) -> Option<&mut INumber> {
         if self.is_number() {
             // Safety: INumber is a `#[repr(transparent)]` wrapper around IValue
@@ -331,6 +459,8 @@ impl IValue {
         }
     }
 
+    /// Converts this value to an [`INumber`].
+    /// Returns `Err(self)` if it's not a number.
     pub fn into_number(self) -> Result<INumber, IValue> {
         if self.is_number() {
             Ok(INumber(self))
@@ -359,14 +489,19 @@ impl IValue {
     pub fn to_i32(&self) -> Option<i32> {
         self.as_number()?.to_i32()
     }
+    /// Converts this value to an f64 if it is a number, potentially losing precision
+    /// in the process.
     pub fn to_f64_lossy(&self) -> Option<f64> {
         Some(self.as_number()?.to_f64_lossy())
     }
+    /// Converts this value to an f32 if it is a number, potentially losing precision
+    /// in the process.
     pub fn to_f32_lossy(&self) -> Option<f32> {
         Some(self.as_number()?.to_f32_lossy())
     }
 
     // # String methods
+    /// Returns `true` if this is a string.
     pub fn is_string(&self) -> bool {
         self.type_tag() == TypeTag::StringOrNull && self.is_ptr()
     }
@@ -381,6 +516,8 @@ impl IValue {
         self.unchecked_cast_mut()
     }
 
+    /// Gets a reference to this value as an [`IString`].
+    /// Returns `None` if it's not a string.
     pub fn as_string(&self) -> Option<&IString> {
         if self.is_string() {
             // Safety: IString is a `#[repr(transparent)]` wrapper around IValue
@@ -390,6 +527,8 @@ impl IValue {
         }
     }
 
+    /// Gets a mutable reference to this value as an [`IString`].
+    /// Returns `None` if it's not a string.
     pub fn as_string_mut(&mut self) -> Option<&mut IString> {
         if self.is_string() {
             // Safety: IString is a `#[repr(transparent)]` wrapper around IValue
@@ -399,6 +538,8 @@ impl IValue {
         }
     }
 
+    /// Converts this value to an [`IString`].
+    /// Returns `Err(self)` if it's not a string.
     pub fn into_string(self) -> Result<IString, IValue> {
         if self.is_string() {
             Ok(IString(self))
@@ -408,6 +549,7 @@ impl IValue {
     }
 
     // # Array methods
+    /// Returns `true` if this is an array.
     pub fn is_array(&self) -> bool {
         self.type_tag() == TypeTag::ArrayOrFalse && self.is_ptr()
     }
@@ -422,6 +564,8 @@ impl IValue {
         self.unchecked_cast_mut()
     }
 
+    /// Gets a reference to this value as an [`IArray`].
+    /// Returns `None` if it's not an array.
     pub fn as_array(&self) -> Option<&IArray> {
         if self.is_array() {
             // Safety: IArray is a `#[repr(transparent)]` wrapper around IValue
@@ -431,6 +575,8 @@ impl IValue {
         }
     }
 
+    /// Gets a mutable reference to this value as an [`IArray`].
+    /// Returns `None` if it's not an array.
     pub fn as_array_mut(&mut self) -> Option<&mut IArray> {
         if self.is_array() {
             // Safety: IArray is a `#[repr(transparent)]` wrapper around IValue
@@ -440,6 +586,8 @@ impl IValue {
         }
     }
 
+    /// Converts this value to an [`IArray`].
+    /// Returns `Err(self)` if it's not an array.
     pub fn into_array(self) -> Result<IArray, IValue> {
         if self.is_array() {
             Ok(IArray(self))
@@ -449,6 +597,7 @@ impl IValue {
     }
 
     // # Object methods
+    /// Returns `true` if this is an object.
     pub fn is_object(&self) -> bool {
         self.type_tag() == TypeTag::ObjectOrTrue && self.is_ptr()
     }
@@ -463,6 +612,8 @@ impl IValue {
         self.unchecked_cast_mut()
     }
 
+    /// Gets a reference to this value as an [`IObject`].
+    /// Returns `None` if it's not an object.
     pub fn as_object(&self) -> Option<&IObject> {
         if self.is_object() {
             // Safety: IObject is a `#[repr(transparent)]` wrapper around IValue
@@ -472,6 +623,8 @@ impl IValue {
         }
     }
 
+    /// Gets a mutable reference to this value as an [`IObject`].
+    /// Returns `None` if it's not an object.
     pub fn as_object_mut(&mut self) -> Option<&mut IObject> {
         if self.is_object() {
             // Safety: IObject is a `#[repr(transparent)]` wrapper around IValue
@@ -481,6 +634,8 @@ impl IValue {
         }
     }
 
+    /// Converts this value to an [`IObject`].
+    /// Returns `Err(self)` if it's not an object.
     pub fn into_object(self) -> Result<IObject, IValue> {
         if self.is_number() {
             Ok(IObject(self))
@@ -591,6 +746,8 @@ mod private {
     impl<T: Sealed> Sealed for &T {}
 }
 
+/// Trait which abstracts over the various number and string types
+/// which can be used to index into an [`IValue`].
 pub trait ValueIndex: private::Sealed + Copy {
     #[doc(hidden)]
     fn index_into(self, v: &IValue) -> Option<&IValue>;

@@ -1,3 +1,4 @@
+//! Functionality relating to the JSON number type
 #![allow(clippy::float_cmp)]
 
 use std::alloc::{alloc, dealloc, Layout, LayoutErr};
@@ -313,6 +314,28 @@ const STATIC_UPPER: i16 = STATIC_LOWER + STATIC_LEN as i16;
 static STATIC_NUMBERS: [Header; STATIC_LEN] =
     define_static_numbers!(STATIC_LOWER 0 1 2 3 4 5 6 7 8);
 
+/// The `INumber` type represents a JSON number. It is decoupled from any specific
+/// representation, and internally uses several. There is no way to determine the
+/// internal representation: instead the caller is expected to convert the number
+/// using one of the fallible `to_xxx` functions and handle the cases where the
+/// number does not convert to the desired type.
+///
+/// Special floating point values (eg. NaN, Infinity, etc.) cannot be stored within
+/// an `INumber`.
+///
+/// Whilst `INumber` does not consider `2.0` and `2` to be different numbers (ie.
+/// they will compare equal) it does allow you to distinguish them using the
+/// method `INumber::has_decimal_point()`. That said, calling `to_i32` on
+/// `2.0` will succeed with the value `2`.
+///
+/// Currently `INumber` can store any number representable with an `f64`, `i64` or
+/// `u64`. It is expected that in the future it will be further expanded to store
+/// integers and possibly decimals to arbitrary precision, but that is not currently
+/// the case.
+///
+/// Any number representable with an `i8` or a `u8` can be stored in an `INumber`
+/// without a heap allocation (so JSON byte arrays are relatively efficient).
+/// Integers up to 24 bits can be stored with a 4-byte heap allocation.
 #[repr(transparent)]
 #[derive(Clone)]
 pub struct INumber(pub(crate) IValue);
@@ -349,10 +372,12 @@ impl INumber {
         }
     }
 
+    /// Returns the number zero (without a decimal point). Does not allocate.
     pub fn zero() -> Self {
         // Safety: 0 is in the static range
         unsafe { Self::new_static(0) }
     }
+    /// Returns the number one (without a decimal point). Does not allocate.
     pub fn one() -> Self {
         // Safety: 1 is in the static range
         unsafe { Self::new_static(1) }
@@ -477,9 +502,11 @@ impl INumber {
     pub fn to_i32(&self) -> Option<i32> {
         self.header().to_i64().and_then(|x| x.try_into().ok())
     }
+    /// Converts this number to an f64, potentially losing precision in the process.
     pub fn to_f64_lossy(&self) -> f64 {
         self.header().to_f64_lossy()
     }
+    /// Converts this number to an f32, potentially losing precision in the process.
     pub fn to_f32_lossy(&self) -> f32 {
         self.to_f64_lossy() as f32
     }

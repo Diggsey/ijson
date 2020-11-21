@@ -1,3 +1,5 @@
+//! Functionality relating to the JSON array type
+
 use std::alloc::{alloc, dealloc, realloc, Layout, LayoutErr};
 use std::borrow::{Borrow, BorrowMut};
 use std::cmp::{self, Ordering};
@@ -20,7 +22,7 @@ struct Header {
 impl Header {
     fn as_ptr(&self) -> *const IValue {
         // Safety: pointers to the end of structs are allowed
-        unsafe { (self as *const Header).offset(1) as *const IValue }
+        unsafe { (self as *const Header).add(1) as *const IValue }
     }
     fn as_slice(&self) -> &[IValue] {
         // Safety: Header `len` must be accurate
@@ -63,6 +65,7 @@ impl Header {
     }
 }
 
+/// Iterator over [`IValue`]s returned from [`IArray::into_iter`]
 pub struct IntoIter {
     header: *mut Header,
     index: usize,
@@ -105,12 +108,23 @@ impl ExactSizeIterator for IntoIter {
     }
 }
 
+impl Debug for IntoIter {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IntoIter")
+            .field("index", &self.index)
+            .finish()
+    }
+}
+
 impl Drop for IntoIter {
     fn drop(&mut self) {
         while self.next().is_some() {}
     }
 }
 
+/// The `IArray` type is similar to a `Vec<IValue>`. The primary difference is
+/// that the length and capacity are stored _inside_ the heap allocation, so that
+/// the `IArray` itself can be a single pointer.
 #[repr(transparent)]
 #[derive(Clone)]
 pub struct IArray(pub(crate) IValue);
@@ -153,10 +167,13 @@ impl IArray {
         }
     }
 
+    /// Constructs a new empty `IArray`. Does not allocate.
     pub fn new() -> Self {
         unsafe { IArray(IValue::new_ref(&EMPTY_HEADER, TypeTag::ArrayOrFalse)) }
     }
 
+    /// Constructs a new `IArray` with the specified capacity. At least that many items
+    /// can be added to the array without reallocating.
     pub fn with_capacity(cap: usize) -> Self {
         if cap == 0 {
             Self::new()
@@ -177,18 +194,28 @@ impl IArray {
     fn is_static(&self) -> bool {
         self.capacity() == 0
     }
+    /// Returns the capacity of the array. This is the maximum number of items the array
+    /// can hold without reallocating.
     pub fn capacity(&self) -> usize {
         self.header().cap
     }
+
+    /// Returns the number of items currently stored in the array.
     pub fn len(&self) -> usize {
         self.header().len
     }
+
+    /// Returns `true` if the array is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Borrows a slice of [`IValue`]s from the array
     pub fn as_slice(&self) -> &[IValue] {
         self.header().as_slice()
     }
+
+    /// Borrows a mutable slice of [`IValue`]s from the array
     pub fn as_mut_slice(&mut self) -> &mut [IValue] {
         if self.is_static() {
             &mut []
@@ -206,6 +233,8 @@ impl IArray {
             }
         }
     }
+
+    /// Reserves space for at least this many additional items.
     pub fn reserve(&mut self, additional: usize) {
         let hd = self.header();
         let current_capacity = hd.cap;
@@ -215,6 +244,9 @@ impl IArray {
         }
         self.resize_internal(cmp::max(current_capacity * 2, desired_capacity.max(4)));
     }
+
+    /// Truncates the array by removing items until it is no longer than the specified
+    /// length. The capacity is unchanged.
     pub fn truncate(&mut self, len: usize) {
         if self.is_static() {
             return;
@@ -226,9 +258,16 @@ impl IArray {
             }
         }
     }
+
+    /// Removes all items from the array. The capacity is unchanged.
     pub fn clear(&mut self) {
         self.truncate(0);
     }
+
+    /// Inserts a new item into the array at the specified index. Any existing items
+    /// on or after this index will be shifted down to accomodate this. For large
+    /// arrays, insertions near the front will be slow as it will require shifting
+    /// a large number of items.
     pub fn insert(&mut self, index: usize, item: impl Into<IValue>) {
         self.reserve(1);
 
@@ -244,6 +283,15 @@ impl IArray {
             }
         }
     }
+
+    /// Removes and returns the item at the specified index from the array. Any
+    /// items after this index will be shifted back up to close the gap. For large
+    /// arrays, removals from near the front will be slow as it will require shifting
+    /// a large number of items.
+    ///
+    /// If the order of the array is unimporant, consider using [`IArray::swap_remove`].
+    ///
+    /// If the index is outside the array bounds, `None` is returned.
     pub fn remove(&mut self, index: usize) -> Option<IValue> {
         if index < self.len() {
             // Safety: cannot be static if index <= len
@@ -256,6 +304,15 @@ impl IArray {
             None
         }
     }
+
+    /// Removes and returns the item at the specified index from the array by
+    /// first swapping it with the item currently at the end of the array, and
+    /// then popping that last item.
+    ///
+    /// This can be more efficient than [`IArray::remove`] for large arrays,
+    /// but will change the ordering of items within the array.
+    ///
+    /// If the index is outside the array bounds, `None` is returned.
     pub fn swap_remove(&mut self, index: usize) -> Option<IValue> {
         if index < self.len() {
             // Safety: cannot be static if index <= len
@@ -269,6 +326,8 @@ impl IArray {
             None
         }
     }
+
+    /// Pushes a new item onto the back of the array.
     pub fn push(&mut self, item: impl Into<IValue>) {
         self.reserve(1);
         // Safety: We just reserved enough space for at least one extra item
@@ -276,6 +335,9 @@ impl IArray {
             self.header_mut().push(item.into());
         }
     }
+
+    /// Pops the last item from the array and returns it. If the array is
+    /// empty, `None` is returned.
     pub fn pop(&mut self) -> Option<IValue> {
         if self.is_static() {
             None
@@ -284,6 +346,9 @@ impl IArray {
             unsafe { self.header_mut().pop() }
         }
     }
+
+    /// Shrinks the memory allocation used by the array such that its
+    /// capacity becomes equal to its length.
     pub fn shrink_to_fit(&mut self) {
         self.resize_internal(self.len());
     }

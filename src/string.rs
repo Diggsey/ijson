@@ -1,3 +1,5 @@
+//! Functionality relating to the JSON string type
+
 use std::alloc::{alloc, dealloc, Layout, LayoutErr};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
@@ -51,12 +53,12 @@ lazy_static! {
 // `ctor` feature is enabled.
 #[cfg(any(test, feature = "ctor"))]
 #[ctor::ctor]
-fn ctor_init_string_cache() {
+fn ctor_init_cache() {
     lazy_static::initialize(&STRING_CACHE);
 }
 
 #[doc(hidden)]
-pub fn init_string_cache() {
+pub fn init_cache() {
     lazy_static::initialize(&STRING_CACHE);
 }
 
@@ -102,6 +104,20 @@ impl WeakIString {
     }
 }
 
+/// The `IString` type is an interned, immutable string, and is where this crate
+/// gets its name.
+///
+/// Cloning an `IString` is cheap, and it can be easily converted from `&str` or
+/// `String` types. Comparisons between `IString`s is a simple pointer
+/// comparison.
+///
+/// The memory backing an `IString` is reference counted, so that unlike many
+/// string interning libraries, memory is not leaked as new strings are interned.
+/// Interning uses `DashSet`, an implementation of a concurrent hash-set, allowing
+/// many strings to be interned concurrently without becoming a bottleneck.
+///
+/// Given the nature of `IString` it is better to intern a string once and reuse
+/// it, rather than continually convert from `&str` to `IString`.
 #[repr(transparent)]
 #[derive(Clone)]
 pub struct IString(pub(crate) IValue);
@@ -144,6 +160,7 @@ impl IString {
         }
     }
 
+    /// Converts a `&str` to an `IString` by interning it in the global string cache.
     pub fn intern(s: &str) -> Self {
         let cache = &*STRING_CACHE;
         let shard_index = cache.determine_map(s);
@@ -169,19 +186,27 @@ impl IString {
         unsafe { &*(self.0.ptr() as *const Header) }
     }
 
+    /// Returns the length (in bytes) of this string.
     pub fn len(&self) -> usize {
         self.header().len()
     }
+
+    /// Returns `true` if this is the empty string "".
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Obtains a `&str` from this `IString`. This is a cheap operation.
     pub fn as_str(&self) -> &str {
         self.header().as_str()
     }
+
+    /// Obtains a byte slice from this `IString`. This is a cheap operation.
     pub fn as_bytes(&self) -> &[u8] {
         self.header().as_bytes()
     }
 
+    /// Returns the empty string.
     pub fn new() -> Self {
         unsafe { IString(IValue::new_ref(&EMPTY_HEADER, TypeTag::StringOrNull)) }
     }

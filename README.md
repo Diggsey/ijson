@@ -1,6 +1,7 @@
 # ijson
 
 [![CI Status](https://github.com/Diggsey/ijson/workflows/CI/badge.svg)](https://github.com/Diggsey/ijson/actions?query=workflow%3ACI)
+[![Documentation](https://docs.rs/ijson/badge.svg)](https://docs.rs/ijson)
 
 ! Warning: This crate is still a work-in-progress !
 

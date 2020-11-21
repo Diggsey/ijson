@@ -65,6 +65,16 @@ macro_rules! typed_conversions {
     }
 }
 
+/// Construct an [`IValue`] using familiar JSON syntax.
+///
+/// For example:
+/// ```
+/// use ijson::{ijson, IValue};
+///
+/// let _: IValue = ijson!({ "foo": null, "bar": [1, 2, 3, 4] });
+/// ```
+///
+/// [`IValue`]: super::IValue
 #[macro_export(local_inner_macros)]
 macro_rules! ijson {
     // Hide implementation details from the generated rustdoc.
