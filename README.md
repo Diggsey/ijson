@@ -3,6 +3,7 @@
 [![CI Status](https://github.com/Diggsey/ijson/workflows/CI/badge.svg)](https://github.com/Diggsey/ijson/actions?query=workflow%3ACI)
 [![Documentation](https://docs.rs/ijson/badge.svg)](https://docs.rs/ijson)
 [![crates.io](https://img.shields.io/crates/v/ijson.svg)](https://crates.io/crates/ijson)
+[![codecov](https://codecov.io/gh/Diggsey/ijson/branch/master/graph/badge.svg?token=XZ1UCUKSYB)](https://codecov.io/gh/Diggsey/ijson)
 
 This crate offers a replacement for `serde-json`'s `Value` type, which is
 significantly more memory efficient.
