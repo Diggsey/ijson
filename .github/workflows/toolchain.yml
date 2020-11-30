@@ -93,29 +93,30 @@ jobs:
           profile: minimal
           toolchain: nightly
           override: true
+          components: llvm-tools-preview
       - uses: actions-rs/cargo@v1
         with:
-          command: test
-          args: -- --test-threads=1
+          command: install
+          args: cargo-binutils rustfilt
+      - name: Build tests
+        run: |
+          cargo rustc --message-format=json --tests -- -Zinstrument-coverage | jq -r '.executable | strings' > executables.txt
+      - name: Run tests
+        run: |
+          while read p; do
+            exec "$p" --test-threads=1
+          done <executables.txt
         env:
-          RUSTFLAGS: "-Zinstrument-coverage"
-      - name: Cache LLVM and Clang
-        id: cache-llvm
-        uses: actions/cache@v2
-        with:
-          path: ${{ runner.temp }}/llvm
-          key: llvm-11.0
-      - name: Install LLVM and Clang
-        uses: KyleMayes/install-llvm-action@v1
-        with:
-          version: "11.0"
-          directory: ${{ runner.temp }}/llvm
-          cached: ${{ steps.cache-llvm.outputs.cache-hit }}
+          LLVM_PROFILE_FILE: "prof/%m.profraw"
       - name: Generate coverage report
         run: |
-          llvm-profdata merge -sparse default.profraw -o default.profdata
+          rust-profdata merge -sparse prof/*.profraw -o default.profdata
+          cat executables.txt | xargs -d '\n' rust-cov export -format='lcov' -instr-profile='default.profdata' > lcov.info
       - name: Upload coverage report
         uses: codecov/codecov-action@v1
         with:
-          file: default.profdata
           fail_ci_if_error: true
+      - uses: actions/upload-artifact@v2
+        with:
+          name: Upload coverage artifact
+          path: lcov.info
