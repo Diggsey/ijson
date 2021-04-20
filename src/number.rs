@@ -314,6 +314,10 @@ const STATIC_UPPER: i16 = STATIC_LOWER + STATIC_LEN as i16;
 static STATIC_NUMBERS: [Header; STATIC_LEN] =
     define_static_numbers!(STATIC_LOWER 0 1 2 3 4 5 6 7 8);
 
+// Range of a 24-bit signed integer.
+const SHORT_LOWER: i64 = -0x800000;
+const SHORT_UPPER: i64 = 0x800000;
+
 /// The `INumber` type represents a JSON number. It is decoupled from any specific
 /// representation, and internally uses several. There is no way to determine the
 /// internal representation: instead the caller is expected to convert the number
@@ -426,7 +430,7 @@ impl INumber {
     }
 
     fn new_i64(value: i64) -> Self {
-        if value as u64 & 0xFFFFFFFFFF000000 == 0 {
+        if value >= SHORT_LOWER && value < SHORT_UPPER {
             Self::new_short(value as i32)
         } else {
             let mut res = Self::new_ptr(NumberType::I64);
@@ -714,6 +718,27 @@ mod tests {
         assert_eq!(x.to_i64(), None);
         assert_eq!(x.to_u64(), Some(u64::MAX));
         assert_eq!(x.to_f64(), None);
+
+        let x: INumber = 13369629.into();
+        assert_eq!(x.to_i64(), Some(13369629));
+        assert_eq!(x.to_u64(), Some(13369629));
+        assert_eq!(x.to_f64(), Some(13369629.0));
+
+        let x: INumber = 0x800000.into();
+        assert_eq!(x.to_i64(), Some(0x800000));
+        assert_eq!(x.to_u64(), Some(0x800000));
+
+        let x: INumber = (-0x800000).into();
+        assert_eq!(x.to_i64(), Some(-0x800000));
+        assert_eq!(x.to_u64(), None);
+
+        let x: INumber = 0x7FFFFF.into();
+        assert_eq!(x.to_i64(), Some(0x7FFFFF));
+        assert_eq!(x.to_u64(), Some(0x7FFFFF));
+
+        let x: INumber = (-0x7FFFFF).into();
+        assert_eq!(x.to_i64(), Some(-0x7FFFFF));
+        assert_eq!(x.to_u64(), None);
     }
 
     #[mockalloc::test]
