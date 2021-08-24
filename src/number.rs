@@ -1,7 +1,7 @@
 //! Functionality relating to the JSON number type
 #![allow(clippy::float_cmp)]
 
-use std::alloc::{alloc, dealloc, Layout, LayoutErr};
+use std::alloc::{alloc, dealloc, Layout, LayoutError};
 use std::cmp::Ordering;
 use std::convert::{TryFrom, TryInto};
 use std::fmt::{self, Debug, Formatter};
@@ -347,7 +347,7 @@ pub struct INumber(pub(crate) IValue);
 value_subtype_impls!(INumber, into_number, as_number, as_number_mut);
 
 impl INumber {
-    fn layout(type_: NumberType) -> Result<Layout, LayoutErr> {
+    fn layout(type_: NumberType) -> Result<Layout, LayoutError> {
         let mut res = Layout::new::<Header>();
         match type_ {
             NumberType::Static => unreachable!(),

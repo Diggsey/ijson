@@ -1,6 +1,6 @@
 //! Functionality relating to the JSON object type
 
-use std::alloc::{alloc, dealloc, Layout, LayoutErr};
+use std::alloc::{alloc, dealloc, Layout, LayoutError};
 use std::cmp::{self, Ordering};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
@@ -527,7 +527,7 @@ value_subtype_impls!(IObject, into_object, as_object, as_object_mut);
 static EMPTY_HEADER: Header = Header { len: 0, cap: 0 };
 
 impl IObject {
-    fn layout(cap: usize) -> Result<Layout, LayoutErr> {
+    fn layout(cap: usize) -> Result<Layout, LayoutError> {
         Ok(Layout::new::<Header>()
             .extend(Layout::array::<KeyValuePair>(cap)?)?
             .0

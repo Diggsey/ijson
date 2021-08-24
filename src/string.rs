@@ -1,6 +1,6 @@
 //! Functionality relating to the JSON string type
 
-use std::alloc::{alloc, dealloc, Layout, LayoutErr};
+use std::alloc::{alloc, dealloc, Layout, LayoutError};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Formatter};
@@ -132,7 +132,7 @@ static EMPTY_HEADER: Header = Header {
 };
 
 impl IString {
-    fn layout(len: usize) -> Result<Layout, LayoutErr> {
+    fn layout(len: usize) -> Result<Layout, LayoutError> {
         Ok(Layout::new::<Header>()
             .extend(Layout::array::<u8>(len)?)?
             .0

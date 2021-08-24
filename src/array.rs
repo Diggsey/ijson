@@ -1,6 +1,6 @@
 //! Functionality relating to the JSON array type
 
-use std::alloc::{alloc, dealloc, realloc, Layout, LayoutErr};
+use std::alloc::{alloc, dealloc, realloc, Layout, LayoutError};
 use std::borrow::{Borrow, BorrowMut};
 use std::cmp::{self, Ordering};
 use std::fmt::{self, Debug, Formatter};
@@ -134,7 +134,7 @@ value_subtype_impls!(IArray, into_array, as_array, as_array_mut);
 static EMPTY_HEADER: Header = Header { len: 0, cap: 0 };
 
 impl IArray {
-    fn layout(cap: usize) -> Result<Layout, LayoutErr> {
+    fn layout(cap: usize) -> Result<Layout, LayoutError> {
         Ok(Layout::new::<Header>()
             .extend(Layout::array::<usize>(cap)?)?
             .0
