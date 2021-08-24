@@ -162,6 +162,9 @@ impl IString {
 
     /// Converts a `&str` to an `IString` by interning it in the global string cache.
     pub fn intern(s: &str) -> Self {
+        if s.is_empty() {
+            return Self::new();
+        }
         let cache = &*STRING_CACHE;
         let shard_index = cache.determine_map(s);
 
@@ -388,5 +391,15 @@ mod tests {
         assert_ne!(x.as_ptr(), y.as_ptr());
         assert_eq!(x.as_str(), "foo");
         assert_eq!(y.as_str(), "bar");
+    }
+
+    #[mockalloc::test]
+    fn default_interns_string() {
+        let x = IString::intern("");
+        let y = IString::new();
+        let z = IString::intern("foo");
+
+        assert_eq!(x.as_ptr(), y.as_ptr());
+        assert_ne!(x.as_ptr(), z.as_ptr());
     }
 }
