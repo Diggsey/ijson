@@ -634,7 +634,7 @@ mod tests {
             let mut arr = IArray::new();
 
             for j in 0..1000 {
-                let index = rng.gen_range(0, arr.len() + 1);
+                let index = rng.gen_range(0..arr.len() + 1);
                 if rng.gen() {
                     arr.insert(index, j);
                 } else {

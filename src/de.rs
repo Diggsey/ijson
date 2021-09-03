@@ -171,6 +171,30 @@ impl<'de> Visitor<'de> for StringVisitor {
     fn visit_str<E: SError>(self, value: &str) -> Result<IString, E> {
         Ok(value.into())
     }
+
+    #[inline]
+    fn visit_string<E: SError>(self, value: String) -> Result<Self::Value, E> {
+        Ok(value.into())
+    }
+
+    #[inline]
+    fn visit_bytes<E: SError>(self, value: &[u8]) -> Result<Self::Value, E> {
+        match std::str::from_utf8(value) {
+            Ok(s) => Ok(s.into()),
+            Err(_) => Err(SError::invalid_value(Unexpected::Bytes(value), &self)),
+        }
+    }
+
+    #[inline]
+    fn visit_byte_buf<E: SError>(self, value: Vec<u8>) -> Result<Self::Value, E> {
+        match String::from_utf8(value) {
+            Ok(s) => Ok(s.into()),
+            Err(e) => Err(SError::invalid_value(
+                Unexpected::Bytes(&e.into_bytes()),
+                &self,
+            )),
+        }
+    }
 }
 
 struct ArrayVisitor;
