@@ -6,9 +6,8 @@ use std::process::Command;
 fn main() -> Result<(), Box<dyn Error>> {
     std::env::set_current_dir("test_data")?;
     let mut deque = VecDeque::new();
-
     for i in 0..100 {
-        let mut cmd = Command::new("dummyjson");
+        let mut cmd = Command::new("dummyjson.cmd");
 
         deque.push_back(
             cmd.arg("template.hbs")
