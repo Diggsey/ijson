@@ -8,7 +8,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut deque = VecDeque::new();
     for i in 0..100 {
         let mut cmd = Command::new("dummyjson.cmd");
-
         deque.push_back(
             cmd.arg("template.hbs")
                 .stdout(File::create(format!("rnd{:04}.json", i))?)
