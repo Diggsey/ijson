@@ -35,9 +35,9 @@ fn hash_fn(s: &IString) -> usize {
     let v: &IValue = s.as_ref();
     // We know the bottom two bits are always the same
     let mut p = v.ptr_usize() >> 2;
-    p = p.wrapping_mul(202529);
+    p = p.wrapping_mul(202_529);
     p = p ^ (p >> 13);
-    p.wrapping_mul(202529)
+    p.wrapping_mul(202_529)
 }
 
 fn hash_bucket(s: &IString, hash_cap: usize) -> usize {
@@ -187,7 +187,7 @@ impl Header {
     }
     fn as_hash_ptr(&self) -> *const usize {
         // Safety: pointers to the end of structs are allowed
-        unsafe { self.as_item_ptr().add(self.cap) as *const usize }
+        unsafe { self.as_item_ptr().add(self.cap).cast::<usize>() }
     }
     // Safety: len < cap
     unsafe fn end_item_mut(&mut self) -> &mut MaybeUninit<KeyValuePair> {
@@ -492,7 +492,7 @@ impl Iterator for IntoIter {
                     .read();
                 self.index += 1;
                 if self.index >= len {
-                    IObject::dealloc(self.header as *mut u8);
+                    IObject::dealloc(self.header.cast::<u8>());
                     self.header = std::ptr::null_mut();
                 }
                 Some((res.key, res.value))
@@ -586,7 +586,7 @@ impl IObject {
 
     // Safety: must not be static
     unsafe fn header_mut(&mut self) -> &mut Header {
-        &mut *(self.0.ptr() as *mut Header)
+        &mut *self.0.ptr().cast::<Header>()
     }
 
     fn is_static(&self) -> bool {

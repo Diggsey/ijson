@@ -398,7 +398,7 @@ impl INumber {
     fn new_ptr(type_: NumberType) -> Self {
         unsafe {
             INumber(IValue::new_ptr(
-                Self::alloc(type_) as *mut u8,
+                Self::alloc(type_).cast::<u8>(),
                 TypeTag::Number,
             ))
         }
@@ -715,12 +715,12 @@ mod tests {
         let x: INumber = 0x1000000.into();
         assert_eq!(x.to_i64(), Some(0x1000000));
         assert_eq!(x.to_u64(), Some(0x1000000));
-        assert_eq!(x.to_f64(), Some(16777216.0));
+        assert_eq!(x.to_f64(), Some(16_777_216.0));
 
         let x: INumber = i64::MIN.into();
         assert_eq!(x.to_i64(), Some(i64::MIN));
         assert_eq!(x.to_u64(), None);
-        assert_eq!(x.to_f64(), Some(-9223372036854775808.0));
+        assert_eq!(x.to_f64(), Some(-9_223_372_036_854_775_808.0));
 
         let x: INumber = i64::MAX.into();
         assert_eq!(x.to_i64(), Some(i64::MAX));
@@ -733,9 +733,9 @@ mod tests {
         assert_eq!(x.to_f64(), None);
 
         let x: INumber = 13369629.into();
-        assert_eq!(x.to_i64(), Some(13369629));
-        assert_eq!(x.to_u64(), Some(13369629));
-        assert_eq!(x.to_f64(), Some(13369629.0));
+        assert_eq!(x.to_i64(), Some(13_369_629));
+        assert_eq!(x.to_u64(), Some(13_369_629));
+        assert_eq!(x.to_f64(), Some(13_369_629.0));
 
         let x: INumber = 0x800000.into();
         assert_eq!(x.to_i64(), Some(0x800000));
@@ -766,6 +766,6 @@ mod tests {
         assert!(INumber::try_from(1e30).unwrap() > INumber::from(i64::MAX));
         assert!(INumber::try_from(-1e30).unwrap() < INumber::from(i64::MIN));
         assert!(INumber::try_from(-1e30).unwrap() < INumber::from(i64::MIN));
-        assert!(INumber::try_from(99999999000.0).unwrap() < INumber::from(99999999001u64));
+        assert!(INumber::try_from(99_999_999_000.0).unwrap() < INumber::from(99_999_999_001_u64));
     }
 }

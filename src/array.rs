@@ -22,7 +22,7 @@ struct Header {
 impl Header {
     fn as_ptr(&self) -> *const IValue {
         // Safety: pointers to the end of structs are allowed
-        unsafe { (self as *const Header).add(1) as *const IValue }
+        unsafe { (self as *const Header).add(1).cast::<IValue>() }
     }
     fn as_slice(&self) -> &[IValue] {
         // Safety: Header `len` must be accurate
@@ -88,7 +88,7 @@ impl Iterator for IntoIter {
                     .read();
                 self.index += 1;
                 if self.index >= len {
-                    IArray::dealloc(self.header as *mut u8);
+                    IArray::dealloc(self.header.cast::<u8>());
                     self.header = std::ptr::null_mut();
                 }
                 Some(res)
@@ -143,10 +143,10 @@ impl IArray {
 
     fn alloc(cap: usize) -> *mut u8 {
         unsafe {
-            let ptr = alloc(Self::layout(cap).unwrap()) as *mut Header;
+            let ptr = alloc(Self::layout(cap).unwrap()).cast::<Header>();
             (*ptr).len = 0;
             (*ptr).cap = cap;
-            ptr as *mut u8
+            ptr.cast::<u8>()
         }
     }
 
@@ -154,8 +154,8 @@ impl IArray {
         unsafe {
             let old_layout = Self::layout((*(ptr as *const Header)).cap).unwrap();
             let new_layout = Self::layout(new_cap).unwrap();
-            let ptr = realloc(ptr as *mut u8, old_layout, new_layout.size());
-            (*(ptr as *mut Header)).cap = new_cap;
+            let ptr = realloc(ptr.cast::<u8>(), old_layout, new_layout.size());
+            (*(ptr.cast::<Header>())).cap = new_cap;
             ptr
         }
     }
@@ -190,7 +190,7 @@ impl IArray {
 
     // Safety: must not be static
     unsafe fn header_mut(&mut self) -> &mut Header {
-        &mut *(self.0.ptr() as *mut Header)
+        &mut *(self.0.ptr().cast::<Header>())
     }
 
     fn is_static(&self) -> bool {
