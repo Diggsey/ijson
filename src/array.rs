@@ -168,12 +168,14 @@ impl IArray {
     }
 
     /// Constructs a new empty `IArray`. Does not allocate.
+    #[must_use]
     pub fn new() -> Self {
         unsafe { IArray(IValue::new_ref(&EMPTY_HEADER, TypeTag::ArrayOrFalse)) }
     }
 
     /// Constructs a new `IArray` with the specified capacity. At least that many items
     /// can be added to the array without reallocating.
+    #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
         if cap == 0 {
             Self::new()
@@ -196,21 +198,25 @@ impl IArray {
     }
     /// Returns the capacity of the array. This is the maximum number of items the array
     /// can hold without reallocating.
+    #[must_use]
     pub fn capacity(&self) -> usize {
         self.header().cap
     }
 
     /// Returns the number of items currently stored in the array.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.header().len
     }
 
     /// Returns `true` if the array is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Borrows a slice of [`IValue`]s from the array
+    #[must_use]
     pub fn as_slice(&self) -> &[IValue] {
         self.header().as_slice()
     }
