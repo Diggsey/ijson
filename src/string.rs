@@ -26,7 +26,7 @@ struct Header {
 
 impl Header {
     fn len(&self) -> usize {
-        ((self.len_lower as u64) | ((self.len_upper as u64) << 32)) as usize
+        (u64::from(self.len_lower) | (u64::from(self.len_upper) << 32)) as usize
     }
     fn shard_index(&self) -> usize {
         self.shard_index as usize
@@ -76,7 +76,7 @@ impl PartialEq for WeakIString {
 impl Eq for WeakIString {}
 impl Hash for WeakIString {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        (**self).hash(state)
+        (**self).hash(state);
     }
 }
 
@@ -97,7 +97,7 @@ impl WeakIString {
         unsafe {
             self.ptr.as_ref().rc.fetch_add(1, AtomicOrdering::Relaxed);
             IString(IValue::new_ptr(
-                self.ptr.as_ptr() as *mut u8,
+                self.ptr.as_ptr().cast::<u8>(),
                 TypeTag::StringOrNull,
             ))
         }
@@ -143,7 +143,7 @@ impl IString {
         assert!((s.len() as u64) < (1 << 48));
         assert!(shard_index < (1 << 16));
         unsafe {
-            let ptr = alloc(Self::layout(s.len()).unwrap()) as *mut Header;
+            let ptr = alloc(Self::layout(s.len()).unwrap()).cast::<Header>();
             (*ptr).len_lower = s.len() as u32;
             (*ptr).len_upper = ((s.len() as u64) >> 32) as u16;
             (*ptr).shard_index = shard_index as u16;
@@ -156,11 +156,12 @@ impl IString {
     fn dealloc(ptr: *mut Header) {
         unsafe {
             let layout = Self::layout((*ptr).len()).unwrap();
-            dealloc(ptr as *mut u8, layout);
+            dealloc(ptr.cast::<u8>(), layout);
         }
     }
 
     /// Converts a `&str` to an `IString` by interning it in the global string cache.
+    #[must_use]
     pub fn intern(s: &str) -> Self {
         if s.is_empty() {
             return Self::new();
@@ -190,26 +191,31 @@ impl IString {
     }
 
     /// Returns the length (in bytes) of this string.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.header().len()
     }
 
     /// Returns `true` if this is the empty string "".
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Obtains a `&str` from this `IString`. This is a cheap operation.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.header().as_str()
     }
 
     /// Obtains a byte slice from this `IString`. This is a cheap operation.
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         self.header().as_bytes()
     }
 
     /// Returns the empty string.
+    #[must_use]
     pub fn new() -> Self {
         unsafe { IString(IValue::new_ref(&EMPTY_HEADER, TypeTag::StringOrNull)) }
     }

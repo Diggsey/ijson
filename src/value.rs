@@ -80,7 +80,7 @@ pub enum Destructured {
 impl Destructured {
     /// Convert to the borrowed form of thie enum.
     pub fn as_ref(&self) -> DestructuredRef {
-        use DestructuredRef::*;
+        use DestructuredRef::{Array, Bool, Null, Number, Object, String};
         match self {
             Self::Null => Null,
             Self::Bool(b) => Bool(*b),
@@ -145,6 +145,7 @@ impl<'a> BoolMut<'a> {
     }
     /// Get the boolean value stored in the [`IValue`] from which
     /// this proxy was obtained.
+    #[must_use]
     pub fn get(&self) -> bool {
         self.0.is_true()
     }
@@ -243,7 +244,7 @@ impl IValue {
     }
     // Safety: Reference must be aligned to at least ALIGNMENT
     pub(crate) unsafe fn set_ref<T>(&mut self, r: &T) {
-        self.set_ptr(r as *const T as *mut u8)
+        self.set_ptr(r as *const T as *mut u8);
     }
     pub(crate) unsafe fn raw_copy(&self) -> Self {
         Self { ptr: self.ptr }
@@ -252,7 +253,7 @@ impl IValue {
         self.ptr == other.ptr
     }
     pub(crate) fn raw_hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.ptr.hash(state)
+        self.ptr.hash(state);
     }
     fn is_ptr(&self) -> bool {
         self.ptr_usize() >= ALIGNMENT
@@ -262,6 +263,7 @@ impl IValue {
     }
 
     /// Returns the type of this value.
+    #[must_use]
     pub fn type_(&self) -> ValueType {
         match (self.type_tag(), self.is_ptr()) {
             // Pointers
@@ -359,6 +361,7 @@ impl IValue {
 
     /// Returns the length of this value if it is an array or object.
     /// Returns `None` for other types.
+    #[must_use]
     pub fn len(&self) -> Option<usize> {
         match self.type_() {
             // Safety: checked type
@@ -371,6 +374,7 @@ impl IValue {
 
     /// Returns whether this value is empty if it is an array or object.
     /// Returns `None` for other types.
+    #[must_use]
     pub fn is_empty(&self) -> Option<bool> {
         match self.type_() {
             // Safety: checked type
@@ -383,28 +387,33 @@ impl IValue {
 
     // # Null methods
     /// Returns `true` if this is the `null` value.
+    #[must_use]
     pub fn is_null(&self) -> bool {
         self.ptr == Self::NULL.ptr
     }
 
     // # Bool methods
     /// Returns `true` if this is a boolean.
+    #[must_use]
     pub fn is_bool(&self) -> bool {
         self.ptr == Self::TRUE.ptr || self.ptr == Self::FALSE.ptr
     }
 
     /// Returns `true` if this is the `true` value.
+    #[must_use]
     pub fn is_true(&self) -> bool {
         self.ptr == Self::TRUE.ptr
     }
 
     /// Returns `true` if this is the `false` value.
+    #[must_use]
     pub fn is_false(&self) -> bool {
         self.ptr == Self::FALSE.ptr
     }
 
     /// Converts this value to a `bool`.
     /// Returns `None` if it's not a boolean.
+    #[must_use]
     pub fn to_bool(&self) -> Option<bool> {
         if self.is_bool() {
             Some(self.is_true())
@@ -415,16 +424,17 @@ impl IValue {
 
     // # Number methods
     /// Returns `true` if this is a number.
+    #[must_use]
     pub fn is_number(&self) -> bool {
         self.type_tag() == TypeTag::Number
     }
 
     unsafe fn unchecked_cast_ref<T>(&self) -> &T {
-        &*(self as *const Self as *const T)
+        &*(self as *const Self).cast::<T>()
     }
 
     unsafe fn unchecked_cast_mut<T>(&mut self) -> &mut T {
-        &mut *(self as *mut Self as *mut T)
+        &mut *(self as *mut Self).cast::<T>()
     }
 
     // Safety: Must be a string
@@ -439,6 +449,7 @@ impl IValue {
 
     /// Gets a reference to this value as an [`INumber`].
     /// Returns `None` if it's not a number.
+    #[must_use]
     pub fn as_number(&self) -> Option<&INumber> {
         if self.is_number() {
             // Safety: INumber is a `#[repr(transparent)]` wrapper around IValue
@@ -470,50 +481,61 @@ impl IValue {
     }
 
     /// Converts this value to an i64 if it is a number that can be represented exactly.
+    #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
         self.as_number()?.to_i64()
     }
     /// Converts this value to a u64 if it is a number that can be represented exactly.
+    #[must_use]
     pub fn to_u64(&self) -> Option<u64> {
         self.as_number()?.to_u64()
     }
     /// Converts this value to an f64 if it is a number that can be represented exactly.
+    #[must_use]
     pub fn to_f64(&self) -> Option<f64> {
         self.as_number()?.to_f64()
     }
     /// Converts this value to an f32 if it is a number that can be represented exactly.
+    #[must_use]
     pub fn to_f32(&self) -> Option<f32> {
         self.as_number()?.to_f32()
     }
     /// Converts this value to an i32 if it is a number that can be represented exactly.
+    #[must_use]
     pub fn to_i32(&self) -> Option<i32> {
         self.as_number()?.to_i32()
     }
     /// Converts this value to a u32 if it is a number that can be represented exactly.
+    #[must_use]
     pub fn to_u32(&self) -> Option<u32> {
         self.as_number()?.to_u32()
     }
     /// Converts this value to an isize if it is a number that can be represented exactly.
+    #[must_use]
     pub fn to_isize(&self) -> Option<isize> {
         self.as_number()?.to_isize()
     }
     /// Converts this value to a usize if it is a number that can be represented exactly.
+    #[must_use]
     pub fn to_usize(&self) -> Option<usize> {
         self.as_number()?.to_usize()
     }
     /// Converts this value to an f64 if it is a number, potentially losing precision
     /// in the process.
+    #[must_use]
     pub fn to_f64_lossy(&self) -> Option<f64> {
         Some(self.as_number()?.to_f64_lossy())
     }
     /// Converts this value to an f32 if it is a number, potentially losing precision
     /// in the process.
+    #[must_use]
     pub fn to_f32_lossy(&self) -> Option<f32> {
         Some(self.as_number()?.to_f32_lossy())
     }
 
     // # String methods
     /// Returns `true` if this is a string.
+    #[must_use]
     pub fn is_string(&self) -> bool {
         self.type_tag() == TypeTag::StringOrNull && self.is_ptr()
     }
@@ -530,6 +552,7 @@ impl IValue {
 
     /// Gets a reference to this value as an [`IString`].
     /// Returns `None` if it's not a string.
+    #[must_use]
     pub fn as_string(&self) -> Option<&IString> {
         if self.is_string() {
             // Safety: IString is a `#[repr(transparent)]` wrapper around IValue
@@ -562,6 +585,7 @@ impl IValue {
 
     // # Array methods
     /// Returns `true` if this is an array.
+    #[must_use]
     pub fn is_array(&self) -> bool {
         self.type_tag() == TypeTag::ArrayOrFalse && self.is_ptr()
     }
@@ -578,6 +602,7 @@ impl IValue {
 
     /// Gets a reference to this value as an [`IArray`].
     /// Returns `None` if it's not an array.
+    #[must_use]
     pub fn as_array(&self) -> Option<&IArray> {
         if self.is_array() {
             // Safety: IArray is a `#[repr(transparent)]` wrapper around IValue
@@ -610,6 +635,7 @@ impl IValue {
 
     // # Object methods
     /// Returns `true` if this is an object.
+    #[must_use]
     pub fn is_object(&self) -> bool {
         self.type_tag() == TypeTag::ObjectOrTrue && self.is_ptr()
     }
@@ -626,6 +652,7 @@ impl IValue {
 
     /// Gets a reference to this value as an [`IObject`].
     /// Returns `None` if it's not an object.
+    #[must_use]
     pub fn as_object(&self) -> Option<&IObject> {
         if self.is_object() {
             // Safety: IObject is a `#[repr(transparent)]` wrapper around IValue
@@ -998,7 +1025,7 @@ mod tests {
             assert_eq!(x.type_(), ValueType::Number);
             assert_eq!(x.to_i32(), Some(v));
             assert_eq!(x.to_u32(), Some(v as u32));
-            assert_eq!(x.to_i64(), Some(v as i64));
+            assert_eq!(x.to_i64(), Some(i64::from(v)));
             assert_eq!(x.to_u64(), Some(v as u64));
             assert_eq!(x.to_isize(), Some(v as isize));
             assert_eq!(x.to_usize(), Some(v as usize));

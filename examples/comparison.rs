@@ -46,7 +46,7 @@ fn test_simd_decode(data: &[u8]) -> (AllocInfo, AllocInfo) {
     let res1 = mockalloc::record_allocs(|| {
         let _value: simd_json::OwnedValue = simd_json::from_reader(data).unwrap();
     });
-    let res11 = res1.result().unwrap();
+    let _res11 = res1.result().unwrap();
 
     // Measure clone cost
     let value: simd_json::OwnedValue = simd_json::from_reader(data).unwrap();

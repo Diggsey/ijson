@@ -327,11 +327,13 @@ impl<'a> OccupiedEntry<'a> {
         }
     }
     /// Returns a reference to the key at this entry
+    #[must_use]
     pub fn key(&self) -> &IString {
         self.get_key_value().0
     }
 
     /// Removes and returns the entry as a (key, value) pair.
+    #[must_use]
     pub fn remove_entry(self) -> (IString, IValue) {
         // Safety: Bucket is known to be correct
         unsafe {
@@ -340,6 +342,7 @@ impl<'a> OccupiedEntry<'a> {
         }
     }
     /// Returns a reference to the value in this entry
+    #[must_use]
     pub fn get(&self) -> &IValue {
         self.get_key_value().1
     }
@@ -349,6 +352,7 @@ impl<'a> OccupiedEntry<'a> {
     }
     /// Converts this into a mutable reference to the value in the entry
     /// with a lifetime bound to the [`IObject`] itself.
+    #[must_use]
     pub fn into_mut(self) -> &'a mut IValue {
         self.into_get_key_value_mut().1
     }
@@ -359,6 +363,7 @@ impl<'a> OccupiedEntry<'a> {
     }
 
     /// Removes this entry and returns its value.
+    #[must_use]
     pub fn remove(self) -> IValue {
         self.remove_entry().1
     }
@@ -381,10 +386,12 @@ impl<'a> Debug for VacantEntry<'a> {
 
 impl<'a> VacantEntry<'a> {
     /// Returns a reference to the key at this entry.
+    #[must_use]
     pub fn key(&self) -> &IString {
         &self.key
     }
     /// Takes ownership of the key.
+    #[must_use]
     pub fn into_key(self) -> IString {
         self.key
     }
@@ -435,6 +442,7 @@ impl<'a> Entry<'a> {
     }
 
     /// Returns a reference to the key at this entry.
+    #[must_use]
     pub fn key(&self) -> &IString {
         match self {
             Entry::Occupied(occ) => occ.key(),
@@ -556,12 +564,14 @@ impl IObject {
     }
 
     /// Constructs a new empty `IObject`. Does not allocate.
+    #[must_use]
     pub fn new() -> Self {
         unsafe { Self(IValue::new_ref(&EMPTY_HEADER, TypeTag::ObjectOrTrue)) }
     }
 
     /// Constructs a new `IObject` with the specified capacity. At least that many entries
     /// can be added to the object without reallocating.
+    #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
         if cap == 0 {
             Self::new()
@@ -584,14 +594,17 @@ impl IObject {
     }
     /// Returns the capacity of the object. This is the maximum number of entries the object
     /// can hold without reallocating.
+    #[must_use]
     pub fn capacity(&self) -> usize {
         self.header().cap
     }
     /// Returns the number of entries currently stored in the object.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.header().len
     }
     /// Returns `true` if the object is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -644,6 +657,7 @@ impl IObject {
         self.iter().map(|x| x.1)
     }
     /// Returns an iterator over (&key, &value) pairs in this object.
+    #[must_use]
     pub fn iter(&self) -> Iter {
         Iter(self.header().split().items.iter())
     }
@@ -831,7 +845,7 @@ impl Hash for IObject {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.len().hash(state);
 
-        let mut total_hash = 0u64;
+        let mut total_hash = 0_u64;
         for item in self.iter() {
             let mut h = DefaultHasher::new();
             item.hash(&mut h);
