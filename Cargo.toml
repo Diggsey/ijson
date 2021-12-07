@@ -18,6 +18,9 @@ lazy_static = "1.4.0"
 serde = "1.0.117"
 serde_json = "1.0.59"
 ctor = { version = "0.1.16", optional = true }
+json = "0.12.4"
+simd-json = { version="0.4.11", features = ["allow-non-simd"]}
+
 
 [dev-dependencies]
 mockalloc = "0.1.2"
