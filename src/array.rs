@@ -284,6 +284,30 @@ impl IArray {
         }
     }
 
+    /// Inserts all items on the given iterator into the array at the specified index.
+    /// Any existing items on or after this index will be shifted down to accomodate this.
+    /// For large arrays, insertions near the front will be slow as it will require shifting
+    /// a large number of items.
+    pub fn append<I: Into<IValue>>(&mut self, index: usize, items: impl Iterator<Item = I>) {
+        let items = items.collect::<Vec<I>>();
+        let items_len = items.len();
+        self.reserve(items_len);
+
+        unsafe {
+            // Safety: cannot be static after calling `reserve`
+            let hd = self.header_mut();
+            assert!(index <= hd.len);
+
+            // Safety: We just reserved enough space
+            for item in items {
+                hd.push(item.into());
+            }
+            if index < hd.len {
+                hd.as_mut_slice()[index..].rotate_right(items_len);
+            }
+        }
+    }
+
     /// Removes and returns the item at the specified index from the array. Any
     /// items after this index will be shifted back up to close the gap. For large
     /// arrays, removals from near the front will be slow as it will require shifting
@@ -562,13 +586,17 @@ mod tests {
     }
 
     #[mockalloc::test]
-    fn can_push_insert() {
+    fn can_push_insert_append() {
         let mut x = IArray::new();
         x.insert(0, IValue::NULL);
         x.push(IValue::TRUE);
         x.insert(1, IValue::FALSE);
 
         assert_eq!(x.as_slice(), &[IValue::NULL, IValue::FALSE, IValue::TRUE]);
+
+        x.append(1, vec!(IValue::NULL, IValue::NULL, IValue::NULL).into_iter());
+
+        assert_eq!(x.as_slice(), &[IValue::NULL, IValue::NULL, IValue::NULL, IValue::NULL, IValue::FALSE, IValue::TRUE]);
     }
 
     #[mockalloc::test]
