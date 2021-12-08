@@ -84,6 +84,25 @@ impl Header {
     unsafe fn as_f64_unchecked_mut(&mut self) -> &mut f64 {
         &mut *(self as *mut _ as *mut f64).add(1)
     }
+    fn as_i64(&self) -> Option<i64> {
+        // Safety: We only call methods appropriate for the type
+        unsafe {
+            match self.type_ {
+                NumberType::Static => Some(self.static_ as i64),
+                NumberType::I24 => Some(self.as_i24_unchecked() as i64),
+                NumberType::I64 => Some(*self.as_i64_unchecked()),
+                NumberType::U64 => {
+                    let v = *self.as_u64_unchecked();
+                    if v <= i64::MAX as u64 {
+                        Some(v as i64)
+                    } else {
+                        None
+                    }
+                }
+                NumberType::F64 => None,
+            }
+        }
+    }
     fn to_i64(&self) -> Option<i64> {
         // Safety: We only call methods appropriate for the type
         unsafe {
@@ -486,6 +505,11 @@ impl INumber {
         }
     }
 
+    /// Return i64 value only if the internal representation is i64, otherwise None.
+    pub fn as_i64(&self) -> Option<i64> {
+        self.header().as_i64()
+    }
+
     /// Converts this number to an i64 if it can be represented exactly.
     pub fn to_i64(&self) -> Option<i64> {
         self.header().to_i64()
@@ -695,9 +719,16 @@ mod tests {
     #[mockalloc::test]
     fn can_store_various_numbers() {
         let x: INumber = 256.into();
+        assert_eq!(x.as_i64(), Some(256));
         assert_eq!(x.to_i64(), Some(256));
         assert_eq!(x.to_u64(), Some(256));
         assert_eq!(x.to_f64(), Some(256.0));
+
+        let x = INumber::try_from(1.5).unwrap();
+        assert_eq!(x.as_i64(), None);
+
+        let x = INumber::try_from(1.0).unwrap();
+        assert_eq!(x.as_i64(), None);
 
         let x: INumber = 0x1000000.into();
         assert_eq!(x.to_i64(), Some(0x1000000));

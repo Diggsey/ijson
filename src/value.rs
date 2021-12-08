@@ -469,6 +469,11 @@ impl IValue {
         }
     }
 
+    /// Return i64 value only if the internal representation is i64, otherwise None.
+    pub fn as_i64(&self) -> Option<i64> {
+        self.as_number()?.as_i64()
+    }
+
     /// Converts this value to an i64 if it is a number that can be represented exactly.
     pub fn to_i64(&self) -> Option<i64> {
         self.as_number()?.to_i64()
