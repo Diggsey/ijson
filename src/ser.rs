@@ -148,7 +148,7 @@ impl Serializer for ValueSerializer {
 
     #[inline]
     fn serialize_char(self, value: char) -> Result<IValue, Self::Error> {
-        let mut buffer = [0u8; 4];
+        let mut buffer = [0_u8; 4];
         Ok(value.encode_utf8(&mut buffer).into())
     }
 
@@ -487,7 +487,7 @@ impl Serializer for ObjectKeySerializer {
 
     #[inline]
     fn serialize_char(self, value: char) -> Result<IString, Self::Error> {
-        let mut buffer = [0u8; 4];
+        let mut buffer = [0_u8; 4];
         Ok(value.encode_utf8(&mut buffer).into())
     }
 
