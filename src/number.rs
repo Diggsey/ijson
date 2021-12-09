@@ -93,11 +93,7 @@ impl Header {
                 NumberType::I64 => Some(*self.as_i64_unchecked()),
                 NumberType::U64 => {
                     let v = *self.as_u64_unchecked();
-                    if i64::try_from(v).is_ok() {
-                        Some(v as i64)
-                    } else {
-                        None
-                    }
+                    i64::try_from(v).ok()
                 }
                 NumberType::F64 => {
                     let v = *self.as_f64_unchecked();
@@ -445,8 +441,8 @@ impl INumber {
     }
 
     fn new_u64(value: u64) -> Self {
-        if i64::try_from(value).is_ok() {
-            Self::new_i64(value as i64)
+        if let Ok(res) = i64::try_from(value) {
+            Self::new_i64(res)
         } else {
             let mut res = Self::new_ptr(NumberType::U64);
             // Safety: We know this is an i64 because we just created it
