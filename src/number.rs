@@ -47,7 +47,7 @@ fn cmp_u64_to_f64(a: u64, b: f64) -> Ordering {
     if can_represent_as_f64(a) {
         // If we can represent as an f64, we can just cast and compare
         (a as f64).partial_cmp(&b).unwrap()
-    } else if b <= (0x20000000000000_u64 as f64) {
+    } else if b <= (0x0020_0000_0000_0000_u64 as f64) {
         // If the floating point number is less than all non-representable
         // integers, and our integer is non-representable, then we know
         // the integer is greater.
@@ -311,8 +311,8 @@ static STATIC_NUMBERS: [Header; STATIC_LEN] =
     define_static_numbers!(STATIC_LOWER 0 1 2 3 4 5 6 7 8);
 
 // Range of a 24-bit signed integer.
-const SHORT_LOWER: i64 = -0x800000;
-const SHORT_UPPER: i64 = 0x800000;
+const SHORT_LOWER: i64 = -0x0080_0000;
+const SHORT_UPPER: i64 = 0x0080_0000;
 
 /// The `INumber` type represents a JSON number. It is decoupled from any specific
 /// representation, and internally uses several. There is no way to determine the
@@ -404,7 +404,7 @@ impl INumber {
     }
 
     fn header_mut(&mut self) -> &mut Header {
-        unsafe { &mut *(self.0.ptr() as *mut Header) }
+        unsafe { &mut *(self.0.ptr().cast::<Header>()) }
     }
 
     fn is_static(&self) -> bool {

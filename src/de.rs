@@ -883,6 +883,10 @@ impl<'de> MapAccess<'de> for ObjectAccess<'de> {
 
 /// Converts an [`IValue`] to an arbitrary type using that type's [`serde::Deserialize`]
 /// implementation.
+/// 
+/// # Errors
+/// 
+/// Will return `Error` if `value` fails to deserialize.
 pub fn from_value<'de, T>(value: &'de IValue) -> Result<T, Error>
 where
     T: Deserialize<'de>,

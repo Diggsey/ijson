@@ -183,7 +183,7 @@ impl<'a> SplitHeaderMut<'a> {
 impl Header {
     fn as_item_ptr(&self) -> *const KeyValuePair {
         // Safety: pointers to the end of structs are allowed
-        unsafe { (self as *const Header).add(1) as *const KeyValuePair }
+        unsafe { (self as *const Header).add(1).cast::<KeyValuePair>() }
     }
     fn as_hash_ptr(&self) -> *const usize {
         // Safety: pointers to the end of structs are allowed
@@ -333,7 +333,6 @@ impl<'a> OccupiedEntry<'a> {
     }
 
     /// Removes and returns the entry as a (key, value) pair.
-    #[must_use]
     pub fn remove_entry(self) -> (IString, IValue) {
         // Safety: Bucket is known to be correct
         unsafe {
@@ -363,7 +362,6 @@ impl<'a> OccupiedEntry<'a> {
     }
 
     /// Removes this entry and returns its value.
-    #[must_use]
     pub fn remove(self) -> IValue {
         self.remove_entry().1
     }
@@ -546,7 +544,7 @@ impl IObject {
 
     fn alloc(cap: usize) -> *mut u8 {
         unsafe {
-            let hd = &mut *(alloc(Self::layout(cap).unwrap()) as *mut Header);
+            let hd = &mut *(alloc(Self::layout(cap).unwrap()).cast::<Header>());
             hd.len = 0;
             hd.cap = cap;
             for item in hd.split_mut().table {

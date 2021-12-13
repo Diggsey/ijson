@@ -79,6 +79,7 @@ pub enum Destructured {
 
 impl Destructured {
     /// Convert to the borrowed form of thie enum.
+    #[must_use]
     pub fn as_ref(&self) -> DestructuredRef {
         use DestructuredRef::{Array, Bool, Null, Number, Object, String};
         match self {
@@ -274,8 +275,7 @@ impl IValue {
 
             // Non-pointers
             (TypeTag::StringOrNull, false) => ValueType::Null,
-            (TypeTag::ArrayOrFalse, false) => ValueType::Bool,
-            (TypeTag::ObjectOrTrue, false) => ValueType::Bool,
+            (TypeTag::ArrayOrFalse, false) | (TypeTag::ObjectOrTrue, false) => ValueType::Bool,
 
             // Safety: due to invariants on IValue
             _ => unsafe { unreachable_unchecked() },
@@ -283,6 +283,7 @@ impl IValue {
     }
 
     /// Destructures this value into an enum which can be `match`ed on.
+    #[must_use]
     pub fn destructure(self) -> Destructured {
         match self.type_() {
             ValueType::Null => Destructured::Null,
@@ -295,6 +296,7 @@ impl IValue {
     }
 
     /// Destructures a reference to this value into an enum which can be `match`ed on.
+    #[must_use]
     pub fn destructure_ref(&self) -> DestructuredRef {
         // Safety: we check the type
         unsafe {
@@ -471,6 +473,9 @@ impl IValue {
     }
 
     /// Converts this value to an [`INumber`].
+    /// 
+    /// # Errors
+    /// 
     /// Returns `Err(self)` if it's not a number.
     pub fn into_number(self) -> Result<INumber, IValue> {
         if self.is_number() {
@@ -574,6 +579,9 @@ impl IValue {
     }
 
     /// Converts this value to an [`IString`].
+    /// 
+    /// # Errors
+    /// 
     /// Returns `Err(self)` if it's not a string.
     pub fn into_string(self) -> Result<IString, IValue> {
         if self.is_string() {
@@ -624,6 +632,9 @@ impl IValue {
     }
 
     /// Converts this value to an [`IArray`].
+    /// 
+    /// # Errors
+    /// 
     /// Returns `Err(self)` if it's not an array.
     pub fn into_array(self) -> Result<IArray, IValue> {
         if self.is_array() {
@@ -674,6 +685,9 @@ impl IValue {
     }
 
     /// Converts this value to an [`IObject`].
+    /// 
+    /// # Errors
+    /// 
     /// Returns `Err(self)` if it's not an object.
     pub fn into_object(self) -> Result<IObject, IValue> {
         if self.is_number() {
