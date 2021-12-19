@@ -473,9 +473,9 @@ impl IValue {
     }
 
     /// Converts this value to an [`INumber`].
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns `Err(self)` if it's not a number.
     pub fn into_number(self) -> Result<INumber, IValue> {
         if self.is_number() {
@@ -579,9 +579,9 @@ impl IValue {
     }
 
     /// Converts this value to an [`IString`].
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns `Err(self)` if it's not a string.
     pub fn into_string(self) -> Result<IString, IValue> {
         if self.is_string() {
@@ -632,9 +632,9 @@ impl IValue {
     }
 
     /// Converts this value to an [`IArray`].
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns `Err(self)` if it's not an array.
     pub fn into_array(self) -> Result<IArray, IValue> {
         if self.is_array() {
@@ -685,9 +685,9 @@ impl IValue {
     }
 
     /// Converts this value to an [`IObject`].
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Returns `Err(self)` if it's not an object.
     pub fn into_object(self) -> Result<IObject, IValue> {
         if self.is_number() {
