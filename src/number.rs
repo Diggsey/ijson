@@ -47,7 +47,7 @@ fn cmp_u64_to_f64(a: u64, b: f64) -> Ordering {
     if can_represent_as_f64(a) {
         // If we can represent as an f64, we can just cast and compare
         (a as f64).partial_cmp(&b).unwrap()
-    } else if b <= (0x20000000000000u64 as f64) {
+    } else if b <= (0x0020_0000_0000_0000_u64 as f64) {
         // If the floating point number is less than all non-representable
         // integers, and our integer is non-representable, then we know
         // the integer is greater.
@@ -64,7 +64,7 @@ fn cmp_u64_to_f64(a: u64, b: f64) -> Ordering {
 
 impl Header {
     fn as_i24_unchecked(&self) -> i32 {
-        ((self.static_ as i32) << 8) | (self.short as i32)
+        (i32::from(self.static_) << 8) | i32::from(self.short)
     }
     unsafe fn as_i64_unchecked(&self) -> &i64 {
         &*(self as *const _ as *const i64).add(1)
@@ -88,16 +88,12 @@ impl Header {
         // Safety: We only call methods appropriate for the type
         unsafe {
             match self.type_ {
-                NumberType::Static => Some(self.static_ as i64),
-                NumberType::I24 => Some(self.as_i24_unchecked() as i64),
+                NumberType::Static => Some(i64::from(self.static_)),
+                NumberType::I24 => Some(i64::from(self.as_i24_unchecked())),
                 NumberType::I64 => Some(*self.as_i64_unchecked()),
                 NumberType::U64 => {
                     let v = *self.as_u64_unchecked();
-                    if v <= i64::MAX as u64 {
-                        Some(v as i64)
-                    } else {
-                        None
-                    }
+                    i64::try_from(v).ok()
                 }
                 NumberType::F64 => {
                     let v = *self.as_f64_unchecked();
@@ -153,8 +149,8 @@ impl Header {
         // Safety: We only call methods appropriate for the type
         unsafe {
             match self.type_ {
-                NumberType::Static => Some(self.static_ as f64),
-                NumberType::I24 => Some(self.as_i24_unchecked() as f64),
+                NumberType::Static => Some(f64::from(self.static_)),
+                NumberType::I24 => Some(f64::from(self.as_i24_unchecked())),
                 NumberType::I64 => {
                     let v = *self.as_i64_unchecked();
                     let can_represent = if v < 0 {
@@ -184,7 +180,7 @@ impl Header {
         // Safety: We only call methods appropriate for the type
         unsafe {
             match self.type_ {
-                NumberType::Static => Some(self.static_ as f32),
+                NumberType::Static => Some(f32::from(self.static_)),
                 NumberType::I24 => Some(self.as_i24_unchecked() as f32),
                 NumberType::I64 => {
                     let v = *self.as_i64_unchecked();
@@ -210,7 +206,7 @@ impl Header {
                 NumberType::F64 => {
                     let v = *self.as_f64_unchecked();
                     let u = v as f32;
-                    if v == (u as f64) {
+                    if v == f64::from(u) {
                         Some(u)
                     } else {
                         None
@@ -228,8 +224,8 @@ impl Header {
     fn to_f64_lossy(&self) -> f64 {
         unsafe {
             match self.type_ {
-                NumberType::Static => self.static_ as f64,
-                NumberType::I24 => self.as_i24_unchecked() as f64,
+                NumberType::Static => f64::from(self.static_),
+                NumberType::I24 => f64::from(self.as_i24_unchecked()),
                 NumberType::I64 => *self.as_i64_unchecked() as f64,
                 NumberType::U64 => *self.as_u64_unchecked() as f64,
                 NumberType::F64 => *self.as_f64_unchecked(),
@@ -315,8 +311,8 @@ static STATIC_NUMBERS: [Header; STATIC_LEN] =
     define_static_numbers!(STATIC_LOWER 0 1 2 3 4 5 6 7 8);
 
 // Range of a 24-bit signed integer.
-const SHORT_LOWER: i64 = -0x800000;
-const SHORT_UPPER: i64 = 0x800000;
+const SHORT_LOWER: i64 = -0x0080_0000;
+const SHORT_UPPER: i64 = 0x0080_0000;
 
 /// The `INumber` type represents a JSON number. It is decoupled from any specific
 /// representation, and internally uses several. There is no way to determine the
@@ -361,7 +357,7 @@ impl INumber {
 
     fn alloc(type_: NumberType) -> *mut Header {
         unsafe {
-            let ptr = alloc(Self::layout(type_).unwrap()) as *mut Header;
+            let ptr = alloc(Self::layout(type_).unwrap()).cast::<Header>();
             (*ptr).type_ = type_;
             (*ptr).static_ = 0;
             (*ptr).short = 0;
@@ -372,16 +368,18 @@ impl INumber {
     fn dealloc(ptr: *mut Header) {
         unsafe {
             let layout = Self::layout((*ptr).type_).unwrap();
-            dealloc(ptr as *mut u8, layout);
+            dealloc(ptr.cast::<u8>(), layout);
         }
     }
 
     /// Returns the number zero (without a decimal point). Does not allocate.
+    #[must_use]
     pub fn zero() -> Self {
         // Safety: 0 is in the static range
         unsafe { Self::new_static(0) }
     }
     /// Returns the number one (without a decimal point). Does not allocate.
+    #[must_use]
     pub fn one() -> Self {
         // Safety: 1 is in the static range
         unsafe { Self::new_static(1) }
@@ -396,7 +394,7 @@ impl INumber {
     fn new_ptr(type_: NumberType) -> Self {
         unsafe {
             INumber(IValue::new_ptr(
-                Self::alloc(type_) as *mut u8,
+                Self::alloc(type_).cast::<u8>(),
                 TypeTag::Number,
             ))
         }
@@ -406,7 +404,7 @@ impl INumber {
     }
 
     fn header_mut(&mut self) -> &mut Header {
-        unsafe { &mut *(self.0.ptr() as *mut Header) }
+        unsafe { &mut *(self.0.ptr().cast::<Header>()) }
     }
 
     fn is_static(&self) -> bool {
@@ -415,7 +413,7 @@ impl INumber {
 
     // Value must fit in an i24
     fn new_short(value: i32) -> Self {
-        if value >= STATIC_LOWER as i32 && value < STATIC_UPPER as i32 {
+        if value >= i32::from(STATIC_LOWER) && value < i32::from(STATIC_UPPER) {
             // Safety: We checked the value is in the static range
             unsafe { Self::new_static(value as i16) }
         } else {
@@ -443,8 +441,8 @@ impl INumber {
     }
 
     fn new_u64(value: u64) -> Self {
-        if value <= i64::MAX as u64 {
-            Self::new_i64(value as i64)
+        if let Ok(res) = i64::try_from(value) {
+            Self::new_i64(res)
         } else {
             let mut res = Self::new_ptr(NumberType::U64);
             // Safety: We know this is an i64 because we just created it
@@ -487,48 +485,59 @@ impl INumber {
     }
 
     /// Converts this number to an i64 if it can be represented exactly.
+    #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
         self.header().to_i64()
     }
     /// Converts this number to an f64 if it can be represented exactly.
+    #[must_use]
     pub fn to_u64(&self) -> Option<u64> {
         self.header().to_u64()
     }
     /// Converts this number to an f64 if it can be represented exactly.
+    #[must_use]
     pub fn to_f64(&self) -> Option<f64> {
         self.header().to_f64()
     }
     /// Converts this number to an f32 if it can be represented exactly.
+    #[must_use]
     pub fn to_f32(&self) -> Option<f32> {
         self.header().to_f32()
     }
     /// Converts this number to an i32 if it can be represented exactly.
+    #[must_use]
     pub fn to_i32(&self) -> Option<i32> {
         self.header().to_i64().and_then(|x| x.try_into().ok())
     }
     /// Converts this number to a u32 if it can be represented exactly.
+    #[must_use]
     pub fn to_u32(&self) -> Option<u32> {
         self.header().to_u64().and_then(|x| x.try_into().ok())
     }
     /// Converts this number to an isize if it can be represented exactly.
+    #[must_use]
     pub fn to_isize(&self) -> Option<isize> {
         self.header().to_i64().and_then(|x| x.try_into().ok())
     }
     /// Converts this number to a usize if it can be represented exactly.
+    #[must_use]
     pub fn to_usize(&self) -> Option<usize> {
         self.header().to_u64().and_then(|x| x.try_into().ok())
     }
     /// Converts this number to an f64, potentially losing precision in the process.
+    #[must_use]
     pub fn to_f64_lossy(&self) -> f64 {
         self.header().to_f64_lossy()
     }
     /// Converts this number to an f32, potentially losing precision in the process.
+    #[must_use]
     pub fn to_f32_lossy(&self) -> f32 {
         self.to_f64_lossy() as f32
     }
 
     /// This allows distinguishing between `1.0` and `1` in the original JSON.
     /// Numeric operations will otherwise treat these two values as equivalent.
+    #[must_use]
     pub fn has_decimal_point(&self) -> bool {
         self.header().has_decimal_point()
     }
@@ -559,18 +568,18 @@ impl From<u64> for INumber {
 }
 impl From<u32> for INumber {
     fn from(v: u32) -> Self {
-        Self::new_u64(v as u64)
+        Self::new_u64(u64::from(v))
     }
 }
 impl From<u16> for INumber {
     fn from(v: u16) -> Self {
-        Self::new_short(v as i32)
+        Self::new_short(i32::from(v))
     }
 }
 impl From<u8> for INumber {
     fn from(v: u8) -> Self {
         // Safety: All u8s are in the static range
-        unsafe { Self::new_static(v as i16) }
+        unsafe { Self::new_static(i16::from(v)) }
     }
 }
 impl From<usize> for INumber {
@@ -586,18 +595,18 @@ impl From<i64> for INumber {
 }
 impl From<i32> for INumber {
     fn from(v: i32) -> Self {
-        Self::new_i64(v as i64)
+        Self::new_i64(i64::from(v))
     }
 }
 impl From<i16> for INumber {
     fn from(v: i16) -> Self {
-        Self::new_short(v as i32)
+        Self::new_short(i32::from(v))
     }
 }
 impl From<i8> for INumber {
     fn from(v: i8) -> Self {
         // Safety: All i8s are in the static range
-        unsafe { Self::new_static(v as i16) }
+        unsafe { Self::new_static(i16::from(v)) }
     }
 }
 impl From<isize> for INumber {
@@ -621,7 +630,7 @@ impl TryFrom<f32> for INumber {
     type Error = ();
     fn try_from(v: f32) -> Result<Self, ()> {
         if v.is_finite() {
-            Ok(Self::new_f64(v as f64))
+            Ok(Self::new_f64(f64::from(v)))
         } else {
             Err(())
         }
@@ -702,12 +711,12 @@ mod tests {
         let x: INumber = 0x1000000.into();
         assert_eq!(x.to_i64(), Some(0x1000000));
         assert_eq!(x.to_u64(), Some(0x1000000));
-        assert_eq!(x.to_f64(), Some(16777216.0));
+        assert_eq!(x.to_f64(), Some(16_777_216.0));
 
         let x: INumber = i64::MIN.into();
         assert_eq!(x.to_i64(), Some(i64::MIN));
         assert_eq!(x.to_u64(), None);
-        assert_eq!(x.to_f64(), Some(-9223372036854775808.0));
+        assert_eq!(x.to_f64(), Some(-9_223_372_036_854_775_808.0));
 
         let x: INumber = i64::MAX.into();
         assert_eq!(x.to_i64(), Some(i64::MAX));
@@ -720,9 +729,9 @@ mod tests {
         assert_eq!(x.to_f64(), None);
 
         let x: INumber = 13369629.into();
-        assert_eq!(x.to_i64(), Some(13369629));
-        assert_eq!(x.to_u64(), Some(13369629));
-        assert_eq!(x.to_f64(), Some(13369629.0));
+        assert_eq!(x.to_i64(), Some(13_369_629));
+        assert_eq!(x.to_u64(), Some(13_369_629));
+        assert_eq!(x.to_f64(), Some(13_369_629.0));
 
         let x: INumber = 0x800000.into();
         assert_eq!(x.to_i64(), Some(0x800000));
@@ -753,6 +762,6 @@ mod tests {
         assert!(INumber::try_from(1e30).unwrap() > INumber::from(i64::MAX));
         assert!(INumber::try_from(-1e30).unwrap() < INumber::from(i64::MIN));
         assert!(INumber::try_from(-1e30).unwrap() < INumber::from(i64::MIN));
-        assert!(INumber::try_from(99999999000.0).unwrap() < INumber::from(99999999001u64));
+        assert!(INumber::try_from(99_999_999_000.0).unwrap() < INumber::from(99_999_999_001_u64));
     }
 }

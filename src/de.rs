@@ -773,7 +773,7 @@ impl<'de> VariantAccess<'de> for VariantDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.value.map(|v| v.destructure_ref()) {
+        match self.value.map(IValue::destructure_ref) {
             Some(DestructuredRef::Array(v)) => v.deserialize_any(visitor),
             Some(other) => Err(SError::invalid_type(other.unexpected(), &"tuple variant")),
             None => Err(SError::invalid_type(
@@ -791,7 +791,7 @@ impl<'de> VariantAccess<'de> for VariantDeserializer<'de> {
     where
         V: Visitor<'de>,
     {
-        match self.value.map(|v| v.destructure_ref()) {
+        match self.value.map(IValue::destructure_ref) {
             Some(DestructuredRef::Object(v)) => v.deserialize_any(visitor),
             Some(other) => Err(SError::invalid_type(other.unexpected(), &"struct variant")),
             None => Err(SError::invalid_type(
@@ -883,6 +883,10 @@ impl<'de> MapAccess<'de> for ObjectAccess<'de> {
 
 /// Converts an [`IValue`] to an arbitrary type using that type's [`serde::Deserialize`]
 /// implementation.
+///
+/// # Errors
+///
+/// Will return `Error` if `value` fails to deserialize.
 pub fn from_value<'de, T>(value: &'de IValue) -> Result<T, Error>
 where
     T: Deserialize<'de>,

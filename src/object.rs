@@ -35,9 +35,9 @@ fn hash_fn(s: &IString) -> usize {
     let v: &IValue = s.as_ref();
     // We know the bottom two bits are always the same
     let mut p = v.ptr_usize() >> 2;
-    p = p.wrapping_mul(202529);
+    p = p.wrapping_mul(202_529);
     p = p ^ (p >> 13);
-    p.wrapping_mul(202529)
+    p.wrapping_mul(202_529)
 }
 
 fn hash_bucket(s: &IString, hash_cap: usize) -> usize {
@@ -183,11 +183,11 @@ impl<'a> SplitHeaderMut<'a> {
 impl Header {
     fn as_item_ptr(&self) -> *const KeyValuePair {
         // Safety: pointers to the end of structs are allowed
-        unsafe { (self as *const Header).add(1) as *const KeyValuePair }
+        unsafe { (self as *const Header).add(1).cast::<KeyValuePair>() }
     }
     fn as_hash_ptr(&self) -> *const usize {
         // Safety: pointers to the end of structs are allowed
-        unsafe { self.as_item_ptr().add(self.cap) as *const usize }
+        unsafe { self.as_item_ptr().add(self.cap).cast::<usize>() }
     }
     // Safety: len < cap
     unsafe fn end_item_mut(&mut self) -> &mut MaybeUninit<KeyValuePair> {
@@ -327,6 +327,7 @@ impl<'a> OccupiedEntry<'a> {
         }
     }
     /// Returns a reference to the key at this entry
+    #[must_use]
     pub fn key(&self) -> &IString {
         self.get_key_value().0
     }
@@ -340,6 +341,7 @@ impl<'a> OccupiedEntry<'a> {
         }
     }
     /// Returns a reference to the value in this entry
+    #[must_use]
     pub fn get(&self) -> &IValue {
         self.get_key_value().1
     }
@@ -349,6 +351,7 @@ impl<'a> OccupiedEntry<'a> {
     }
     /// Converts this into a mutable reference to the value in the entry
     /// with a lifetime bound to the [`IObject`] itself.
+    #[must_use]
     pub fn into_mut(self) -> &'a mut IValue {
         self.into_get_key_value_mut().1
     }
@@ -381,10 +384,12 @@ impl<'a> Debug for VacantEntry<'a> {
 
 impl<'a> VacantEntry<'a> {
     /// Returns a reference to the key at this entry.
+    #[must_use]
     pub fn key(&self) -> &IString {
         &self.key
     }
     /// Takes ownership of the key.
+    #[must_use]
     pub fn into_key(self) -> IString {
         self.key
     }
@@ -435,6 +440,7 @@ impl<'a> Entry<'a> {
     }
 
     /// Returns a reference to the key at this entry.
+    #[must_use]
     pub fn key(&self) -> &IString {
         match self {
             Entry::Occupied(occ) => occ.key(),
@@ -484,7 +490,7 @@ impl Iterator for IntoIter {
                     .read();
                 self.index += 1;
                 if self.index >= len {
-                    IObject::dealloc(self.header as *mut u8);
+                    IObject::dealloc(self.header.cast::<u8>());
                     self.header = std::ptr::null_mut();
                 }
                 Some((res.key, res.value))
@@ -538,7 +544,7 @@ impl IObject {
 
     fn alloc(cap: usize) -> *mut u8 {
         unsafe {
-            let hd = &mut *(alloc(Self::layout(cap).unwrap()) as *mut Header);
+            let hd = &mut *(alloc(Self::layout(cap).unwrap()).cast::<Header>());
             hd.len = 0;
             hd.cap = cap;
             for item in hd.split_mut().table {
@@ -556,12 +562,14 @@ impl IObject {
     }
 
     /// Constructs a new empty `IObject`. Does not allocate.
+    #[must_use]
     pub fn new() -> Self {
         unsafe { Self(IValue::new_ref(&EMPTY_HEADER, TypeTag::ObjectOrTrue)) }
     }
 
     /// Constructs a new `IObject` with the specified capacity. At least that many entries
     /// can be added to the object without reallocating.
+    #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
         if cap == 0 {
             Self::new()
@@ -576,7 +584,7 @@ impl IObject {
 
     // Safety: must not be static
     unsafe fn header_mut(&mut self) -> &mut Header {
-        &mut *(self.0.ptr() as *mut Header)
+        &mut *self.0.ptr().cast::<Header>()
     }
 
     fn is_static(&self) -> bool {
@@ -584,14 +592,17 @@ impl IObject {
     }
     /// Returns the capacity of the object. This is the maximum number of entries the object
     /// can hold without reallocating.
+    #[must_use]
     pub fn capacity(&self) -> usize {
         self.header().cap
     }
     /// Returns the number of entries currently stored in the object.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.header().len
     }
     /// Returns `true` if the object is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -644,6 +655,7 @@ impl IObject {
         self.iter().map(|x| x.1)
     }
     /// Returns an iterator over (&key, &value) pairs in this object.
+    #[must_use]
     pub fn iter(&self) -> Iter {
         Iter(self.header().split().items.iter())
     }
@@ -831,7 +843,7 @@ impl Hash for IObject {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.len().hash(state);
 
-        let mut total_hash = 0u64;
+        let mut total_hash = 0_u64;
         for item in self.iter() {
             let mut h = DefaultHasher::new();
             item.hash(&mut h);
