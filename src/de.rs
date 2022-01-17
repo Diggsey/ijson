@@ -764,15 +764,6 @@ impl<'de> VariantAccess<'de> for VariantDeserializer<'de> {
             },
             |value| seed.deserialize(value),
         )
-
-        // if let Some(value) = self.value {
-        //     seed.deserialize(value)
-        // } else {
-        //     Err(SError::invalid_type(
-        //         Unexpected::UnitVariant,
-        //         &"newtype variant",
-        //     ))
-        // }
     }
 
     fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value, Error>
