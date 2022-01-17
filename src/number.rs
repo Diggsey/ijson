@@ -27,11 +27,11 @@ struct Header {
     static_: i16,
 }
 
-fn can_represent_as_f64(x: u64) -> bool {
+const fn can_represent_as_f64(x: u64) -> bool {
     x.leading_zeros() + x.trailing_zeros() >= 11
 }
 
-fn can_represent_as_f32(x: u64) -> bool {
+const fn can_represent_as_f32(x: u64) -> bool {
     x.leading_zeros() + x.trailing_zeros() >= 40
 }
 
@@ -215,7 +215,7 @@ impl Header {
             }
         }
     }
-    fn has_decimal_point(&self) -> bool {
+    const fn has_decimal_point(&self) -> bool {
         match self.type_ {
             NumberType::Static | NumberType::I24 | NumberType::I64 | NumberType::U64 => false,
             NumberType::F64 => true,
@@ -232,7 +232,7 @@ impl Header {
             }
         }
     }
-    fn cmp(&self, other: &Header) -> Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         // Fast path
         if self.type_ == other.type_ {
             // Safety: We only call methods for the appropriate type
@@ -386,14 +386,14 @@ impl INumber {
     }
     // Safety: Value must be in the range STATIC_LOWER..STATIC_UPPER
     unsafe fn new_static(value: i16) -> Self {
-        INumber(IValue::new_ref(
+        Self(IValue::new_ref(
             &STATIC_NUMBERS[(value - STATIC_LOWER) as usize],
             TypeTag::Number,
         ))
     }
     fn new_ptr(type_: NumberType) -> Self {
         unsafe {
-            INumber(IValue::new_ptr(
+            Self(IValue::new_ptr(
                 Self::alloc(type_).cast::<u8>(),
                 TypeTag::Number,
             ))

@@ -27,7 +27,7 @@ struct KeyValuePair {
     value: IValue,
 }
 
-fn hash_capacity(cap: usize) -> usize {
+const fn hash_capacity(cap: usize) -> usize {
     cap + cap / 4
 }
 
@@ -105,7 +105,7 @@ struct SplitHeaderMut<'a> {
 }
 
 impl<'a> SplitHeaderMut<'a> {
-    fn as_ref(&self) -> SplitHeader {
+    const fn as_ref(&self) -> SplitHeader {
         SplitHeader {
             cap: self.cap,
             items: self.items,
@@ -183,7 +183,7 @@ impl<'a> SplitHeaderMut<'a> {
 impl Header {
     fn as_item_ptr(&self) -> *const KeyValuePair {
         // Safety: pointers to the end of structs are allowed
-        unsafe { (self as *const Header).add(1).cast::<KeyValuePair>() }
+        unsafe { (self as *const Self).add(1).cast::<KeyValuePair>() }
     }
     fn as_hash_ptr(&self) -> *const usize {
         // Safety: pointers to the end of structs are allowed
@@ -865,7 +865,7 @@ impl<K: Into<IString>, V: Into<IValue>> Extend<(K, V)> for IObject {
 
 impl<K: Into<IString>, V: Into<IValue>> FromIterator<(K, V)> for IObject {
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
-        let mut res = IObject::new();
+        let mut res = Self::new();
         res.extend(iter);
         res
     }

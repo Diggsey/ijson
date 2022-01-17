@@ -748,25 +748,31 @@ impl<'de> VariantAccess<'de> for VariantDeserializer<'de> {
     type Error = Error;
 
     fn unit_variant(self) -> Result<(), Error> {
-        if let Some(value) = self.value {
-            Deserialize::deserialize(value)
-        } else {
-            Ok(())
-        }
+        self.value.map_or(Ok(()), Deserialize::deserialize)
     }
 
     fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value, Error>
     where
         T: DeserializeSeed<'de>,
     {
-        if let Some(value) = self.value {
-            seed.deserialize(value)
-        } else {
-            Err(SError::invalid_type(
-                Unexpected::UnitVariant,
-                &"newtype variant",
-            ))
-        }
+        self.value.map_or_else(
+            || {
+                Err(SError::invalid_type(
+                    Unexpected::UnitVariant,
+                    &"newtype variant",
+                ))
+            },
+            |value| seed.deserialize(value),
+        )
+
+        // if let Some(value) = self.value {
+        //     seed.deserialize(value)
+        // } else {
+        //     Err(SError::invalid_type(
+        //         Unexpected::UnitVariant,
+        //         &"newtype variant",
+        //     ))
+        // }
     }
 
     fn tuple_variant<V>(self, _len: usize, visitor: V) -> Result<V::Value, Error>
@@ -866,11 +872,10 @@ impl<'de> MapAccess<'de> for ObjectAccess<'de> {
     where
         T: DeserializeSeed<'de>,
     {
-        if let Some(value) = self.value.take() {
-            seed.deserialize(value)
-        } else {
-            Err(SError::custom("value is missing"))
-        }
+        self.value.take().map_or_else(
+            || Err(SError::custom("value is missing")),
+            |value| seed.deserialize(value),
+        )
     }
 
     fn size_hint(&self) -> Option<usize> {

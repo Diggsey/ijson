@@ -28,12 +28,12 @@ impl Header {
     fn len(&self) -> usize {
         (u64::from(self.len_lower) | (u64::from(self.len_upper) << 32)) as usize
     }
-    fn shard_index(&self) -> usize {
+    const fn shard_index(&self) -> usize {
         self.shard_index as usize
     }
     fn as_ptr(&self) -> *const u8 {
         // Safety: pointers to the end of structs are allowed
-        unsafe { (self as *const Header).add(1).cast::<u8>() }
+        unsafe { (self as *const Self).add(1).cast::<u8>() }
     }
     fn as_bytes(&self) -> &[u8] {
         // Safety: Header `len` must be accurate
@@ -217,7 +217,7 @@ impl IString {
     /// Returns the empty string.
     #[must_use]
     pub fn new() -> Self {
-        unsafe { IString(IValue::new_ref(&EMPTY_HEADER, TypeTag::StringOrNull)) }
+        unsafe { Self(IValue::new_ref(&EMPTY_HEADER, TypeTag::StringOrNull)) }
     }
 
     pub(crate) fn clone_impl(&self) -> IValue {

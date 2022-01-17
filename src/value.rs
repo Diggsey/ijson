@@ -275,7 +275,7 @@ impl IValue {
 
             // Non-pointers
             (TypeTag::StringOrNull, false) => ValueType::Null,
-            (TypeTag::ArrayOrFalse, false) | (TypeTag::ObjectOrTrue, false) => ValueType::Bool,
+            (TypeTag::ArrayOrFalse | TypeTag::ObjectOrTrue, false) => ValueType::Bool,
 
             // Safety: due to invariants on IValue
             _ => unsafe { unreachable_unchecked() },
@@ -332,7 +332,7 @@ impl IValue {
     /// Panics if attempting to index an object with a number.
     /// Returns `None` if the index type is correct, but there is
     /// no value at this index.
-    pub fn get(&self, index: impl ValueIndex) -> Option<&IValue> {
+    pub fn get(&self, index: impl ValueIndex) -> Option<&Self> {
         index.index_into(self)
     }
 
@@ -342,7 +342,7 @@ impl IValue {
     /// Panics if attempting to index an object with a number.
     /// Returns `None` if the index type is correct, but there is
     /// no value at this index.
-    pub fn get_mut(&mut self, index: impl ValueIndex) -> Option<&mut IValue> {
+    pub fn get_mut(&mut self, index: impl ValueIndex) -> Option<&mut Self> {
         index.index_into_mut(self)
     }
 
@@ -352,13 +352,13 @@ impl IValue {
     /// Panics if attempting to index an object with a number.
     /// Returns `None` if the index type is correct, but there is
     /// no value at this index.
-    pub fn remove(&mut self, index: impl ValueIndex) -> Option<IValue> {
+    pub fn remove(&mut self, index: impl ValueIndex) -> Option<Self> {
         index.remove(self)
     }
 
     /// Takes this value, replacing it with [`IValue::NULL`].
-    pub fn take(&mut self) -> IValue {
-        mem::replace(self, IValue::NULL)
+    pub fn take(&mut self) -> Self {
+        mem::replace(self, Self::NULL)
     }
 
     /// Returns the length of this value if it is an array or object.
@@ -477,7 +477,7 @@ impl IValue {
     /// # Errors
     ///
     /// Returns `Err(self)` if it's not a number.
-    pub fn into_number(self) -> Result<INumber, IValue> {
+    pub fn into_number(self) -> Result<INumber, Self> {
         if self.is_number() {
             Ok(INumber(self))
         } else {
@@ -583,7 +583,7 @@ impl IValue {
     /// # Errors
     ///
     /// Returns `Err(self)` if it's not a string.
-    pub fn into_string(self) -> Result<IString, IValue> {
+    pub fn into_string(self) -> Result<IString, Self> {
         if self.is_string() {
             Ok(IString(self))
         } else {
@@ -636,7 +636,7 @@ impl IValue {
     /// # Errors
     ///
     /// Returns `Err(self)` if it's not an array.
-    pub fn into_array(self) -> Result<IArray, IValue> {
+    pub fn into_array(self) -> Result<IArray, Self> {
         if self.is_array() {
             Ok(IArray(self))
         } else {
@@ -689,7 +689,7 @@ impl IValue {
     /// # Errors
     ///
     /// Returns `Err(self)` if it's not an object.
-    pub fn into_object(self) -> Result<IObject, IValue> {
+    pub fn into_object(self) -> Result<IObject, Self> {
         if self.is_number() {
             Ok(IObject(self))
         } else {
@@ -888,17 +888,17 @@ impl<T: ValueIndex> ValueIndex for &T {
 }
 
 impl<I: ValueIndex> Index<I> for IValue {
-    type Output = IValue;
+    type Output = Self;
 
     #[inline]
-    fn index(&self, index: I) -> &IValue {
+    fn index(&self, index: I) -> &Self {
         index.index_into(self).unwrap()
     }
 }
 
 impl<I: ValueIndex> IndexMut<I> for IValue {
     #[inline]
-    fn index_mut(&mut self, index: I) -> &mut IValue {
+    fn index_mut(&mut self, index: I) -> &mut Self {
         index.index_or_insert(self)
     }
 }
@@ -923,13 +923,9 @@ impl Debug for IValue {
     }
 }
 
-impl<T: Into<IValue>> From<Option<T>> for IValue {
+impl<T: Into<Self>> From<Option<T>> for IValue {
     fn from(other: Option<T>) -> Self {
-        if let Some(v) = other {
-            v.into()
-        } else {
-            Self::NULL
-        }
+        other.map_or(Self::NULL, Into::into)
     }
 }
 
@@ -947,22 +943,22 @@ typed_conversions! {
     INumber: i8, u8, i16, u16, i32, u32, i64, u64, isize, usize;
     IString: String, &String, &mut String, &str, &mut str;
     IArray:
-        Vec<T> where (T: Into<IValue>),
-        &[T] where (T: Into<IValue> + Clone);
+        Vec<T> where (T: Into<Self>),
+        &[T] where (T: Into<Self> + Clone);
     IObject:
-        HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
-        BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
+        HashMap<K, V> where (K: Into<IString>, V: Into<Self>),
+        BTreeMap<K, V> where (K: Into<IString>, V: Into<Self>);
 }
 
 impl From<f32> for IValue {
     fn from(v: f32) -> Self {
-        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
+        INumber::try_from(v).map(Into::into).unwrap_or(Self::NULL)
     }
 }
 
 impl From<f64> for IValue {
     fn from(v: f64) -> Self {
-        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
+        INumber::try_from(v).map(Into::into).unwrap_or(Self::NULL)
     }
 }
 

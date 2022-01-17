@@ -22,7 +22,7 @@ struct Header {
 impl Header {
     fn as_ptr(&self) -> *const IValue {
         // Safety: pointers to the end of structs are allowed
-        unsafe { (self as *const Header).add(1).cast::<IValue>() }
+        unsafe { (self as *const Self).add(1).cast::<IValue>() }
     }
     fn as_slice(&self) -> &[IValue] {
         // Safety: Header `len` must be accurate
@@ -170,7 +170,7 @@ impl IArray {
     /// Constructs a new empty `IArray`. Does not allocate.
     #[must_use]
     pub fn new() -> Self {
-        unsafe { IArray(IValue::new_ref(&EMPTY_HEADER, TypeTag::ArrayOrFalse)) }
+        unsafe { Self(IValue::new_ref(&EMPTY_HEADER, TypeTag::ArrayOrFalse)) }
     }
 
     /// Constructs a new `IArray` with the specified capacity. At least that many items
@@ -180,7 +180,7 @@ impl IArray {
         if cap == 0 {
             Self::new()
         } else {
-            IArray(unsafe { IValue::new_ptr(Self::alloc(cap), TypeTag::ArrayOrFalse) })
+            Self(unsafe { IValue::new_ptr(Self::alloc(cap), TypeTag::ArrayOrFalse) })
         }
     }
 
@@ -452,7 +452,7 @@ impl<U: Into<IValue>> Extend<U> for IArray {
 
 impl<U: Into<IValue>> FromIterator<U> for IArray {
     fn from_iter<T: IntoIterator<Item = U>>(iter: T) -> Self {
-        let mut res = IArray::new();
+        let mut res = Self::new();
         res.extend(iter);
         res
     }
@@ -509,7 +509,7 @@ impl Debug for IArray {
 
 impl<T: Into<IValue>> From<Vec<T>> for IArray {
     fn from(other: Vec<T>) -> Self {
-        let mut res = IArray::with_capacity(other.len());
+        let mut res = Self::with_capacity(other.len());
         res.extend(other.into_iter().map(Into::into));
         res
     }
@@ -517,7 +517,7 @@ impl<T: Into<IValue>> From<Vec<T>> for IArray {
 
 impl<T: Into<IValue> + Clone> From<&[T]> for IArray {
     fn from(other: &[T]) -> Self {
-        let mut res = IArray::with_capacity(other.len());
+        let mut res = Self::with_capacity(other.len());
         res.extend(other.iter().cloned().map(Into::into));
         res
     }
