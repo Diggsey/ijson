@@ -279,7 +279,7 @@ impl Header {
                         .reverse(),
                     (NumberType::U64, _) => Ordering::Greater,
                     (_, NumberType::U64) => Ordering::Less,
-                    _ => (self.to_i64().cmp(&other.to_i64())),
+                    _ => self.to_i64().cmp(&other.to_i64()),
                 }
             }
         }
@@ -348,9 +348,26 @@ impl INumber {
         match type_ {
             NumberType::Static => unreachable!(),
             NumberType::I24 => {}
-            NumberType::I64 => res = res.extend(Layout::new::<i64>())?.0.pad_to_align(),
-            NumberType::U64 => res = res.extend(Layout::new::<u64>())?.0.pad_to_align(),
-            NumberType::F64 => res = res.extend(Layout::new::<f64>())?.0.pad_to_align(),
+            // On 32-bit Linux, 64-bit values have 4 byte alignment be we assume they have 8
+            // like on all other platforms. Therefore, ensure they are aligned to 8 bytes minimum.
+            NumberType::I64 => {
+                res = res
+                    .extend(Layout::new::<i64>().align_to(8)?)?
+                    .0
+                    .pad_to_align()
+            }
+            NumberType::U64 => {
+                res = res
+                    .extend(Layout::new::<u64>().align_to(8)?)?
+                    .0
+                    .pad_to_align()
+            }
+            NumberType::F64 => {
+                res = res
+                    .extend(Layout::new::<f64>().align_to(8)?)?
+                    .0
+                    .pad_to_align()
+            }
         }
         Ok(res)
     }
@@ -428,7 +445,7 @@ impl INumber {
     }
 
     fn new_i64(value: i64) -> Self {
-        if value >= SHORT_LOWER && value < SHORT_UPPER {
+        if (SHORT_LOWER..SHORT_UPPER).contains(&value) {
             Self::new_short(value as i32)
         } else {
             let mut res = Self::new_ptr(NumberType::I64);
