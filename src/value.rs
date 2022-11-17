@@ -61,7 +61,7 @@ pub struct IValue {
 
 /// Enum returned by [`IValue::destructure`] to allow matching on the type of
 /// an owned [`IValue`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Destructured {
     /// Null.
     Null,
@@ -95,7 +95,7 @@ impl Destructured {
 
 /// Enum returned by [`IValue::destructure_ref`] to allow matching on the type of
 /// a reference to an [`IValue`].
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum DestructuredRef<'a> {
     /// Null.
     Null,

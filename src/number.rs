@@ -279,7 +279,7 @@ impl Header {
                         .reverse(),
                     (NumberType::U64, _) => Ordering::Greater,
                     (_, NumberType::U64) => Ordering::Less,
-                    _ => (self.to_i64().cmp(&other.to_i64())),
+                    _ => self.to_i64().cmp(&other.to_i64()),
                 }
             }
         }
@@ -445,7 +445,7 @@ impl INumber {
     }
 
     fn new_i64(value: i64) -> Self {
-        if value >= SHORT_LOWER && value < SHORT_UPPER {
+        if (SHORT_LOWER..SHORT_UPPER).contains(&value) {
             Self::new_short(value as i32)
         } else {
             let mut res = Self::new_ptr(NumberType::I64);
