@@ -348,9 +348,26 @@ impl INumber {
         match type_ {
             NumberType::Static => unreachable!(),
             NumberType::I24 => {}
-            NumberType::I64 => res = res.extend(Layout::new::<i64>())?.0.pad_to_align(),
-            NumberType::U64 => res = res.extend(Layout::new::<u64>())?.0.pad_to_align(),
-            NumberType::F64 => res = res.extend(Layout::new::<f64>())?.0.pad_to_align(),
+            // On 32-bit Linux, 64-bit values have 4 byte alignment be we assume they have 8
+            // like on all other platforms. Therefore, ensure they are aligned to 8 bytes minimum.
+            NumberType::I64 => {
+                res = res
+                    .extend(Layout::new::<i64>().align_to(8)?)?
+                    .0
+                    .pad_to_align()
+            }
+            NumberType::U64 => {
+                res = res
+                    .extend(Layout::new::<u64>().align_to(8)?)?
+                    .0
+                    .pad_to_align()
+            }
+            NumberType::F64 => {
+                res = res
+                    .extend(Layout::new::<f64>().align_to(8)?)?
+                    .0
+                    .pad_to_align()
+            }
         }
         Ok(res)
     }
