@@ -7,6 +7,8 @@ use std::convert::{TryFrom, TryInto};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 
+use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
+
 use super::value::{IValue, TypeTag};
 
 #[repr(u8)]
@@ -62,41 +64,35 @@ fn cmp_u64_to_f64(a: u64, b: f64) -> Ordering {
     }
 }
 
-impl Header {
-    fn as_i24_unchecked(&self) -> i32 {
+trait HeaderRef<'a>: ThinRefExt<'a, Header> {
+    fn i24_unchecked(&self) -> i32 {
         (i32::from(self.static_) << 8) | i32::from(self.short)
     }
-    unsafe fn as_i64_unchecked(&self) -> &i64 {
-        &*(self as *const _ as *const i64).add(1)
+    unsafe fn payload_ptr(&self) -> *const u64 {
+        self.ptr().cast::<u64>().add(1)
     }
-    unsafe fn as_u64_unchecked(&self) -> &u64 {
-        &*(self as *const _ as *const u64).add(1)
+    unsafe fn i64_unchecked(&self) -> &'a i64 {
+        &*self.payload_ptr().cast()
     }
-    unsafe fn as_f64_unchecked(&self) -> &f64 {
-        &*(self as *const _ as *const f64).add(1)
+    unsafe fn u64_unchecked(&self) -> &'a u64 {
+        &*self.payload_ptr()
     }
-    unsafe fn as_i64_unchecked_mut(&mut self) -> &mut i64 {
-        &mut *(self as *mut _ as *mut i64).add(1)
-    }
-    unsafe fn as_u64_unchecked_mut(&mut self) -> &mut u64 {
-        &mut *(self as *mut _ as *mut u64).add(1)
-    }
-    unsafe fn as_f64_unchecked_mut(&mut self) -> &mut f64 {
-        &mut *(self as *mut _ as *mut f64).add(1)
+    unsafe fn f64_unchecked(&self) -> &'a f64 {
+        &*self.payload_ptr().cast()
     }
     fn to_i64(&self) -> Option<i64> {
         // Safety: We only call methods appropriate for the type
         unsafe {
             match self.type_ {
                 NumberType::Static => Some(i64::from(self.static_)),
-                NumberType::I24 => Some(i64::from(self.as_i24_unchecked())),
-                NumberType::I64 => Some(*self.as_i64_unchecked()),
+                NumberType::I24 => Some(i64::from(self.i24_unchecked())),
+                NumberType::I64 => Some(*self.i64_unchecked()),
                 NumberType::U64 => {
-                    let v = *self.as_u64_unchecked();
+                    let v = *self.u64_unchecked();
                     i64::try_from(v).ok()
                 }
                 NumberType::F64 => {
-                    let v = *self.as_f64_unchecked();
+                    let v = *self.f64_unchecked();
                     if v.fract() == 0.0 && v > i64::MIN as f64 && v < i64::MAX as f64 {
                         Some(v as i64)
                     } else {
@@ -118,7 +114,7 @@ impl Header {
                     }
                 }
                 NumberType::I24 => {
-                    let v = self.as_i24_unchecked();
+                    let v = self.i24_unchecked();
                     if v >= 0 {
                         Some(v as u64)
                     } else {
@@ -126,16 +122,16 @@ impl Header {
                     }
                 }
                 NumberType::I64 => {
-                    let v = *self.as_i64_unchecked();
+                    let v = *self.i64_unchecked();
                     if v >= 0 {
                         Some(v as u64)
                     } else {
                         None
                     }
                 }
-                NumberType::U64 => Some(*self.as_u64_unchecked()),
+                NumberType::U64 => Some(*self.u64_unchecked()),
                 NumberType::F64 => {
-                    let v = *self.as_f64_unchecked();
+                    let v = *self.f64_unchecked();
                     if v.fract() == 0.0 && v > 0.0 && v < u64::MAX as f64 {
                         Some(v as u64)
                     } else {
@@ -150,9 +146,9 @@ impl Header {
         unsafe {
             match self.type_ {
                 NumberType::Static => Some(f64::from(self.static_)),
-                NumberType::I24 => Some(f64::from(self.as_i24_unchecked())),
+                NumberType::I24 => Some(f64::from(self.i24_unchecked())),
                 NumberType::I64 => {
-                    let v = *self.as_i64_unchecked();
+                    let v = *self.i64_unchecked();
                     let can_represent = if v < 0 {
                         can_represent_as_f64(v.wrapping_neg() as u64)
                     } else {
@@ -165,14 +161,14 @@ impl Header {
                     }
                 }
                 NumberType::U64 => {
-                    let v = *self.as_u64_unchecked();
+                    let v = *self.u64_unchecked();
                     if can_represent_as_f64(v) {
                         Some(v as f64)
                     } else {
                         None
                     }
                 }
-                NumberType::F64 => Some(*self.as_f64_unchecked()),
+                NumberType::F64 => Some(*self.f64_unchecked()),
             }
         }
     }
@@ -181,9 +177,9 @@ impl Header {
         unsafe {
             match self.type_ {
                 NumberType::Static => Some(f32::from(self.static_)),
-                NumberType::I24 => Some(self.as_i24_unchecked() as f32),
+                NumberType::I24 => Some(self.i24_unchecked() as f32),
                 NumberType::I64 => {
-                    let v = *self.as_i64_unchecked();
+                    let v = *self.i64_unchecked();
                     let can_represent = if v < 0 {
                         can_represent_as_f32(v.wrapping_neg() as u64)
                     } else {
@@ -196,7 +192,7 @@ impl Header {
                     }
                 }
                 NumberType::U64 => {
-                    let v = *self.as_u64_unchecked();
+                    let v = *self.u64_unchecked();
                     if can_represent_as_f32(v) {
                         Some(v as f32)
                     } else {
@@ -204,7 +200,7 @@ impl Header {
                     }
                 }
                 NumberType::F64 => {
-                    let v = *self.as_f64_unchecked();
+                    let v = *self.f64_unchecked();
                     let u = v as f32;
                     if v == f64::from(u) {
                         Some(u)
@@ -225,26 +221,26 @@ impl Header {
         unsafe {
             match self.type_ {
                 NumberType::Static => f64::from(self.static_),
-                NumberType::I24 => f64::from(self.as_i24_unchecked()),
-                NumberType::I64 => *self.as_i64_unchecked() as f64,
-                NumberType::U64 => *self.as_u64_unchecked() as f64,
-                NumberType::F64 => *self.as_f64_unchecked(),
+                NumberType::I24 => f64::from(self.i24_unchecked()),
+                NumberType::I64 => *self.i64_unchecked() as f64,
+                NumberType::U64 => *self.u64_unchecked() as f64,
+                NumberType::F64 => *self.f64_unchecked(),
             }
         }
     }
-    fn cmp(&self, other: &Header) -> Ordering {
+    fn cmp<'b>(&self, other: impl HeaderRef<'b>) -> Ordering {
         // Fast path
         if self.type_ == other.type_ {
             // Safety: We only call methods for the appropriate type
             unsafe {
                 match self.type_ {
                     NumberType::Static => self.static_.cmp(&other.static_),
-                    NumberType::I24 => self.as_i24_unchecked().cmp(&other.as_i24_unchecked()),
-                    NumberType::I64 => self.as_i64_unchecked().cmp(other.as_i64_unchecked()),
-                    NumberType::U64 => self.as_u64_unchecked().cmp(other.as_u64_unchecked()),
+                    NumberType::I24 => self.i24_unchecked().cmp(&other.i24_unchecked()),
+                    NumberType::I64 => self.i64_unchecked().cmp(other.i64_unchecked()),
+                    NumberType::U64 => self.u64_unchecked().cmp(other.u64_unchecked()),
                     NumberType::F64 => self
-                        .as_f64_unchecked()
-                        .partial_cmp(other.as_f64_unchecked())
+                        .f64_unchecked()
+                        .partial_cmp(other.f64_unchecked())
                         .unwrap(),
                 }
             }
@@ -253,28 +249,26 @@ impl Header {
             unsafe {
                 match (self.type_, other.type_) {
                     (NumberType::U64, NumberType::F64) => {
-                        cmp_u64_to_f64(*self.as_u64_unchecked(), *other.as_f64_unchecked())
+                        cmp_u64_to_f64(*self.u64_unchecked(), *other.f64_unchecked())
                     }
                     (NumberType::F64, NumberType::U64) => {
-                        cmp_u64_to_f64(*other.as_u64_unchecked(), *self.as_f64_unchecked())
-                            .reverse()
+                        cmp_u64_to_f64(*other.u64_unchecked(), *self.f64_unchecked()).reverse()
                     }
                     (NumberType::I64, NumberType::F64) => {
-                        cmp_i64_to_f64(*self.as_i64_unchecked(), *other.as_f64_unchecked())
+                        cmp_i64_to_f64(*self.i64_unchecked(), *other.f64_unchecked())
                     }
                     (NumberType::F64, NumberType::I64) => {
-                        cmp_i64_to_f64(*other.as_i64_unchecked(), *self.as_f64_unchecked())
-                            .reverse()
+                        cmp_i64_to_f64(*other.i64_unchecked(), *self.f64_unchecked()).reverse()
                     }
                     (_, NumberType::F64) => self
                         .to_f64()
                         .unwrap()
-                        .partial_cmp(other.as_f64_unchecked())
+                        .partial_cmp(other.f64_unchecked())
                         .unwrap(),
                     (NumberType::F64, _) => other
                         .to_f64()
                         .unwrap()
-                        .partial_cmp(self.as_f64_unchecked())
+                        .partial_cmp(self.f64_unchecked())
                         .unwrap()
                         .reverse(),
                     (NumberType::U64, _) => Ordering::Greater,
@@ -285,6 +279,24 @@ impl Header {
         }
     }
 }
+
+trait HeaderMut<'a>: ThinMutExt<'a, Header> {
+    unsafe fn payload_ptr_mut(mut self) -> *mut u64 {
+        self.ptr_mut().cast::<u64>().add(1)
+    }
+    unsafe fn i64_unchecked_mut(self) -> &'a mut i64 {
+        &mut *self.payload_ptr_mut().cast()
+    }
+    unsafe fn u64_unchecked_mut(self) -> &'a mut u64 {
+        &mut *self.payload_ptr_mut()
+    }
+    unsafe fn f64_unchecked_mut(self) -> &'a mut f64 {
+        &mut *self.payload_ptr_mut().cast()
+    }
+}
+
+impl<'a, T: ThinRefExt<'a, Header>> HeaderRef<'a> for T {}
+impl<'a, T: ThinMutExt<'a, Header>> HeaderMut<'a> for T {}
 
 macro_rules! define_static_numbers {
     (@recurse $from:ident ($($offset:expr,)*) ()) => {
@@ -375,9 +387,11 @@ impl INumber {
     fn alloc(type_: NumberType) -> *mut Header {
         unsafe {
             let ptr = alloc(Self::layout(type_).unwrap()).cast::<Header>();
-            (*ptr).type_ = type_;
-            (*ptr).static_ = 0;
-            (*ptr).short = 0;
+            ptr.write(Header {
+                type_,
+                static_: 0,
+                short: 0,
+            });
             ptr
         }
     }
@@ -416,12 +430,12 @@ impl INumber {
             ))
         }
     }
-    fn header(&self) -> &Header {
-        unsafe { &*(self.0.ptr() as *const Header) }
+    fn header(&self) -> ThinRef<Header> {
+        unsafe { ThinRef::new(self.0.ptr().cast()) }
     }
 
-    fn header_mut(&mut self) -> &mut Header {
-        unsafe { &mut *(self.0.ptr().cast::<Header>()) }
+    fn header_mut(&mut self) -> ThinMut<Header> {
+        unsafe { ThinMut::new(self.0.ptr().cast()) }
     }
 
     fn is_static(&self) -> bool {
@@ -437,7 +451,7 @@ impl INumber {
             let lo_bits = value as u8;
             let hi_bits = (value >> 8) as i16;
             let mut res = Self::new_ptr(NumberType::I24);
-            let hd = res.header_mut();
+            let mut hd = res.header_mut();
             hd.short = lo_bits;
             hd.static_ = hi_bits;
             res
@@ -451,7 +465,7 @@ impl INumber {
             let mut res = Self::new_ptr(NumberType::I64);
             // Safety: We know this is an i64 because we just created it
             unsafe {
-                *res.header_mut().as_i64_unchecked_mut() = value;
+                *res.header_mut().i64_unchecked_mut() = value;
             }
             res
         }
@@ -464,7 +478,7 @@ impl INumber {
             let mut res = Self::new_ptr(NumberType::U64);
             // Safety: We know this is an i64 because we just created it
             unsafe {
-                *res.header_mut().as_u64_unchecked_mut() = value;
+                *res.header_mut().u64_unchecked_mut() = value;
             }
             res
         }
@@ -474,7 +488,7 @@ impl INumber {
         let mut res = Self::new_ptr(NumberType::F64);
         // Safety: We know this is an i64 because we just created it
         unsafe {
-            *res.header_mut().as_f64_unchecked_mut() = value;
+            *res.header_mut().f64_unchecked_mut() = value;
         }
         res
     }
@@ -485,17 +499,17 @@ impl INumber {
         unsafe {
             match hd.type_ {
                 NumberType::Static => self.0.raw_copy(),
-                NumberType::I24 => Self::new_short(hd.as_i24_unchecked()).0,
-                NumberType::I64 => Self::new_i64(*hd.as_i64_unchecked()).0,
-                NumberType::U64 => Self::new_u64(*hd.as_u64_unchecked()).0,
-                NumberType::F64 => Self::new_f64(*hd.as_f64_unchecked()).0,
+                NumberType::I24 => Self::new_short(hd.i24_unchecked()).0,
+                NumberType::I64 => Self::new_i64(*hd.i64_unchecked()).0,
+                NumberType::U64 => Self::new_u64(*hd.u64_unchecked()).0,
+                NumberType::F64 => Self::new_f64(*hd.f64_unchecked()).0,
             }
         }
     }
     pub(crate) fn drop_impl(&mut self) {
         if !self.is_static() {
             unsafe {
-                Self::dealloc(self.header_mut() as *mut _);
+                Self::dealloc(self.0.ptr().cast());
                 self.0.set_ref(&STATIC_NUMBERS[0]);
             }
         }

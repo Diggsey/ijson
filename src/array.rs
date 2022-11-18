@@ -6,9 +6,10 @@ use std::cmp::{self, Ordering};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::iter::FromIterator;
-use std::mem::{self, MaybeUninit};
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::slice::SliceIndex;
+
+use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
 use super::value::{IValue, TypeTag};
 
@@ -19,30 +20,31 @@ struct Header {
     cap: usize,
 }
 
-impl Header {
-    fn as_ptr(&self) -> *const IValue {
+trait HeaderRef<'a>: ThinRefExt<'a, Header> {
+    fn array_ptr(&self) -> *const IValue {
         // Safety: pointers to the end of structs are allowed
-        unsafe { (self as *const Header).add(1).cast::<IValue>() }
+        unsafe { self.ptr().add(1).cast::<IValue>() }
     }
-    fn as_slice(&self) -> &[IValue] {
+    fn items_slice(&self) -> &'a [IValue] {
         // Safety: Header `len` must be accurate
-        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len) }
+        unsafe { std::slice::from_raw_parts(self.array_ptr(), self.len) }
     }
-    fn as_mut_slice(&mut self) -> &mut [IValue] {
-        // Safety: Header `len` must be accurate
-        unsafe { std::slice::from_raw_parts_mut(self.as_ptr() as *mut _, self.len) }
+}
+
+trait HeaderMut<'a>: ThinMutExt<'a, Header> {
+    fn array_ptr_mut(mut self) -> *mut IValue {
+        // Safety: pointers to the end of structs are allowed
+        unsafe { self.ptr_mut().add(1).cast::<IValue>() }
     }
-    fn as_mut_uninit_slice(&mut self) -> &mut [MaybeUninit<IValue>] {
+    fn items_slice_mut(self) -> &'a mut [IValue] {
         // Safety: Header `len` must be accurate
-        unsafe { std::slice::from_raw_parts_mut(self.as_ptr() as *mut _, self.cap) }
+        let len = self.len;
+        unsafe { std::slice::from_raw_parts_mut(self.array_ptr_mut(), len) }
     }
     // Safety: Space must already be allocated for the item
     unsafe fn push(&mut self, item: IValue) {
         let index = self.len;
-        self.as_mut_uninit_slice()
-            .get_unchecked_mut(index)
-            .as_mut_ptr()
-            .write(item);
+        self.reborrow().array_ptr_mut().add(index).write(item);
         self.len += 1;
     }
     fn pop(&mut self) -> Option<IValue> {
@@ -53,72 +55,38 @@ impl Header {
             let index = self.len;
 
             // Safety: We just checked that an item exists
-            unsafe {
-                Some(
-                    self.as_mut_uninit_slice()
-                        .get_unchecked_mut(index)
-                        .as_mut_ptr()
-                        .read(),
-                )
-            }
+            unsafe { Some(self.reborrow().array_ptr_mut().add(index).read()) }
         }
     }
 }
 
+impl<'a, T: ThinRefExt<'a, Header>> HeaderRef<'a> for T {}
+impl<'a, T: ThinMutExt<'a, Header>> HeaderMut<'a> for T {}
+
 /// Iterator over [`IValue`]s returned from [`IArray::into_iter`]
 pub struct IntoIter {
-    header: *mut Header,
-    index: usize,
+    reversed_array: IArray,
 }
 
 impl Iterator for IntoIter {
     type Item = IValue;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.header.is_null() {
-            None
-        } else {
-            // Safety: we set the pointer to null when it's deallocated
-            unsafe {
-                let len = (*self.header).len;
-                let res = (*self.header)
-                    .as_mut_uninit_slice()
-                    .get_unchecked_mut(self.index)
-                    .as_ptr()
-                    .read();
-                self.index += 1;
-                if self.index >= len {
-                    IArray::dealloc(self.header.cast::<u8>());
-                    self.header = std::ptr::null_mut();
-                }
-                Some(res)
-            }
-        }
+        self.reversed_array.pop()
     }
 }
 
 impl ExactSizeIterator for IntoIter {
     fn len(&self) -> usize {
-        if self.header.is_null() {
-            0
-        } else {
-            // Safety: we set the pointer to null when it's deallocated
-            unsafe { (*self.header).len - self.index }
-        }
+        self.reversed_array.len()
     }
 }
 
 impl Debug for IntoIter {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("IntoIter")
-            .field("index", &self.index)
+            .field("reversed_array", &self.reversed_array)
             .finish()
-    }
-}
-
-impl Drop for IntoIter {
-    fn drop(&mut self) {
-        while self.next().is_some() {}
     }
 }
 
@@ -141,29 +109,28 @@ impl IArray {
             .pad_to_align())
     }
 
-    fn alloc(cap: usize) -> *mut u8 {
+    fn alloc(cap: usize) -> *mut Header {
         unsafe {
             let ptr = alloc(Self::layout(cap).unwrap()).cast::<Header>();
-            (*ptr).len = 0;
-            (*ptr).cap = cap;
-            ptr.cast::<u8>()
-        }
-    }
-
-    fn realloc(ptr: *mut u8, new_cap: usize) -> *mut u8 {
-        unsafe {
-            let old_layout = Self::layout((*(ptr as *const Header)).cap).unwrap();
-            let new_layout = Self::layout(new_cap).unwrap();
-            let ptr = realloc(ptr.cast::<u8>(), old_layout, new_layout.size());
-            (*(ptr.cast::<Header>())).cap = new_cap;
+            ptr.write(Header { len: 0, cap });
             ptr
         }
     }
 
-    fn dealloc(ptr: *mut u8) {
+    fn realloc(ptr: *mut Header, new_cap: usize) -> *mut Header {
         unsafe {
-            let layout = Self::layout((*(ptr as *const Header)).cap).unwrap();
-            dealloc(ptr, layout);
+            let old_layout = Self::layout((*ptr).cap).unwrap();
+            let new_layout = Self::layout(new_cap).unwrap();
+            let ptr = realloc(ptr.cast::<u8>(), old_layout, new_layout.size()).cast::<Header>();
+            (*ptr).cap = new_cap;
+            ptr
+        }
+    }
+
+    fn dealloc(ptr: *mut Header) {
+        unsafe {
+            let layout = Self::layout((*ptr).cap).unwrap();
+            dealloc(ptr.cast(), layout);
         }
     }
 
@@ -180,17 +147,17 @@ impl IArray {
         if cap == 0 {
             Self::new()
         } else {
-            IArray(unsafe { IValue::new_ptr(Self::alloc(cap), TypeTag::ArrayOrFalse) })
+            IArray(unsafe { IValue::new_ptr(Self::alloc(cap).cast(), TypeTag::ArrayOrFalse) })
         }
     }
 
-    fn header(&self) -> &Header {
-        unsafe { &*(self.0.ptr() as *const Header) }
+    fn header(&self) -> ThinRef<Header> {
+        unsafe { ThinRef::new(self.0.ptr().cast()) }
     }
 
     // Safety: must not be static
-    unsafe fn header_mut(&mut self) -> &mut Header {
-        &mut *(self.0.ptr().cast::<Header>())
+    unsafe fn header_mut(&mut self) -> ThinMut<Header> {
+        ThinMut::new(self.0.ptr().cast())
     }
 
     fn is_static(&self) -> bool {
@@ -218,7 +185,7 @@ impl IArray {
     /// Borrows a slice of [`IValue`]s from the array
     #[must_use]
     pub fn as_slice(&self) -> &[IValue] {
-        self.header().as_slice()
+        self.header().items_slice()
     }
 
     /// Borrows a mutable slice of [`IValue`]s from the array
@@ -226,7 +193,7 @@ impl IArray {
         if self.is_static() {
             &mut []
         } else {
-            unsafe { self.header_mut().as_mut_slice() }
+            unsafe { self.header_mut().items_slice_mut() }
         }
     }
     fn resize_internal(&mut self, cap: usize) {
@@ -234,8 +201,8 @@ impl IArray {
             *self = Self::with_capacity(cap);
         } else {
             unsafe {
-                let new_ptr = Self::realloc(self.0.ptr(), cap);
-                self.0.set_ptr(new_ptr);
+                let new_ptr = Self::realloc(self.0.ptr().cast(), cap);
+                self.0.set_ptr(new_ptr.cast());
             }
         }
     }
@@ -258,7 +225,7 @@ impl IArray {
             return;
         }
         unsafe {
-            let hd = self.header_mut();
+            let mut hd = self.header_mut();
             while hd.len > len {
                 hd.pop();
             }
@@ -279,13 +246,13 @@ impl IArray {
 
         unsafe {
             // Safety: cannot be static after calling `reserve`
-            let hd = self.header_mut();
+            let mut hd = self.header_mut();
             assert!(index <= hd.len);
 
             // Safety: We just reserved enough space for at least one extra item
             hd.push(item.into());
             if index < hd.len {
-                hd.as_mut_slice()[index..].rotate_right(1);
+                hd.items_slice_mut()[index..].rotate_right(1);
             }
         }
     }
@@ -302,8 +269,8 @@ impl IArray {
         if index < self.len() {
             // Safety: cannot be static if index <= len
             unsafe {
-                let hd = self.header_mut();
-                hd.as_mut_slice()[index..].rotate_left(1);
+                let mut hd = self.header_mut();
+                hd.reborrow().items_slice_mut()[index..].rotate_left(1);
                 hd.pop()
             }
         } else {
@@ -323,9 +290,9 @@ impl IArray {
         if index < self.len() {
             // Safety: cannot be static if index <= len
             unsafe {
-                let hd = self.header_mut();
+                let mut hd = self.header_mut();
                 let last_index = hd.len - 1;
-                hd.as_mut_slice().swap(index, last_index);
+                hd.reborrow().items_slice_mut().swap(index, last_index);
                 hd.pop()
             }
         } else {
@@ -360,14 +327,14 @@ impl IArray {
     }
 
     pub(crate) fn clone_impl(&self) -> IValue {
-        let src = self.header().as_slice();
+        let src = self.header().items_slice();
         let l = src.len();
         let mut res = Self::with_capacity(l);
 
         if l > 0 {
             unsafe {
                 // Safety: we cannot be static if len > 0
-                let hd = res.header_mut();
+                let mut hd = res.header_mut();
                 for v in src {
                     // Safety: we reserved enough space at the start
                     hd.push(v.clone());
@@ -380,7 +347,7 @@ impl IArray {
         self.clear();
         if !self.is_static() {
             unsafe {
-                Self::dealloc(self.0.ptr());
+                Self::dealloc(self.0.ptr().cast());
                 self.0.set_ref(&EMPTY_HEADER);
             }
         }
@@ -392,18 +359,9 @@ impl IntoIterator for IArray {
     type IntoIter = IntoIter;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        if self.is_static() {
-            IntoIter {
-                header: std::ptr::null_mut(),
-                index: 0,
-            }
-        } else {
-            // Safety: not static
-            unsafe {
-                let header = self.header_mut() as *mut _;
-                mem::forget(self);
-                IntoIter { header, index: 0 }
-            }
+        self.reverse();
+        IntoIter {
+            reversed_array: self,
         }
     }
 }

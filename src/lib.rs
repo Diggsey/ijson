@@ -26,6 +26,7 @@ pub mod array;
 pub mod number;
 pub mod object;
 pub mod string;
+mod thin;
 mod value;
 
 pub use array::IArray;
@@ -41,7 +42,7 @@ mod ser;
 pub use de::from_value;
 pub use ser::to_value;
 
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 mod tests {
     use mockalloc::Mockalloc;
     use std::alloc::System;

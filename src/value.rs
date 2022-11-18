@@ -1001,6 +1001,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn test_null() {
         let x: IValue = IValue::NULL;
         assert!(x.is_null());

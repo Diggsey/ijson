@@ -7,8 +7,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
-use std::mem::{self, MaybeUninit};
+use std::mem;
 use std::ops::{Index, IndexMut};
+
+use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
 use super::string::IString;
 use super::value::{IValue, TypeTag};
@@ -45,14 +47,14 @@ fn hash_bucket(s: &IString, hash_cap: usize) -> usize {
 }
 
 struct SplitHeader<'a> {
-    cap: &'a usize,
+    cap: usize,
     items: &'a [KeyValuePair],
     table: &'a [usize],
 }
 
 impl<'a> SplitHeader<'a> {
     fn find_bucket(&self, key: &IString) -> Result<usize, usize> {
-        let hash_cap = hash_capacity(*self.cap);
+        let hash_cap = hash_capacity(self.cap);
         let initial_bucket = hash_bucket(key, hash_cap);
         unsafe {
             // Linear search from expected bucket
@@ -83,7 +85,7 @@ impl<'a> SplitHeader<'a> {
     }
     // Safety: index must be in bounds
     unsafe fn find_bucket_from_index(&self, index: usize) -> usize {
-        let hash_cap = hash_capacity(*self.cap);
+        let hash_cap = hash_capacity(self.cap);
         let key = &self.items.get_unchecked(index).key;
         let mut bucket = hash_bucket(key, hash_cap);
 
@@ -98,8 +100,7 @@ impl<'a> SplitHeader<'a> {
 }
 
 struct SplitHeaderMut<'a> {
-    len: &'a mut usize,
-    cap: &'a mut usize,
+    cap: usize,
     items: &'a mut [KeyValuePair],
     table: &'a mut [usize],
 }
@@ -116,7 +117,7 @@ impl<'a> SplitHeaderMut<'a> {
     //
     // Shifts elements up to fill the empty space if they are not at their ideal location.
     unsafe fn unshift(&mut self, initial_bucket: usize) {
-        let hash_cap = hash_capacity(*self.cap);
+        let hash_cap = hash_capacity(self.cap);
         let mut prev_bucket = initial_bucket;
         for i in 1..hash_cap {
             let bucket = (initial_bucket + i) % hash_cap;
@@ -144,7 +145,7 @@ impl<'a> SplitHeaderMut<'a> {
     // Inserts an index into the table, shifting existing elements down until
     // there's an empty slot.
     unsafe fn shift(&mut self, initial_bucket: usize, mut index: usize) {
-        let hash_cap = hash_capacity(*self.cap);
+        let hash_cap = hash_capacity(self.cap);
         for i in 0..hash_cap {
             // If we hit an empty bucket, we're done
             if index == usize::MAX {
@@ -165,7 +166,7 @@ impl<'a> SplitHeaderMut<'a> {
 
         // If the item being removed is not at the end of the array,
         // we need to do some book-keeping
-        let last_index = *self.len - 1;
+        let last_index = self.items.len() - 1;
         if last_index != index {
             // Find the bucket containing the last item
             let bucket_to_update = self.as_ref().find_bucket_from_index(last_index);
@@ -180,55 +181,89 @@ impl<'a> SplitHeaderMut<'a> {
     }
 }
 
-impl Header {
-    fn as_item_ptr(&self) -> *const KeyValuePair {
+trait HeaderRef<'a>: ThinRefExt<'a, Header> {
+    fn items_ptr(&self) -> *const KeyValuePair {
         // Safety: pointers to the end of structs are allowed
-        unsafe { (self as *const Header).add(1).cast::<KeyValuePair>() }
+        unsafe { self.ptr().add(1).cast() }
     }
-    fn as_hash_ptr(&self) -> *const usize {
+    fn hashes_ptr(&self) -> *const usize {
         // Safety: pointers to the end of structs are allowed
-        unsafe { self.as_item_ptr().add(self.cap).cast::<usize>() }
+        unsafe { self.items_ptr().add(self.cap).cast() }
     }
-    // Safety: len < cap
-    unsafe fn end_item_mut(&mut self) -> &mut MaybeUninit<KeyValuePair> {
-        &mut *(self.as_item_ptr().add(self.len) as *mut MaybeUninit<KeyValuePair>)
-    }
-    fn split(&self) -> SplitHeader {
+    fn split(&self) -> SplitHeader<'a> {
         // Safety: Header `len` and `cap` must be accurate
         unsafe {
             SplitHeader {
-                cap: &self.cap,
-                items: std::slice::from_raw_parts(self.as_item_ptr(), self.len),
-                table: std::slice::from_raw_parts(self.as_hash_ptr(), hash_capacity(self.cap)),
+                cap: self.cap,
+                items: std::slice::from_raw_parts(self.items_ptr(), self.len),
+                table: std::slice::from_raw_parts(self.hashes_ptr(), hash_capacity(self.cap)),
             }
         }
     }
-    fn split_mut(&mut self) -> SplitHeaderMut {
+}
+
+trait HeaderMut<'a>: ThinMutExt<'a, Header> {
+    fn items_ptr_mut(&mut self) -> *mut KeyValuePair {
+        // Safety: pointers to the end of structs are allowed
+        unsafe { self.ptr_mut().add(1).cast() }
+    }
+    fn hashes_ptr_mut(&mut self) -> *mut usize {
+        // Safety: pointers to the end of structs are allowed
+        unsafe { self.items_ptr_mut().add(self.cap).cast() }
+    }
+    fn split_mut(mut self) -> SplitHeaderMut<'a> {
         // Safety: Header `len` and `cap` must be accurate
         let len = self.len;
         let hash_cap = hash_capacity(self.cap);
-        let item_ptr = self.as_item_ptr();
-        let hash_ptr = self.as_hash_ptr();
+        let item_ptr = self.items_ptr_mut();
+        let hash_ptr = self.hashes_ptr_mut();
         unsafe {
             SplitHeaderMut {
-                len: &mut self.len,
-                cap: &mut self.cap,
+                cap: self.cap,
                 items: std::slice::from_raw_parts_mut(item_ptr as *mut _, len),
                 table: std::slice::from_raw_parts_mut(hash_ptr as *mut _, hash_cap),
             }
         }
     }
-    fn as_mut_uninit_slice(&mut self) -> &mut [MaybeUninit<KeyValuePair>] {
-        // Safety: Header `len` and `cap` must be accurate
-        unsafe {
-            std::slice::from_raw_parts_mut(
-                self.as_item_ptr() as *mut MaybeUninit<KeyValuePair>,
-                self.cap,
-            )
+
+    // Safety: Must ensure there's capacity for an extra element
+    unsafe fn entry(self, key: IString) -> Entry<'a>;
+    // Safety: Must ensure there's capacity for an extra element
+    unsafe fn entry_or_clone(self, key: &IString) -> Entry<'a>;
+
+    // Safety: Object must not be empty
+    unsafe fn pop(&mut self) -> (IString, IValue) {
+        self.len -= 1;
+        let item = self.items_ptr_mut().add(self.len).read();
+        (item.key, item.value)
+    }
+    unsafe fn push(&mut self, key: IString, value: IValue) -> usize {
+        self.items_ptr_mut()
+            .add(self.len)
+            .write(KeyValuePair { key, value });
+        let res = self.len;
+        self.len += 1;
+        res
+    }
+    fn clear(&mut self) {
+        // Clear the table
+        for item in self.reborrow().split_mut().table {
+            *item = usize::MAX;
+        }
+        // Drop the items
+        while self.len > 0 {
+            // Safety: not empty
+            unsafe {
+                self.pop();
+            }
         }
     }
+}
+
+impl<'a, T: ThinRefExt<'a, Header>> HeaderRef<'a> for T {}
+impl<'a> HeaderMut<'a> for ThinMut<'a, Header> {
     // Safety: Must ensure there's capacity for an extra element
-    unsafe fn entry(&mut self, key: IString) -> Entry {
+    unsafe fn entry(self, key: IString) -> Entry<'a> {
         match self.split().find_bucket(&key) {
             Err(bucket) => Entry::Vacant(VacantEntry {
                 header: self,
@@ -242,7 +277,7 @@ impl Header {
         }
     }
     // Safety: Must ensure there's capacity for an extra element
-    unsafe fn entry_or_clone(&mut self, key: &IString) -> Entry {
+    unsafe fn entry_or_clone(self, key: &IString) -> Entry<'a> {
         match self.split().find_bucket(key) {
             Err(bucket) => Entry::Vacant(VacantEntry {
                 header: self,
@@ -255,37 +290,11 @@ impl Header {
             }),
         }
     }
-    unsafe fn pop(&mut self) -> (IString, IValue) {
-        self.len -= 1;
-        let item = self.end_item_mut().as_mut_ptr().read();
-        (item.key, item.value)
-    }
-    unsafe fn push(&mut self, key: IString, value: IValue) -> usize {
-        self.end_item_mut()
-            .as_mut_ptr()
-            .write(KeyValuePair { key, value });
-        let res = self.len;
-        self.len += 1;
-        res
-    }
-    fn clear(&mut self) {
-        // Clear the table
-        for item in self.split_mut().table {
-            *item = usize::MAX;
-        }
-        // Drop the items
-        while self.len > 0 {
-            // Safety: not empty
-            unsafe {
-                self.pop();
-            }
-        }
-    }
 }
 
 /// A view into an occupied entry in an [`IObject`]. It is part of the [`Entry`] enum.
 pub struct OccupiedEntry<'a> {
-    header: &'a mut Header,
+    header: ThinMut<'a, Header>,
     bucket: usize,
 }
 
@@ -310,7 +319,7 @@ impl<'a> OccupiedEntry<'a> {
     }
     fn get_key_value_mut(&mut self) -> (&IString, &mut IValue) {
         // Safety: Indices are known to be in range
-        let split = self.header.split_mut();
+        let split = self.header.reborrow().split_mut();
         unsafe {
             let index = *split.table.get_unchecked(self.bucket);
             let kvp = split.items.get_unchecked_mut(index);
@@ -333,10 +342,13 @@ impl<'a> OccupiedEntry<'a> {
     }
 
     /// Removes and returns the entry as a (key, value) pair.
-    pub fn remove_entry(self) -> (IString, IValue) {
+    pub fn remove_entry(mut self) -> (IString, IValue) {
         // Safety: Bucket is known to be correct
         unsafe {
-            self.header.split_mut().remove_bucket(self.bucket);
+            self.header
+                .reborrow()
+                .split_mut()
+                .remove_bucket(self.bucket);
             self.header.pop()
         }
     }
@@ -369,7 +381,7 @@ impl<'a> OccupiedEntry<'a> {
 
 /// A view into a vacant entry in an [`IObject`]. It is part of the [`Entry`] enum.
 pub struct VacantEntry<'a> {
-    header: &'a mut Header,
+    header: ThinMut<'a, Header>,
     bucket: usize,
     key: IString,
 }
@@ -395,7 +407,7 @@ impl<'a> VacantEntry<'a> {
     }
     /// Inserts a value into this entry and returns a mutable reference
     /// to it.
-    pub fn insert(self, value: impl Into<IValue>) -> &'a mut IValue {
+    pub fn insert(mut self, value: impl Into<IValue>) -> &'a mut IValue {
         // Safety: we reserve space when the entry is initially created.
         // We know the bucket index is correct.
         unsafe {
@@ -461,14 +473,13 @@ impl<'a> Entry<'a> {
 /// Iterator over ([`IString`], [`IValue`]) pairs returned from
 /// [`IObject::into_iter`]
 pub struct IntoIter {
-    header: *mut Header,
-    index: usize,
+    reversed_object: IObject,
 }
 
 impl Debug for IntoIter {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("IntoIter")
-            .field("index", &self.index)
+            .field("reversed_object", &self.reversed_object)
             .finish()
     }
 }
@@ -477,42 +488,20 @@ impl Iterator for IntoIter {
     type Item = (IString, IValue);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.header.is_null() {
+        if self.reversed_object.is_empty() {
             None
         } else {
-            // Safety: we set the pointer to null when it's deallocated
-            unsafe {
-                let len = (*self.header).len;
-                let res = (*self.header)
-                    .as_mut_uninit_slice()
-                    .get_unchecked_mut(self.index)
-                    .as_ptr()
-                    .read();
-                self.index += 1;
-                if self.index >= len {
-                    IObject::dealloc(self.header.cast::<u8>());
-                    self.header = std::ptr::null_mut();
-                }
-                Some((res.key, res.value))
-            }
+            Some(unsafe {
+                // Safety: Object is not empty
+                self.reversed_object.header_mut().pop()
+            })
         }
     }
 }
 
 impl ExactSizeIterator for IntoIter {
     fn len(&self) -> usize {
-        if self.header.is_null() {
-            0
-        } else {
-            // Safety: we set the pointer to null when it's deallocated
-            unsafe { (*self.header).len - self.index }
-        }
-    }
-}
-
-impl Drop for IntoIter {
-    fn drop(&mut self) {
-        while self.next().is_some() {}
+        self.reversed_object.len()
     }
 }
 
@@ -542,22 +531,23 @@ impl IObject {
             .pad_to_align())
     }
 
-    fn alloc(cap: usize) -> *mut u8 {
+    fn alloc(cap: usize) -> *mut Header {
         unsafe {
-            let hd = &mut *(alloc(Self::layout(cap).unwrap()).cast::<Header>());
-            hd.len = 0;
-            hd.cap = cap;
-            for item in hd.split_mut().table {
-                *item = usize::MAX;
+            let hd = alloc(Self::layout(cap).unwrap()).cast::<Header>();
+            std::ptr::write(hd, Header { len: 0, cap });
+            let mut hd_mut = ThinMut::new(hd);
+            let hash_ptr = hd_mut.hashes_ptr_mut();
+            for i in 0..hash_capacity(cap) {
+                hash_ptr.add(i).write(usize::MAX);
             }
-            hd as *mut _ as *mut u8
+            hd
         }
     }
 
-    fn dealloc(ptr: *mut u8) {
+    fn dealloc(ptr: *mut Header) {
         unsafe {
-            let layout = Self::layout((*(ptr as *const Header)).cap).unwrap();
-            dealloc(ptr, layout);
+            let layout = Self::layout((*ptr).cap).unwrap();
+            dealloc(ptr.cast(), layout);
         }
     }
 
@@ -574,17 +564,17 @@ impl IObject {
         if cap == 0 {
             Self::new()
         } else {
-            Self(unsafe { IValue::new_ptr(Self::alloc(cap), TypeTag::ObjectOrTrue) })
+            Self(unsafe { IValue::new_ptr(Self::alloc(cap).cast(), TypeTag::ObjectOrTrue) })
         }
     }
 
-    fn header(&self) -> &Header {
-        unsafe { &*(self.0.ptr() as *const Header) }
+    fn header(&self) -> ThinRef<Header> {
+        unsafe { ThinRef::new(self.0.ptr().cast()) }
     }
 
     // Safety: must not be static
-    unsafe fn header_mut(&mut self) -> &mut Header {
-        &mut *self.0.ptr().cast::<Header>()
+    unsafe fn header_mut(&mut self) -> ThinMut<Header> {
+        ThinMut::new(self.0.ptr().cast())
     }
 
     fn is_static(&self) -> bool {
@@ -611,11 +601,11 @@ impl IObject {
         let old_obj = mem::replace(self, Self::with_capacity(cap));
         if !self.is_static() {
             unsafe {
-                let hd = self.header_mut();
+                let mut hd = self.header_mut();
                 for (k, v) in old_obj {
                     if let Err(bucket) = hd.split().find_bucket(&k) {
                         let index = hd.push(k, v);
-                        hd.split_mut().shift(bucket, index);
+                        hd.reborrow().split_mut().shift(bucket, index);
                     }
                 }
             }
@@ -751,10 +741,10 @@ impl IObject {
     pub fn retain(&mut self, mut f: impl FnMut(&IString, &mut IValue) -> bool) {
         if !self.is_empty() {
             // Safety: not static
-            let hd = unsafe { self.header_mut() };
+            let mut hd = unsafe { self.header_mut() };
             let mut index = 0;
             while index < hd.len {
-                let mut split = hd.split_mut();
+                let mut split = hd.reborrow().split_mut();
 
                 // Safety: Indices are in range
                 unsafe {
@@ -783,7 +773,7 @@ impl IObject {
         self.clear();
         if !self.is_static() {
             unsafe {
-                Self::dealloc(self.0.ptr());
+                Self::dealloc(self.0.ptr().cast());
                 self.0.set_ref(&EMPTY_HEADER);
             }
         }
@@ -795,18 +785,12 @@ impl IntoIterator for IObject {
     type IntoIter = IntoIter;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        if self.is_empty() {
-            IntoIter {
-                header: std::ptr::null_mut(),
-                index: 0,
-            }
-        } else {
-            // Safety: not static
-            unsafe {
-                let header = self.header_mut() as *mut _;
-                mem::forget(self);
-                IntoIter { header, index: 0 }
-            }
+        unsafe {
+            let split_header = self.header_mut().split_mut();
+            split_header.items.reverse();
+        }
+        IntoIter {
+            reversed_object: self,
         }
     }
 }
@@ -976,8 +960,8 @@ impl ObjectIndex for &IString {
             None
         } else {
             // Safety: not static
-            let hd = unsafe { v.header_mut() };
-            let mut split = hd.split_mut();
+            let mut hd = unsafe { v.header_mut() };
+            let mut split = hd.reborrow().split_mut();
             if let Ok(bucket) = split.as_ref().find_bucket(self) {
                 // Safety: Bucket index is valid
                 unsafe {

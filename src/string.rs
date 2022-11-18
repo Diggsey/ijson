@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use dashmap::{DashSet, SharedValue};
 use lazy_static::lazy_static;
 
+use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
+
 use super::value::{IValue, TypeTag};
 
 #[repr(C)]
@@ -24,26 +26,36 @@ struct Header {
     shard_index: u16,
 }
 
-impl Header {
+trait HeaderRef<'a>: ThinRefExt<'a, Header> {
     fn len(&self) -> usize {
         (u64::from(self.len_lower) | (u64::from(self.len_upper) << 32)) as usize
     }
     fn shard_index(&self) -> usize {
         self.shard_index as usize
     }
-    fn as_ptr(&self) -> *const u8 {
+    fn str_ptr(&self) -> *const u8 {
         // Safety: pointers to the end of structs are allowed
-        unsafe { (self as *const Header).add(1).cast::<u8>() }
+        unsafe { self.ptr().add(1).cast() }
     }
-    fn as_bytes(&self) -> &[u8] {
+    fn bytes(&self) -> &'a [u8] {
         // Safety: Header `len` must be accurate
-        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.len()) }
+        unsafe { std::slice::from_raw_parts(self.str_ptr(), self.len()) }
     }
-    fn as_str(&self) -> &str {
+    fn str(&self) -> &'a str {
         // Safety: UTF-8 enforced on construction
-        unsafe { std::str::from_utf8_unchecked(self.as_bytes()) }
+        unsafe { std::str::from_utf8_unchecked(self.bytes()) }
     }
 }
+
+trait HeaderMut<'a>: ThinMutExt<'a, Header> {
+    fn str_ptr_mut(mut self) -> *mut u8 {
+        // Safety: pointers to the end of structs are allowed
+        unsafe { self.ptr_mut().add(1).cast() }
+    }
+}
+
+impl<'a, T: ThinRefExt<'a, Header>> HeaderRef<'a> for T {}
+impl<'a, T: ThinMutExt<'a, Header>> HeaderMut<'a> for T {}
 
 lazy_static! {
     static ref STRING_CACHE: DashSet<WeakIString> = DashSet::new();
@@ -89,10 +101,14 @@ impl Deref for WeakIString {
 
 impl Borrow<str> for WeakIString {
     fn borrow(&self) -> &str {
-        unsafe { self.ptr.as_ref().as_str() }
+        self.header().str()
     }
 }
 impl WeakIString {
+    fn header(&self) -> ThinRef<Header> {
+        // Safety: pointer is always valid
+        unsafe { ThinRef::new(self.ptr.as_ptr()) }
+    }
     fn upgrade(&self) -> IString {
         unsafe {
             self.ptr.as_ref().rc.fetch_add(1, AtomicOrdering::Relaxed);
@@ -144,18 +160,22 @@ impl IString {
         assert!(shard_index < (1 << 16));
         unsafe {
             let ptr = alloc(Self::layout(s.len()).unwrap()).cast::<Header>();
-            (*ptr).len_lower = s.len() as u32;
-            (*ptr).len_upper = ((s.len() as u64) >> 32) as u16;
-            (*ptr).shard_index = shard_index as u16;
-            (*ptr).rc = AtomicUsize::new(0);
-            copy_nonoverlapping(s.as_ptr(), (*ptr).as_ptr() as *mut u8, s.len());
+            ptr.write(Header {
+                len_lower: s.len() as u32,
+                len_upper: ((s.len() as u64) >> 32) as u16,
+                shard_index: shard_index as u16,
+                rc: AtomicUsize::new(0),
+            });
+            let hd = ThinMut::new(ptr);
+            copy_nonoverlapping(s.as_ptr(), hd.str_ptr_mut(), s.len());
             ptr
         }
     }
 
     fn dealloc(ptr: *mut Header) {
         unsafe {
-            let layout = Self::layout((*ptr).len()).unwrap();
+            let hd = ThinRef::new(ptr);
+            let layout = Self::layout(hd.len()).unwrap();
             dealloc(ptr.cast::<u8>(), layout);
         }
     }
@@ -186,8 +206,8 @@ impl IString {
         }
     }
 
-    fn header(&self) -> &Header {
-        unsafe { &*(self.0.ptr() as *const Header) }
+    fn header(&self) -> ThinRef<Header> {
+        unsafe { ThinRef::new(self.0.ptr().cast()) }
     }
 
     /// Returns the length (in bytes) of this string.
@@ -205,13 +225,13 @@ impl IString {
     /// Obtains a `&str` from this `IString`. This is a cheap operation.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        self.header().as_str()
+        self.header().str()
     }
 
     /// Obtains a byte slice from this `IString`. This is a cheap operation.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        self.header().as_bytes()
+        self.header().bytes()
     }
 
     /// Returns the empty string.
@@ -254,7 +274,7 @@ impl IString {
             let mut guard = shard.write();
             if hd.rc.fetch_sub(1, AtomicOrdering::Relaxed) == 1 {
                 // Reference count reached zero, free the string
-                assert!(guard.remove(hd.as_str()).is_some());
+                assert!(guard.remove(hd.str()).is_some());
 
                 // Shrink the shard if it's mostly empty.
                 // The second condition is necessary because `HashMap` sometimes
@@ -265,7 +285,7 @@ impl IString {
                 }
                 drop(guard);
 
-                Self::dealloc(hd as *const _ as *mut _);
+                Self::dealloc(unsafe { self.0.ptr().cast() });
             }
         }
     }
