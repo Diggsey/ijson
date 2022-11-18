@@ -83,6 +83,44 @@ jobs:
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
 
+  test_miri_32bit_linux:
+    name: Test (Miri i686-unknown-linux-gnu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+          components: miri
+          target: i686-unknown-linux-gnu
+      - uses: actions-rs/cargo@v1
+        with:
+          command: miri
+          args: test --target i686-unknown-linux-gnu
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+
+  test_miri_32bit_windows:
+    name: Test (Miri i686-pc-windows-msvc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+          components: miri
+          target: i686-pc-windows-msvc
+      - uses: actions-rs/cargo@v1
+        with:
+          command: miri
+          args: test --target i686-pc-windows-msvc
+        env:
+          MIRIFLAGS: "-Zmiri-disable-isolation"
+
   test_nightly:
     name: Test (Nightly)
     runs-on: ubuntu-20.04
