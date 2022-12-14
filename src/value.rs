@@ -690,7 +690,7 @@ impl IValue {
     ///
     /// Returns `Err(self)` if it's not an object.
     pub fn into_object(self) -> Result<IObject, IValue> {
-        if self.is_number() {
+        if self.is_object() {
             Ok(IObject(self))
         } else {
             Err(self)
