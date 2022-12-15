@@ -1100,4 +1100,12 @@ mod tests {
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Object(u) if *u == o));
         }
     }
+
+    #[mockalloc::test]
+    fn test_into_object_for_object() {
+        let o: IObject = (0..10).map(|i| (i.to_string(), i)).collect();
+        let x = IValue::from(o.clone());
+
+        assert_eq!(x.into_object(), Ok(o));
+    }
 }
