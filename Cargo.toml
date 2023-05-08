@@ -13,7 +13,7 @@ description = "A more memory efficient replacement for serde_json::Value"
 tracing = ["mockalloc/tracing"]
 
 [dependencies]
-dashmap = { version = "4.0.2", features = ["raw-api"] }
+dashmap = { version = "5.4", features = ["raw-api"] }
 lazy_static = "1.4.0"
 serde = "1.0.117"
 serde_json = "1.0.59"
