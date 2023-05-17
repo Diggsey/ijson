@@ -25,14 +25,24 @@ mod macros;
 pub mod array;
 pub mod number;
 pub mod object;
+
+#[cfg(not(feature = "thread_unsafe"))]
 pub mod string;
+#[cfg(not(feature = "thread_unsafe"))]
+pub use string::IString;
+
+#[cfg(feature = "thread_unsafe")]
+pub mod unsafe_string;
+#[cfg(feature = "thread_unsafe")]
+pub use unsafe_string::IString;
+
 mod thin;
 mod value;
 
 pub use array::IArray;
 pub use number::INumber;
 pub use object::IObject;
-pub use string::IString;
+
 pub use value::{
     BoolMut, Destructured, DestructuredMut, DestructuredRef, IValue, ValueIndex, ValueType,
 };
