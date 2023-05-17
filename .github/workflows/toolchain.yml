@@ -66,7 +66,7 @@ jobs:
           args: -- --test-threads=1
 
   test_thread_unsafe:
-    name: Test
+    name: Test unsafe thread
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
