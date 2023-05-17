@@ -249,7 +249,14 @@ impl IString {
             if hd.rc == 0 {
                 // Reference count reached zero, free the string
                 unsafe {
-                    get_cache().remove(hd.str());
+                    let cache = get_cache();
+                    cache.remove(hd.str());
+
+                    // Shrink the cache if it is empty in tests to verify no memory leaks
+                    #[cfg(test)]
+                    if cache.is_empty() {
+                        cache.shrink_to_fit();
+                    }
                 }
                 Self::dealloc(unsafe { self.0.ptr().cast() });
             }
