@@ -62,9 +62,18 @@ unsafe fn ctor_init_cache() {
     };
 }
 
+#[doc(hidden)]
+pub fn init_cache() {
+    unsafe {
+        if STRING_CACHE.is_none() {
+            STRING_CACHE = Some(HashSet::new());
+        };
+    }
+}
+
 #[cfg(not(feature = "ctor"))]
 unsafe fn get_cache() -> &'static mut HashSet<WeakIString> {
-    ctor_init_cache();
+    init_cache();
     STRING_CACHE.as_mut().unwrap()
 }
 
