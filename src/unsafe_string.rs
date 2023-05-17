@@ -56,15 +56,20 @@ static mut STRING_CACHE: Option<HashSet<WeakIString>> = None;
 // `ctor` feature is enabled.
 #[cfg(any(test, feature = "ctor"))]
 #[ctor::ctor]
-unsafe fn ctor_init_cache() -> &'static mut HashSet<WeakIString> {
-    ctor_init_cache()
-}
-
-#[doc(hidden)]
-unsafe fn init_cache() -> &'static mut HashSet<WeakIString> {
+unsafe fn ctor_init_cache() {
     if STRING_CACHE.is_none() {
         STRING_CACHE = Some(HashSet::new());
     };
+}
+
+#[cfg(not(feature = "ctor"))]
+unsafe fn get_cache() -> &'static mut HashSet<WeakIString> {
+    ctor_init_cache();
+    STRING_CACHE.as_mut().unwrap()
+}
+
+#[cfg(feature = "ctor")]
+unsafe fn get_cache() -> &'static mut HashSet<WeakIString> {
     STRING_CACHE.as_mut().unwrap()
 }
 
@@ -177,7 +182,7 @@ impl IString {
         }
 
         unsafe {
-            let cache = init_cache();
+            let cache = get_cache();
 
             let k = cache.get_or_insert_with(s, |s| WeakIString {
                 ptr: NonNull::new_unchecked(Self::alloc(s)),
@@ -235,7 +240,7 @@ impl IString {
             if hd.rc == 0 {
                 // Reference count reached zero, free the string
                 unsafe {
-                    STRING_CACHE.as_mut().map(|cache| cache.remove(hd.str()));
+                    get_cache().remove(hd.str());
                 }
                 Self::dealloc(unsafe { self.0.ptr().cast() });
             }
