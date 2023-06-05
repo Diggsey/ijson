@@ -78,7 +78,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: test
-          args: --features thread_unsafe -- --test-threads=1
+          args: --no-default-features -- --test-threads=1
 
   test_miri:
     name: Test (Miri)
