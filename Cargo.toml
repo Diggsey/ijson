@@ -10,8 +10,9 @@ description = "A more memory efficient replacement for serde_json::Value"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
+default = ["thread_safe"]
 tracing = ["mockalloc/tracing"]
-thread_unsafe = ["ctor"]
+thread_safe = []
 
 [dependencies]
 hashbrown = "0.13.2"

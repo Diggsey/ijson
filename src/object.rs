@@ -12,9 +12,9 @@ use std::ops::{Index, IndexMut};
 
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
-#[cfg(not(feature = "thread_unsafe"))]
+#[cfg(feature = "thread_safe")]
 use super::string::IString;
-#[cfg(feature = "thread_unsafe")]
+#[cfg(not(feature = "thread_safe"))]
 use super::unsafe_string::IString;
 
 use super::value::{IValue, TypeTag};

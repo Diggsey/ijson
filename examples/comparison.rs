@@ -63,9 +63,9 @@ fn print_alloc_info(
 fn main() -> Result<(), Box<dyn Error>> {
     // The string cache is normally lazily initialized which would erroneously show up as a
     // memory leak, so explicitly initialize it here.
-    #[cfg(not(feature = "thread_unsafe"))]
+    #[cfg(feature = "thread_safe")]
     ijson::string::init_cache();
-    #[cfg(feature = "thread_unsafe")]
+    #[cfg(not(feature = "thread_safe"))]
     ijson::unsafe_string::init_cache();
 
     println!(

@@ -26,14 +26,14 @@ pub mod array;
 pub mod number;
 pub mod object;
 
-#[cfg(not(feature = "thread_unsafe"))]
+#[cfg(feature = "thread_safe")]
 pub mod string;
-#[cfg(not(feature = "thread_unsafe"))]
+#[cfg(feature = "thread_safe")]
 pub use string::IString;
 
-#[cfg(feature = "thread_unsafe")]
+#[cfg(not(feature = "thread_safe"))]
 pub mod unsafe_string;
-#[cfg(feature = "thread_unsafe")]
+#[cfg(not(feature = "thread_safe"))]
 pub use unsafe_string::IString;
 
 mod thin;
