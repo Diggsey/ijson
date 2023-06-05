@@ -8,7 +8,12 @@ use serde_json::error::Error;
 use super::array::IArray;
 use super::number::INumber;
 use super::object::IObject;
+
+#[cfg(feature = "thread_safe")]
 use super::string::IString;
+#[cfg(not(feature = "thread_safe"))]
+use super::unsafe_string::IString;
+
 use super::value::{DestructuredRef, IValue};
 
 impl Serialize for IValue {

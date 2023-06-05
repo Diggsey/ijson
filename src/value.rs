@@ -11,7 +11,11 @@ use std::ptr::NonNull;
 use super::array::IArray;
 use super::number::INumber;
 use super::object::IObject;
+
+#[cfg(feature = "thread_safe")]
 use super::string::IString;
+#[cfg(not(feature = "thread_safe"))]
+use super::unsafe_string::IString;
 
 /// Stores an arbitrary JSON value.
 ///
