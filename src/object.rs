@@ -3,7 +3,11 @@
 use std::alloc::{alloc, dealloc, Layout, LayoutError};
 use std::cmp::{self, Ordering};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap};
+#[cfg(feature = "indexmap")]
+use indexmap::IndexMap as DataMap;
+#[cfg(not(feature = "indexmap"))]
+use std::collections::BTreeMap as DataMap;
+use std::collections::HashMap;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
@@ -1063,8 +1067,8 @@ impl<K: Into<IString>, V: Into<IValue>> From<HashMap<K, V>> for IObject {
     }
 }
 
-impl<K: Into<IString>, V: Into<IValue>> From<BTreeMap<K, V>> for IObject {
-    fn from(other: BTreeMap<K, V>) -> Self {
+impl<K: Into<IString>, V: Into<IValue>> From<DataMap<K, V>> for IObject {
+    fn from(other: DataMap<K, V>) -> Self {
         let mut res = Self::with_capacity(other.len());
         res.extend(other.into_iter().map(|(k, v)| (k.into(), v.into())));
         res

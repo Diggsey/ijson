@@ -1,5 +1,9 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+#[cfg(feature = "indexmap")]
+use indexmap::IndexMap as DataMap;
+#[cfg(not(feature = "indexmap"))]
+use std::collections::BTreeMap as DataMap;
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
@@ -951,7 +955,7 @@ typed_conversions! {
         &[T] where (T: Into<IValue> + Clone);
     IObject:
         HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
-        BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
+        DataMap<K, V> where (K: Into<IString>, V: Into<IValue>);
 }
 
 impl From<f32> for IValue {
