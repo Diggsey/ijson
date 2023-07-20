@@ -746,11 +746,11 @@ impl Hash for IValue {
 
 impl PartialEq for IValue {
     fn eq(&self, other: &Self) -> bool {
-        let (t1, t2) = (self.type_(), other.type_());
-        if t1 == t2 {
+        let r#type = self.type_();
+        if r#type == other.type_() {
             // Safety: Only methods for the appropriate type are called
             unsafe {
-                match t1 {
+                match r#type {
                     // Inline and interned types can be trivially compared
                     ValueType::Null | ValueType::Bool | ValueType::String => self.ptr == other.ptr,
                     ValueType::Number => self.as_number_unchecked() == other.as_number_unchecked(),
