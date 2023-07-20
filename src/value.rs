@@ -1,9 +1,5 @@
 use std::cmp::Ordering;
-#[cfg(feature = "indexmap")]
-use indexmap::IndexMap as DataMap;
-#[cfg(not(feature = "indexmap"))]
-use std::collections::BTreeMap as DataMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
@@ -11,6 +7,9 @@ use std::hint::unreachable_unchecked;
 use std::mem;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
+
+#[cfg(feature = "indexmap")]
+use indexmap::IndexMap;
 
 use super::array::IArray;
 use super::number::INumber;
@@ -947,6 +946,7 @@ impl From<bool> for IValue {
     }
 }
 
+#[cfg(not(feature = "indexmap"))]
 typed_conversions! {
     INumber: i8, u8, i16, u16, i32, u32, i64, u64, isize, usize;
     IString: String, &String, &mut String, &str, &mut str;
@@ -955,7 +955,20 @@ typed_conversions! {
         &[T] where (T: Into<IValue> + Clone);
     IObject:
         HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
-        DataMap<K, V> where (K: Into<IString>, V: Into<IValue>);
+        BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
+}
+
+#[cfg(feature = "indexmap")]
+typed_conversions! {
+    INumber: i8, u8, i16, u16, i32, u32, i64, u64, isize, usize;
+    IString: String, &String, &mut String, &str, &mut str;
+    IArray:
+        Vec<T> where (T: Into<IValue>),
+        &[T] where (T: Into<IValue> + Clone);
+    IObject:
+        HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
+        BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>),
+        IndexMap<K, V> where (K: Into<IString>, V: Into<IValue>);
 }
 
 impl From<f32> for IValue {
