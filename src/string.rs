@@ -237,7 +237,7 @@ impl IString {
     /// Returns the empty string.
     #[must_use]
     pub fn new() -> Self {
-        unsafe { IString(IValue::new_ref(&EMPTY_HEADER, TypeTag::StringOrNull)) }
+        unsafe { Self(IValue::new_ref(&EMPTY_HEADER, TypeTag::StringOrNull)) }
     }
 
     pub(crate) fn clone_impl(&self) -> IValue {
