@@ -10,6 +10,9 @@ use std::iter::FromIterator;
 use std::mem;
 use std::ops::{Index, IndexMut};
 
+#[cfg(feature = "indexmap")]
+use indexmap::IndexMap;
+
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
 use super::string::IString;
@@ -1065,6 +1068,15 @@ impl<K: Into<IString>, V: Into<IValue>> From<HashMap<K, V>> for IObject {
 
 impl<K: Into<IString>, V: Into<IValue>> From<BTreeMap<K, V>> for IObject {
     fn from(other: BTreeMap<K, V>) -> Self {
+        let mut res = Self::with_capacity(other.len());
+        res.extend(other.into_iter().map(|(k, v)| (k.into(), v.into())));
+        res
+    }
+}
+
+#[cfg(feature = "indexmap")]
+impl<K: Into<IString>, V: Into<IValue>> From<IndexMap<K, V>> for IObject {
+    fn from(other: IndexMap<K, V>) -> Self {
         let mut res = Self::with_capacity(other.len());
         res.extend(other.into_iter().map(|(k, v)| (k.into(), v.into())));
         res

@@ -8,6 +8,9 @@ use std::mem;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
 
+#[cfg(feature = "indexmap")]
+use indexmap::IndexMap;
+
 use super::array::IArray;
 use super::number::INumber;
 use super::object::IObject;
@@ -952,6 +955,12 @@ typed_conversions! {
     IObject:
         HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
         BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
+}
+
+#[cfg(feature = "indexmap")]
+typed_conversions! {
+    IObject:
+        IndexMap<K, V> where (K: Into<IString>, V: Into<IValue>);
 }
 
 impl From<f32> for IValue {
