@@ -417,14 +417,14 @@ impl INumber {
     }
     // Safety: Value must be in the range STATIC_LOWER..STATIC_UPPER
     unsafe fn new_static(value: i16) -> Self {
-        INumber(IValue::new_ref(
+        Self(IValue::new_ref(
             &STATIC_NUMBERS[(value - STATIC_LOWER) as usize],
             TypeTag::Number,
         ))
     }
     fn new_ptr(type_: NumberType) -> Self {
         unsafe {
-            INumber(IValue::new_ptr(
+            Self(IValue::new_ptr(
                 Self::alloc(type_).cast::<u8>(),
                 TypeTag::Number,
             ))
