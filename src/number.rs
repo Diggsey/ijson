@@ -349,7 +349,7 @@ const SHORT_UPPER: i64 = 0x0080_0000;
 /// without a heap allocation (so JSON byte arrays are relatively efficient).
 /// Integers up to 24 bits can be stored with a 4-byte heap allocation.
 #[repr(transparent)]
-#[derive(Clone)]
+#[derive(Clone, size_of::SizeOf)]
 pub struct INumber(pub(crate) IValue);
 
 value_subtype_impls!(INumber, into_number, as_number, as_number_mut);

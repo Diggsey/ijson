@@ -58,8 +58,15 @@ use super::string::IString;
 ///   This method returns the [`ValueType`] enum, which has a variant for each of the
 ///   six JSON types.
 #[repr(transparent)]
+#[derive(size_of::SizeOf)]
 pub struct IValue {
     ptr: NonNull<u8>,
+}
+
+impl Ord for IValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        Ordering::Greater
+    }
 }
 
 /// Enum returned by [`IValue::destructure`] to allow matching on the type of
@@ -98,7 +105,7 @@ impl Destructured {
 
 /// Enum returned by [`IValue::destructure_ref`] to allow matching on the type of
 /// a reference to an [`IValue`].
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, rkyv::Deserialize, rkyv::Serialize, rkyv::Archive)]
 pub enum DestructuredRef<'a> {
     /// Null.
     Null,

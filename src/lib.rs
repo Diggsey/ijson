@@ -38,6 +38,7 @@ pub use value::{
 };
 
 mod de;
+mod rkyv_ser;
 mod ser;
 pub use de::from_value;
 pub use ser::to_value;

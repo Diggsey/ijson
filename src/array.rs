@@ -94,7 +94,7 @@ impl Debug for IntoIter {
 /// that the length and capacity are stored _inside_ the heap allocation, so that
 /// the `IArray` itself can be a single pointer.
 #[repr(transparent)]
-#[derive(Clone)]
+#[derive(Clone, size_of::SizeOf, Ord)]
 pub struct IArray(pub(crate) IValue);
 
 value_subtype_impls!(IArray, into_array, as_array, as_array_mut);

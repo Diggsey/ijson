@@ -517,7 +517,7 @@ impl ExactSizeIterator for IntoIter {
 ///
 /// [`IArray`]: super::IArray
 #[repr(transparent)]
-#[derive(Clone)]
+#[derive(Clone, size_of::SizeOf)]
 pub struct IObject(pub(crate) IValue);
 
 value_subtype_impls!(IObject, into_object, as_object, as_object_mut);

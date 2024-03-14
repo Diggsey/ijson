@@ -135,7 +135,7 @@ impl WeakIString {
 /// Given the nature of `IString` it is better to intern a string once and reuse
 /// it, rather than continually convert from `&str` to `IString`.
 #[repr(transparent)]
-#[derive(Clone)]
+#[derive(Clone, size_of::SizeOf)]
 pub struct IString(pub(crate) IValue);
 
 value_subtype_impls!(IString, into_string, as_string, as_string_mut);
