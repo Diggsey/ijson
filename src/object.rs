@@ -11,6 +11,7 @@ use std::mem;
 use std::ops::{Index, IndexMut};
 
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
+use crate::{Defrag, DefragAllocator};
 
 #[cfg(feature = "thread_safe")]
 use super::string::IString;
@@ -38,12 +39,9 @@ fn hash_capacity(cap: usize) -> usize {
 }
 
 fn hash_fn(s: &IString) -> usize {
-    let v: &IValue = s.as_ref();
-    // We know the bottom two bits are always the same
-    let mut p = v.ptr_usize() >> 2;
-    p = p.wrapping_mul(202_529);
-    p = p ^ (p >> 13);
-    p.wrapping_mul(202_529)
+    let mut hasher = DefaultHasher::new();
+    s.as_str().hash(&mut hasher);
+    hasher.finish() as usize
 }
 
 fn hash_bucket(s: &IString, hash_cap: usize) -> usize {
@@ -1078,6 +1076,33 @@ impl<K: Into<IString>, V: Into<IValue>> From<BTreeMap<K, V>> for IObject {
 impl Default for IObject {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<A: DefragAllocator> Defrag<A> for IObject {
+    fn defrag(mut self, defrag_allocator: &mut A) -> Self {
+        if self.is_static() {
+            return self;
+        }
+        let header = unsafe { self.header_mut() };
+        let split_header = header.split_mut();
+        for i in 0..split_header.items.len() {
+            unsafe {
+                let old_val = split_header.items.as_ptr().add(i).read();
+                let value = old_val.value.defrag(defrag_allocator);
+                let key = old_val.key.defrag(defrag_allocator);
+                std::ptr::write(
+                    split_header.items.as_ptr().add(i) as *mut KeyValuePair,
+                    KeyValuePair { key, value },
+                );
+            }
+        }
+        unsafe {
+            let ptr = self.0.ptr().cast::<Header>();
+            let new_ptr = defrag_allocator.realloc_ptr(ptr, Self::layout((*ptr).cap).unwrap());
+            self.0.set_ptr(new_ptr.cast());
+        }
+        self
     }
 }
 

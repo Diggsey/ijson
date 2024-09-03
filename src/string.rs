@@ -13,6 +13,7 @@ use dashmap::{DashSet, SharedValue};
 use lazy_static::lazy_static;
 
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
+use crate::{Defrag, DefragAllocator};
 
 use super::value::{IValue, TypeTag};
 
@@ -400,6 +401,12 @@ impl Hash for IString {
 impl Debug for IString {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl<A: DefragAllocator> Defrag<A> for IString {
+    fn defrag(self, _defrag_allocator: &mut A) -> Self {
+        self
     }
 }
 

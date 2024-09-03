@@ -10,6 +10,7 @@ use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::slice::SliceIndex;
 
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
+use crate::{Defrag, DefragAllocator};
 
 use super::value::{IValue, TypeTag};
 
@@ -196,6 +197,7 @@ impl IArray {
             unsafe { self.header_mut().items_slice_mut() }
         }
     }
+
     fn resize_internal(&mut self, cap: usize) {
         if self.is_static() || cap == 0 {
             *self = Self::with_capacity(cap);
@@ -351,6 +353,30 @@ impl IArray {
                 self.0.set_ref(&EMPTY_HEADER);
             }
         }
+    }
+}
+
+impl<A: DefragAllocator> Defrag<A> for IArray {
+    fn defrag(mut self, defrag_allocator: &mut A) -> Self {
+        if self.is_static() {
+            return self;
+        }
+        for i in 0..self.len() {
+            unsafe {
+                let val = self.as_ptr().add(i).read();
+                let val = val.defrag(defrag_allocator);
+                std::ptr::write(self.as_ptr().add(i) as *mut IValue, val);
+            }
+        }
+        unsafe {
+            let new_ptr = defrag_allocator.realloc_ptr(
+                self.0.ptr(),
+                Self::layout((*self.0.ptr().cast::<Header>()).cap)
+                    .expect("layout is expected to return a valid value"),
+            );
+            self.0.set_ptr(new_ptr.cast());
+        }
+        self
     }
 }
 

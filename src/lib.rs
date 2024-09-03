@@ -28,6 +28,9 @@ pub mod object;
 
 #[cfg(feature = "thread_safe")]
 pub mod string;
+
+use std::alloc::Layout;
+
 #[cfg(feature = "thread_safe")]
 pub use string::IString;
 
@@ -51,6 +54,31 @@ mod de;
 mod ser;
 pub use de::from_value;
 pub use ser::to_value;
+
+/// Trait to implement defrag allocator
+pub trait DefragAllocator {
+    /// Gets a pointer and return an new pointer that points to a copy
+    /// of the exact same data. The old pointer should not be used anymore.
+    unsafe fn realloc_ptr<T>(&mut self, ptr: *mut T, layout: Layout) -> *mut T;
+
+    /// Allocate memory for defrag
+    unsafe fn alloc(&mut self, layout: Layout) -> *mut u8;
+
+    /// Free memory for defrag
+    unsafe fn free<T>(&mut self, ptr: *mut T, layout: Layout);
+}
+
+/// Trait for object that implements defrag
+pub trait Defrag<A: DefragAllocator> {
+    /// Defrag implementation
+    fn defrag(self, defrag_allocator: &mut A) -> Self;
+}
+/// Reinitialized the shared strings cache.
+/// Any json that still uses a shared string will continue using it.
+/// But new strings will be reinitialized instead of reused the old ones.
+pub fn reinit_shared_string_cache() {
+    unsafe_string::reinit_cache();
+}
 
 #[cfg(all(test, not(miri)))]
 mod tests {

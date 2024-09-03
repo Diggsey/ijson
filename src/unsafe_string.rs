@@ -6,10 +6,12 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
+use std::mem;
 use std::ops::Deref;
 use std::ptr::{copy_nonoverlapping, NonNull};
 
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
+use crate::{Defrag, DefragAllocator};
 
 use super::value::{IValue, TypeTag};
 
@@ -68,6 +70,12 @@ pub fn init_cache() {
         if STRING_CACHE.is_none() {
             STRING_CACHE = Some(HashSet::new());
         };
+    }
+}
+
+pub(crate) fn reinit_cache() {
+    unsafe {
+        STRING_CACHE = Some(HashSet::new());
     }
 }
 
@@ -160,10 +168,13 @@ impl IString {
             .pad_to_align())
     }
 
-    fn alloc(s: &str) -> *mut Header {
+    fn alloc<A: FnOnce(Layout) -> *mut u8>(s: &str, allocator: A) -> *mut Header {
         assert!((s.len() as u64) < (1 << 48));
         unsafe {
-            let ptr = alloc(Self::layout(s.len()).unwrap()).cast::<Header>();
+            let ptr = allocator(
+                Self::layout(s.len()).expect("layout is expected to return a valid value"),
+            )
+            .cast::<Header>();
             ptr.write(Header {
                 len_lower: s.len() as u32,
                 len_upper: ((s.len() as u64) >> 32) as u16,
@@ -175,29 +186,31 @@ impl IString {
         }
     }
 
-    fn dealloc(ptr: *mut Header) {
+    fn dealloc<D: FnOnce(*mut u8, Layout)>(ptr: *mut Header, deallocator: D) {
         unsafe {
             let hd = ThinRef::new(ptr);
             let layout = Self::layout(hd.len()).unwrap();
-            dealloc(ptr.cast::<u8>(), layout);
+            deallocator(ptr.cast::<u8>(), layout);
         }
+    }
+
+    fn intern_with_allocator<A: FnOnce(Layout) -> *mut u8>(s: &str, allocator: A) -> Self {
+        if s.is_empty() {
+            return Self::new();
+        }
+
+        let cache = unsafe { get_cache() };
+
+        let k = cache.get_or_insert_with(s, |s| WeakIString {
+            ptr: unsafe { NonNull::new_unchecked(Self::alloc(s, allocator)) },
+        });
+        k.upgrade()
     }
 
     /// Converts a `&str` to an `IString` by interning it in the global string cache.
     #[must_use]
     pub fn intern(s: &str) -> Self {
-        if s.is_empty() {
-            return Self::new();
-        }
-
-        unsafe {
-            let cache = get_cache();
-
-            let k = cache.get_or_insert_with(s, |s| WeakIString {
-                ptr: NonNull::new_unchecked(Self::alloc(s)),
-            });
-            k.upgrade()
-        }
+        Self::intern_with_allocator(s, |layout| unsafe { alloc(layout) })
     }
 
     fn header(&self) -> ThinMut<Header> {
@@ -242,25 +255,35 @@ impl IString {
             unsafe { self.0.raw_copy() }
         }
     }
-    pub(crate) fn drop_impl(&mut self) {
+
+    fn drop_impl_with_deallocator<D: FnOnce(*mut u8, Layout)>(&mut self, deallocator: D) {
         if !self.is_empty() {
             let mut hd = self.header();
             hd.rc -= 1;
             if hd.rc == 0 {
                 // Reference count reached zero, free the string
-                unsafe {
-                    let cache = get_cache();
-                    cache.remove(hd.str());
-
-                    // Shrink the cache if it is empty in tests to verify no memory leaks
-                    #[cfg(test)]
-                    if cache.is_empty() {
-                        cache.shrink_to_fit();
+                let cache = unsafe { get_cache() };
+                if let Some(element) = cache.get(hd.str()) {
+                    // we can not simply remove the element from the cache, while we
+                    // perform active defrag, the element might be in the cache but will
+                    // point to another (newer) value. In this case we do not want to remove it.
+                    if element.ptr.as_ptr().cast() == unsafe { self.0.ptr() } {
+                        cache.remove(hd.str());
                     }
                 }
-                Self::dealloc(unsafe { self.0.ptr().cast() });
+
+                // Shrink the cache if it is empty in tests to verify no memory leaks
+                #[cfg(test)]
+                if cache.is_empty() {
+                    cache.shrink_to_fit();
+                }
+                Self::dealloc(unsafe { self.0.ptr().cast() }, deallocator);
             }
         }
+    }
+
+    pub(crate) fn drop_impl(&mut self) {
+        self.drop_impl_with_deallocator(|ptr, layout| unsafe { dealloc(ptr, layout) });
     }
 }
 
@@ -315,7 +338,15 @@ impl From<IString> for String {
 
 impl PartialEq for IString {
     fn eq(&self, other: &Self) -> bool {
-        self.0.raw_eq(&other.0)
+        if self.0.raw_eq(&other.0) {
+            // if we have the same exact point we know they are equals.
+            return true;
+        }
+        // otherwise we need to compare the strings.
+        let s1 = self.as_str();
+        let s2 = other.as_str();
+        let res = s1 == s2;
+        res
     }
 }
 
@@ -366,13 +397,26 @@ impl PartialOrd for IString {
 }
 impl Hash for IString {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.raw_hash(state);
+        self.as_str().hash(state)
     }
 }
 
 impl Debug for IString {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl<A: DefragAllocator> Defrag<A> for IString {
+    fn defrag(mut self, defrag_allocator: &mut A) -> Self {
+        let new = Self::intern_with_allocator(self.as_str(), |layout| unsafe {
+            defrag_allocator.alloc(layout)
+        });
+        self.drop_impl_with_deallocator(|ptr, layout| unsafe {
+            defrag_allocator.free(ptr, layout)
+        });
+        mem::forget(self);
+        new
     }
 }
 
