@@ -141,7 +141,7 @@ pub enum DestructuredMut<'a> {
 #[derive(Debug)]
 pub struct BoolMut<'a>(&'a mut IValue);
 
-impl<'a> BoolMut<'a> {
+impl BoolMut<'_> {
     /// Set the [`IValue`] referenced by this proxy type to either
     /// `true` or `false`.
     pub fn set(&mut self, value: bool) {
@@ -155,7 +155,7 @@ impl<'a> BoolMut<'a> {
     }
 }
 
-impl<'a> Deref for BoolMut<'a> {
+impl Deref for BoolMut<'_> {
     type Target = bool;
     fn deref(&self) -> &bool {
         if self.get() {

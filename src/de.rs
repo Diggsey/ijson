@@ -135,7 +135,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
 
 struct NumberVisitor;
 
-impl<'de> Visitor<'de> for NumberVisitor {
+impl Visitor<'_> for NumberVisitor {
     type Value = INumber;
 
     fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
@@ -160,7 +160,7 @@ impl<'de> Visitor<'de> for NumberVisitor {
 
 struct StringVisitor;
 
-impl<'de> Visitor<'de> for StringVisitor {
+impl Visitor<'_> for StringVisitor {
     type Value = IString;
 
     fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {

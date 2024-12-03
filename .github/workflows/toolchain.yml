@@ -154,7 +154,7 @@ jobs:
         uses: codecov/codecov-action@v1
         with:
           fail_ci_if_error: true
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v4
         with:
           name: Upload coverage artifact
           path: lcov.info

@@ -8,7 +8,7 @@ pub struct ThinRef<'a, T> {
     phantom: PhantomData<&'a T>,
 }
 
-impl<'a, T> ThinRef<'a, T> {
+impl<T> ThinRef<'_, T> {
     pub unsafe fn new(ptr: *const T) -> Self {
         Self {
             ptr: NonNull::new_unchecked(ptr as *mut T),
@@ -17,7 +17,7 @@ impl<'a, T> ThinRef<'a, T> {
     }
 }
 
-impl<'a, T> Deref for ThinRef<'a, T> {
+impl<T> Deref for ThinRef<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -25,8 +25,8 @@ impl<'a, T> Deref for ThinRef<'a, T> {
     }
 }
 
-impl<'a, T> Copy for ThinRef<'a, T> {}
-impl<'a, T> Clone for ThinRef<'a, T> {
+impl<T> Copy for ThinRef<'_, T> {}
+impl<T> Clone for ThinRef<'_, T> {
     fn clone(&self) -> Self {
         *self
     }
@@ -38,7 +38,7 @@ pub struct ThinMut<'a, T> {
     phantom: PhantomData<&'a mut T>,
 }
 
-impl<'a, T> ThinMut<'a, T> {
+impl<T> ThinMut<'_, T> {
     pub unsafe fn new(ptr: *mut T) -> Self {
         Self {
             ptr: NonNull::new_unchecked(ptr),
@@ -47,7 +47,7 @@ impl<'a, T> ThinMut<'a, T> {
     }
 }
 
-impl<'a, T> Deref for ThinMut<'a, T> {
+impl<T> Deref for ThinMut<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -56,7 +56,7 @@ impl<'a, T> Deref for ThinMut<'a, T> {
     }
 }
 
-impl<'a, T> DerefMut for ThinMut<'a, T> {
+impl<T> DerefMut for ThinMut<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // Safety: `ptr` must be valid
         unsafe { &mut *self.ptr_mut() }

@@ -55,7 +55,7 @@ struct SplitHeader<'a> {
     table: &'a [usize],
 }
 
-impl<'a> SplitHeader<'a> {
+impl SplitHeader<'_> {
     fn find_bucket(&self, key: &IString) -> Result<usize, usize> {
         let hash_cap = hash_capacity(self.cap);
         let initial_bucket = hash_bucket(key, hash_cap);
@@ -108,7 +108,7 @@ struct SplitHeaderMut<'a> {
     table: &'a mut [usize],
 }
 
-impl<'a> SplitHeaderMut<'a> {
+impl SplitHeaderMut<'_> {
     fn as_ref(&self) -> SplitHeader {
         SplitHeader {
             cap: self.cap,
@@ -301,7 +301,7 @@ pub struct OccupiedEntry<'a> {
     bucket: usize,
 }
 
-impl<'a> Debug for OccupiedEntry<'a> {
+impl Debug for OccupiedEntry<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("OccupiedEntry")
             .field("key", self.key())
@@ -389,7 +389,7 @@ pub struct VacantEntry<'a> {
     key: IString,
 }
 
-impl<'a> Debug for VacantEntry<'a> {
+impl Debug for VacantEntry<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("OccupiedEntry")
             .field("key", self.key())
@@ -1015,7 +1015,7 @@ impl<'a> Iterator for Iter<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for Iter<'a> {
+impl ExactSizeIterator for Iter<'_> {
     fn len(&self) -> usize {
         self.0.len()
     }
@@ -1034,7 +1034,7 @@ impl<'a> Iterator for IterMut<'a> {
     }
 }
 
-impl<'a> ExactSizeIterator for IterMut<'a> {
+impl ExactSizeIterator for IterMut<'_> {
     fn len(&self) -> usize {
         self.0.len()
     }
