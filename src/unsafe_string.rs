@@ -685,5 +685,4 @@ mod tests {
             assert_eq!(original.0.ptr_usize(), cloned.0.ptr_usize());
         });
     }
-
 }

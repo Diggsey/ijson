@@ -1,3 +1,4 @@
+use half::{bf16, f16};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
@@ -6,7 +7,6 @@ use std::hash::Hash;
 use std::mem;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
-use half::{bf16, f16};
 
 use crate::{Defrag, DefragAllocator};
 

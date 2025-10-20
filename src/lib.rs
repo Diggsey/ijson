@@ -76,15 +76,38 @@ pub trait Defrag<A: DefragAllocator> {
 /// Reinitialized the shared strings cache.
 /// Any json that still uses a shared string will continue using it.
 /// But new strings will be reinitialized instead of reused the old ones.
+#[cfg(not(feature = "thread_safe"))]
 pub fn reinit_shared_string_cache() {
     unsafe_string::reinit_cache();
+}
+
+/// Reinitialized the shared strings cache.
+/// Any json that still uses a shared string will continue using it.
+/// But new strings will be reinitialized instead of reused the old ones.
+///
+/// Note: Thread-safe string cache does not support reinitialization.
+#[cfg(feature = "thread_safe")]
+pub fn reinit_shared_string_cache() {
+    // Thread-safe cache does not support reinit
 }
 
 /// Initialized shared string cache. Either thread safe or thread unsafe (in case
 /// the user know the string cache is protected by other means or the application is
 /// single threaded). Return `Ok(())` on succeed and error if the cache is already initialized.
+#[cfg(not(feature = "thread_safe"))]
 pub fn init_shared_string_cache(thread_safe: bool) -> Result<(), String> {
     unsafe_string::init_cache(thread_safe)
+}
+
+/// Initialized shared string cache. Either thread safe or thread unsafe (in case
+/// the user know the string cache is protected by other means or the application is
+/// single threaded). Return `Ok(())` on succeed and error if the cache is already initialized.
+///
+/// Note: Thread-safe cache is always initialized and the parameter is ignored.
+#[cfg(feature = "thread_safe")]
+pub fn init_shared_string_cache(_thread_safe: bool) -> Result<(), String> {
+    string::init_cache();
+    Ok(())
 }
 
 #[cfg(all(test, not(miri)))]

@@ -2,7 +2,8 @@ use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
 
 use serde::de::{
-    DeserializeSeed, EnumAccess, Error as SError, Expected, IntoDeserializer, MapAccess, SeqAccess, Unexpected, VariantAccess, Visitor
+    DeserializeSeed, EnumAccess, Error as SError, Expected, IntoDeserializer, MapAccess, SeqAccess,
+    Unexpected, VariantAccess, Visitor,
 };
 use serde::{forward_to_deserialize_any, Deserialize, Deserializer};
 use serde_json::error::Error;
@@ -567,7 +568,7 @@ impl<'de> Deserializer<'de> for &'de IArray {
         macro_rules! deserialize_typed_array {
             ($variant:ident, $slice:expr) => {{
                 let mut deserializer = ArrayAccess {
-                    iter: Iter::$variant($slice.iter())
+                    iter: Iter::$variant($slice.iter()),
                 };
                 let seq = visitor.visit_seq(&mut deserializer)?;
                 let remaining = deserializer.remaining_len();

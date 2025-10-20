@@ -1,12 +1,12 @@
 //! Functionality relating to the JSON number type
 #![allow(clippy::float_cmp)]
 
+use half::{bf16, f16};
 use std::alloc::{alloc, dealloc, Layout};
 use std::cmp::Ordering;
 use std::convert::{TryFrom, TryInto};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
-use half::{bf16, f16};
 
 use crate::{Defrag, DefragAllocator};
 

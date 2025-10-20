@@ -402,7 +402,7 @@ impl PartialOrd for IString {
 }
 impl Hash for IString {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.raw_hash(state);
+        self.0.hash(state);
     }
 }
 
