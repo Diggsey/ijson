@@ -1,0 +1,91 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -18,7 +18,6 @@
+ //   from tools like `mockalloc` which try to detect memory leaks during tests.
+ #![deny(missing_docs, missing_debug_implementations)]
+-#![feature(min_specialization)]
+ 
+ #[macro_use]
+ mod macros;
+--- a/src/array.rs
++++ b/src/array.rs
+@@ -1369,21 +1369,23 @@ extend_impl_int!(i8, i16, i32, i64, u8, u16, u32, u64);
+ extend_impl_float!(f16, bf16, f32, f64);
+ 
+-impl<U: Into<IValue>> Extend<U> for IArray {
+-    default fn extend<T: IntoIterator<Item = U>>(&mut self, iter: T) {
+-        let iter = iter.into_iter();
+-        self.reserve(iter.size_hint().0);
+-        for v in iter {
+-            self.push(v);
+-        }
+-    }
+-}
++// Removed generic Extend implementation to avoid min_specialization feature
++// impl<U: Into<IValue>> Extend<U> for IArray {
++//     default fn extend<T: IntoIterator<Item = U>>(&mut self, iter: T) {
++//         let iter = iter.into_iter();
++//         self.reserve(iter.size_hint().0);
++//         for v in iter {
++//             self.push(v);
++//         }
++//     }
++// }
+ 
+-impl<U: Into<IValue>> FromIterator<U> for IArray {
+-    default fn from_iter<T: IntoIterator<Item = U>>(iter: T) -> Self {
+-        let mut res = IArray::new();
+-        res.extend(iter);
+-        res
+-    }
+-}
++// Removed generic FromIterator implementation to avoid min_specialization feature
++// impl<U: Into<IValue>> FromIterator<U> for IArray {
++//     default fn from_iter<T: IntoIterator<Item = U>>(iter: T) -> Self {
++//         let mut res = IArray::new();
++//         res.extend(iter);
++//         res
++//     }
++// }
+ 
+ macro_rules! from_iter_impl {
+@@ -1489,23 +1491,25 @@ macro_rules! from_vec_impl {
+ 
+ from_vec_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
+ 
+-impl<T: Into<IValue>> From<Vec<T>> for IArray {
+-    default fn from(other: Vec<T>) -> Self {
+-        let mut res = IArray::with_capacity(other.len());
+-        res.extend(other.into_iter().map(Into::into));
+-        res
+-    }
+-}
++// Removed generic From<Vec<T>> implementation to avoid min_specialization feature
++// impl<T: Into<IValue>> From<Vec<T>> for IArray {
++//     default fn from(other: Vec<T>) -> Self {
++//         let mut res = IArray::with_capacity(other.len());
++//         res.extend(other.into_iter().map(Into::into));
++//         res
++//     }
++// }
+ 
+ macro_rules! from_slice_impl {
+@@ -1511,11 +1515,13 @@ from_slice_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
+ 
+-impl<T: Into<IValue> + Clone> From<&[T]> for IArray {
+-    default fn from(other: &[T]) -> Self {
+-        let mut res = IArray::with_capacity(other.len());
+-        res.extend(other.iter().cloned().map(Into::into));
+-        res
+-    }
+-}
++// Removed generic From<&[T]> implementation to avoid min_specialization feature
++// impl<T: Into<IValue> + Clone> From<&[T]> for IArray {
++//     default fn from(other: &[T]) -> Self {
++//         let mut res = IArray::with_capacity(other.len());
++//         res.extend(other.iter().cloned().map(Into::into));
++//         res
++//     }
++// }
+ 
+ /// Iterator item that can hold either a reference to an IValue or an owned IValue

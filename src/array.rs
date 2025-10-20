@@ -1368,23 +1368,23 @@ fn convert_bf16<T: Into<f64>>(value: T) -> bf16 {
 extend_impl_int!(i8, i16, i32, i64, u8, u16, u32, u64);
 extend_impl_float!(f16, bf16, f32, f64);
 
-impl<U: Into<IValue>> Extend<U> for IArray {
-    default fn extend<T: IntoIterator<Item = U>>(&mut self, iter: T) {
-        let iter = iter.into_iter();
-        self.reserve(iter.size_hint().0);
-        for v in iter {
-            self.push(v);
-        }
-    }
-}
+// impl<U: Into<IValue>> Extend<U> for IArray {
+//     default fn extend<T: IntoIterator<Item = U>>(&mut self, iter: T) {
+//         let iter = iter.into_iter();
+//         self.reserve(iter.size_hint().0);
+//         for v in iter {
+//             self.push(v);
+//         }
+//     }
+// }
 
-impl<U: Into<IValue>> FromIterator<U> for IArray {
-    default fn from_iter<T: IntoIterator<Item = U>>(iter: T) -> Self {
-        let mut res = IArray::new();
-        res.extend(iter);
-        res
-    }
-}
+// impl<U: Into<IValue>> FromIterator<U> for IArray {
+//     default fn from_iter<T: IntoIterator<Item = U>>(iter: T) -> Self {
+//         let mut res = IArray::new();
+//         res.extend(iter);
+//         res
+//     }
+// }
 
 macro_rules! from_iter_impl {
     ($($ty:ty),*) => {
@@ -1488,13 +1488,13 @@ macro_rules! from_vec_impl {
 
 from_vec_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
 
-impl<T: Into<IValue>> From<Vec<T>> for IArray {
-    default fn from(other: Vec<T>) -> Self {
-        let mut res = IArray::with_capacity(other.len());
-        res.extend(other.into_iter().map(Into::into));
-        res
-    }
-}
+// impl<T: Into<IValue>> From<Vec<T>> for IArray {
+//     default fn from(other: Vec<T>) -> Self {
+//         let mut res = IArray::with_capacity(other.len());
+//         res.extend(other.into_iter().map(Into::into));
+//         res
+//     }
+// }
 
 macro_rules! from_slice_impl {
     ($($ty:ty),*) => {
@@ -1510,13 +1510,13 @@ macro_rules! from_slice_impl {
 
 from_slice_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
 
-impl<T: Into<IValue> + Clone> From<&[T]> for IArray {
-    default fn from(other: &[T]) -> Self {
-        let mut res = IArray::with_capacity(other.len());
-        res.extend(other.iter().cloned().map(Into::into));
-        res
-    }
-}
+// impl<T: Into<IValue> + Clone> From<&[T]> for IArray {
+//     default fn from(other: &[T]) -> Self {
+//         let mut res = IArray::with_capacity(other.len());
+//         res.extend(other.iter().cloned().map(Into::into));
+//         res
+//     }
+// }
 
 /// Iterator item that can hold either a reference to an IValue or an owned IValue
 /// This avoids deep copying for heterogeneous arrays while still providing owned values for primitives
