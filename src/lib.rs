@@ -22,6 +22,7 @@
 #[macro_use]
 mod macros;
 
+mod alloc;
 pub mod array;
 pub mod number;
 pub mod object;

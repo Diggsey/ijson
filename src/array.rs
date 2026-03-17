@@ -1,14 +1,16 @@
 //! Functionality relating to the JSON array type
 
-use std::alloc::{alloc, dealloc, realloc, Layout, LayoutError};
+use std::alloc::{Layout, LayoutError};
 use std::borrow::{Borrow, BorrowMut};
 use std::cmp::{self, Ordering};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::iter::FromIterator;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
+use std::ptr::NonNull;
 use std::slice::SliceIndex;
 
+use crate::alloc::{alloc_infallible, dealloc_infallible, realloc_infallible};
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
 use super::value::{IValue, TypeTag};
@@ -109,28 +111,28 @@ impl IArray {
             .pad_to_align())
     }
 
-    fn alloc(cap: usize) -> *mut Header {
+    fn alloc(cap: usize) -> NonNull<Header> {
         unsafe {
-            let ptr = alloc(Self::layout(cap).unwrap()).cast::<Header>();
+            let ptr = alloc_infallible(Self::layout(cap).unwrap()).cast::<Header>();
             ptr.write(Header { len: 0, cap });
             ptr
         }
     }
 
-    fn realloc(ptr: *mut Header, new_cap: usize) -> *mut Header {
+    fn realloc(ptr: NonNull<Header>, new_cap: usize) -> NonNull<Header> {
         unsafe {
-            let old_layout = Self::layout((*ptr).cap).unwrap();
+            let old_layout = Self::layout(ptr.as_ref().cap).unwrap();
             let new_layout = Self::layout(new_cap).unwrap();
-            let ptr = realloc(ptr.cast::<u8>(), old_layout, new_layout.size()).cast::<Header>();
-            (*ptr).cap = new_cap;
+            let mut ptr = realloc_infallible(ptr.cast(), old_layout, new_layout).cast::<Header>();
+            ptr.as_mut().cap = new_cap;
             ptr
         }
     }
 
-    fn dealloc(ptr: *mut Header) {
+    fn dealloc(ptr: NonNull<Header>) {
         unsafe {
-            let layout = Self::layout((*ptr).cap).unwrap();
-            dealloc(ptr.cast(), layout);
+            let layout = Self::layout(ptr.as_ref().cap).unwrap();
+            dealloc_infallible(ptr.cast(), layout);
         }
     }
 
@@ -151,12 +153,12 @@ impl IArray {
         }
     }
 
-    fn header(&self) -> ThinRef<Header> {
+    fn header<'a>(&'a self) -> ThinRef<'a, Header> {
         unsafe { ThinRef::new(self.0.ptr().cast()) }
     }
 
     // Safety: must not be static
-    unsafe fn header_mut(&mut self) -> ThinMut<Header> {
+    unsafe fn header_mut<'a>(&'a mut self) -> ThinMut<'a, Header> {
         ThinMut::new(self.0.ptr().cast())
     }
 

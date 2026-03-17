@@ -1,9 +1,9 @@
 //! Functionality relating to the JSON string type
 
-use std::alloc::{alloc, dealloc, Layout, LayoutError};
+use std::alloc::{Layout, LayoutError};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
-use std::fmt::{self, Debug, Formatter};
+use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::Hash;
 use std::ops::Deref;
 use std::ptr::{copy_nonoverlapping, NonNull};
@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use dashmap::{DashSet, SharedValue};
 use lazy_static::lazy_static;
 
+use crate::alloc::{alloc_infallible, dealloc_infallible};
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
 use super::value::{IValue, TypeTag};
@@ -105,15 +106,15 @@ impl Borrow<str> for WeakIString {
     }
 }
 impl WeakIString {
-    fn header(&self) -> ThinRef<Header> {
+    fn header<'a>(&'a self) -> ThinRef<'a, Header> {
         // Safety: pointer is always valid
-        unsafe { ThinRef::new(self.ptr.as_ptr()) }
+        unsafe { ThinRef::new(self.ptr) }
     }
     fn upgrade(&self) -> IString {
         unsafe {
             self.ptr.as_ref().rc.fetch_add(1, AtomicOrdering::Relaxed);
             IString(IValue::new_ptr(
-                self.ptr.as_ptr().cast::<u8>(),
+                self.ptr.cast::<u8>(),
                 TypeTag::StringOrNull,
             ))
         }
@@ -155,11 +156,11 @@ impl IString {
             .pad_to_align())
     }
 
-    fn alloc(s: &str, shard_index: usize) -> *mut Header {
+    fn alloc(s: &str, shard_index: usize) -> NonNull<Header> {
         assert!((s.len() as u64) < (1 << 48));
         assert!(shard_index < (1 << 16));
         unsafe {
-            let ptr = alloc(Self::layout(s.len()).unwrap()).cast::<Header>();
+            let ptr = alloc_infallible(Self::layout(s.len()).unwrap()).cast::<Header>();
             ptr.write(Header {
                 len_lower: s.len() as u32,
                 len_upper: ((s.len() as u64) >> 32) as u16,
@@ -172,11 +173,11 @@ impl IString {
         }
     }
 
-    fn dealloc(ptr: *mut Header) {
+    fn dealloc(ptr: NonNull<Header>) {
         unsafe {
             let hd = ThinRef::new(ptr);
             let layout = Self::layout(hd.len()).unwrap();
-            dealloc(ptr.cast::<u8>(), layout);
+            dealloc_infallible(ptr.cast::<u8>(), layout);
         }
     }
 
@@ -195,10 +196,8 @@ impl IString {
         if let Some((k, _)) = guard.get_key_value(s) {
             k.upgrade()
         } else {
-            let k = unsafe {
-                WeakIString {
-                    ptr: NonNull::new_unchecked(Self::alloc(s, shard_index)),
-                }
+            let k = WeakIString {
+                ptr: Self::alloc(s, shard_index),
             };
             let res = k.upgrade();
             guard.insert(k, SharedValue::new(()));
@@ -206,7 +205,7 @@ impl IString {
         }
     }
 
-    fn header(&self) -> ThinRef<Header> {
+    fn header<'a>(&'a self) -> ThinRef<'a, Header> {
         unsafe { ThinRef::new(self.0.ptr().cast()) }
     }
 
@@ -400,6 +399,12 @@ impl Hash for IString {
 impl Debug for IString {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         Debug::fmt(self.as_str(), f)
+    }
+}
+
+impl Display for IString {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        Display::fmt(self.as_str(), f)
     }
 }
 

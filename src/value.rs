@@ -83,7 +83,7 @@ pub enum Destructured {
 impl Destructured {
     /// Convert to the borrowed form of thie enum.
     #[must_use]
-    pub fn as_ref(&self) -> DestructuredRef {
+    pub fn as_ref<'a>(&'a self) -> DestructuredRef<'a> {
         use DestructuredRef::{Array, Bool, Null, Number, Object, String};
         match self {
             Self::Null => Null,
@@ -215,14 +215,14 @@ impl IValue {
         }
     }
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
-    pub(crate) unsafe fn new_ptr(p: *mut u8, tag: TypeTag) -> Self {
+    pub(crate) unsafe fn new_ptr(p: NonNull<u8>, tag: TypeTag) -> Self {
         Self {
-            ptr: NonNull::new_unchecked(p.add(tag as usize)),
+            ptr: p.add(tag as usize),
         }
     }
     // Safety: Reference must be aligned to at least ALIGNMENT
     pub(crate) unsafe fn new_ref<T>(r: &T, tag: TypeTag) -> Self {
-        Self::new_ptr(r as *const _ as *mut u8, tag)
+        Self::new_ptr(NonNull::from_ref(r).cast(), tag)
     }
 
     /// JSON `null`.
@@ -236,19 +236,17 @@ impl IValue {
         self.ptr.as_ptr() as usize
     }
     // Safety: Must only be called on non-inline types
-    pub(crate) unsafe fn ptr(&self) -> *mut u8 {
-        self.ptr
-            .as_ptr()
-            .wrapping_offset(-((self.ptr_usize() % ALIGNMENT) as isize))
+    pub(crate) unsafe fn ptr(&self) -> NonNull<u8> {
+        self.ptr.offset(-((self.ptr_usize() % ALIGNMENT) as isize))
     }
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
-    pub(crate) unsafe fn set_ptr(&mut self, ptr: *mut u8) {
+    pub(crate) unsafe fn set_ptr(&mut self, ptr: NonNull<u8>) {
         let tag = self.type_tag();
-        self.ptr = NonNull::new_unchecked(ptr.add(tag as usize));
+        self.ptr = ptr.add(tag as usize);
     }
     // Safety: Reference must be aligned to at least ALIGNMENT
     pub(crate) unsafe fn set_ref<T>(&mut self, r: &T) {
-        self.set_ptr(r as *const T as *mut u8);
+        self.set_ptr(NonNull::from_ref(r).cast());
     }
     pub(crate) unsafe fn raw_copy(&self) -> Self {
         Self { ptr: self.ptr }
@@ -300,7 +298,7 @@ impl IValue {
 
     /// Destructures a reference to this value into an enum which can be `match`ed on.
     #[must_use]
-    pub fn destructure_ref(&self) -> DestructuredRef {
+    pub fn destructure_ref<'a>(&'a self) -> DestructuredRef<'a> {
         // Safety: we check the type
         unsafe {
             match self.type_() {
@@ -315,7 +313,7 @@ impl IValue {
     }
 
     /// Destructures a mutable reference to this value into an enum which can be `match`ed on.
-    pub fn destructure_mut(&mut self) -> DestructuredMut {
+    pub fn destructure_mut<'a>(&'a mut self) -> DestructuredMut<'a> {
         // Safety: we check the type
         unsafe {
             match self.type_() {

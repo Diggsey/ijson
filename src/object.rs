@@ -1,6 +1,6 @@
 //! Functionality relating to the JSON object type
 
-use std::alloc::{alloc, dealloc, Layout, LayoutError};
+use std::alloc::{Layout, LayoutError};
 use std::cmp::{self, Ordering};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
@@ -9,10 +9,12 @@ use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 use std::mem;
 use std::ops::{Index, IndexMut};
+use std::ptr::NonNull;
 
 #[cfg(feature = "indexmap")]
 use indexmap::IndexMap;
 
+use crate::alloc::{alloc_infallible, dealloc_infallible};
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
 use super::string::IString;
@@ -109,7 +111,7 @@ struct SplitHeaderMut<'a> {
 }
 
 impl SplitHeaderMut<'_> {
-    fn as_ref(&self) -> SplitHeader {
+    fn as_ref<'a>(&'a self) -> SplitHeader<'a> {
         SplitHeader {
             cap: self.cap,
             items: self.items,
@@ -534,10 +536,10 @@ impl IObject {
             .pad_to_align())
     }
 
-    fn alloc(cap: usize) -> *mut Header {
+    fn alloc(cap: usize) -> NonNull<Header> {
         unsafe {
-            let hd = alloc(Self::layout(cap).unwrap()).cast::<Header>();
-            std::ptr::write(hd, Header { len: 0, cap });
+            let hd = alloc_infallible(Self::layout(cap).unwrap()).cast::<Header>();
+            hd.write(Header { len: 0, cap });
             let mut hd_mut = ThinMut::new(hd);
             let hash_ptr = hd_mut.hashes_ptr_mut();
             for i in 0..hash_capacity(cap) {
@@ -547,10 +549,10 @@ impl IObject {
         }
     }
 
-    fn dealloc(ptr: *mut Header) {
+    fn dealloc(ptr: NonNull<Header>) {
         unsafe {
-            let layout = Self::layout((*ptr).cap).unwrap();
-            dealloc(ptr.cast(), layout);
+            let layout = Self::layout(ptr.as_ref().cap).unwrap();
+            dealloc_infallible(ptr.cast(), layout);
         }
     }
 
@@ -571,12 +573,12 @@ impl IObject {
         }
     }
 
-    fn header(&self) -> ThinRef<Header> {
+    fn header<'a>(&'a self) -> ThinRef<'a, Header> {
         unsafe { ThinRef::new(self.0.ptr().cast()) }
     }
 
     // Safety: must not be static
-    unsafe fn header_mut(&mut self) -> ThinMut<Header> {
+    unsafe fn header_mut<'a>(&'a mut self) -> ThinMut<'a, Header> {
         ThinMut::new(self.0.ptr().cast())
     }
 
@@ -627,14 +629,14 @@ impl IObject {
     }
 
     /// Returns a view of an entry within this object.
-    pub fn entry(&mut self, key: impl Into<IString>) -> Entry {
+    pub fn entry<'a>(&'a mut self, key: impl Into<IString>) -> Entry<'a> {
         self.reserve(1);
         // Safety: cannot be static after reserving space
         unsafe { self.header_mut().entry(key.into()) }
     }
     /// Returns a view of an entry within this object, whilst avoiding
     /// cloning the key if the entry is already occupied.
-    pub fn entry_or_clone(&mut self, key: &IString) -> Entry {
+    pub fn entry_or_clone<'a>(&'a mut self, key: &IString) -> Entry<'a> {
         self.reserve(1);
         // Safety: cannot be static after reserving space
         unsafe { self.header_mut().entry_or_clone(key) }
@@ -649,7 +651,7 @@ impl IObject {
     }
     /// Returns an iterator over (&key, &value) pairs in this object.
     #[must_use]
-    pub fn iter(&self) -> Iter {
+    pub fn iter<'a>(&'a self) -> Iter<'a> {
         Iter(self.header().split().items.iter())
     }
     /// Returns an iterator over mutable references to the values in
@@ -658,7 +660,7 @@ impl IObject {
         self.iter_mut().map(|x| x.1)
     }
     /// Returns an iterator over (&key, &mut value) pairs in this object.
-    pub fn iter_mut(&mut self) -> IterMut {
+    pub fn iter_mut<'a>(&'a mut self) -> IterMut<'a> {
         IterMut(
             if self.is_empty() {
                 &mut []

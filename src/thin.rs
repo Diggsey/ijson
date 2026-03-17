@@ -9,9 +9,9 @@ pub struct ThinRef<'a, T> {
 }
 
 impl<T> ThinRef<'_, T> {
-    pub unsafe fn new(ptr: *const T) -> Self {
+    pub unsafe fn new(ptr: NonNull<T>) -> Self {
         Self {
-            ptr: NonNull::new_unchecked(ptr as *mut T),
+            ptr,
             phantom: PhantomData,
         }
     }
@@ -39,9 +39,9 @@ pub struct ThinMut<'a, T> {
 }
 
 impl<T> ThinMut<'_, T> {
-    pub unsafe fn new(ptr: *mut T) -> Self {
+    pub unsafe fn new(ptr: NonNull<T>) -> Self {
         Self {
-            ptr: NonNull::new_unchecked(ptr),
+            ptr,
             phantom: PhantomData,
         }
     }
@@ -69,7 +69,7 @@ pub trait ThinRefExt<'a, T>: Deref<Target = T> {
 
 pub trait ThinMutExt<'a, T>: DerefMut<Target = T> + ThinRefExt<'a, T> + Sized {
     fn ptr_mut(&mut self) -> *mut T;
-    fn reborrow(&mut self) -> ThinMut<T>;
+    fn reborrow<'b>(&'b mut self) -> ThinMut<'b, T>;
 }
 
 impl<'a, T> ThinRefExt<'a, T> for ThinRef<'a, T> {
@@ -88,7 +88,7 @@ impl<'a, T> ThinMutExt<'a, T> for ThinMut<'a, T> {
     fn ptr_mut(&mut self) -> *mut T {
         self.ptr.as_ptr()
     }
-    fn reborrow(&mut self) -> ThinMut<T> {
+    fn reborrow<'b>(&'b mut self) -> ThinMut<'b, T> {
         Self {
             ptr: self.ptr,
             phantom: self.phantom,

@@ -1,12 +1,14 @@
 //! Functionality relating to the JSON number type
 #![allow(clippy::float_cmp)]
 
-use std::alloc::{alloc, dealloc, Layout, LayoutError};
+use std::alloc::{Layout, LayoutError};
 use std::cmp::Ordering;
 use std::convert::{TryFrom, TryInto};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
+use std::ptr::NonNull;
 
+use crate::alloc::{alloc_infallible, dealloc_infallible};
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
 use super::value::{IValue, TypeTag};
@@ -384,9 +386,9 @@ impl INumber {
         Ok(res)
     }
 
-    fn alloc(type_: NumberType) -> *mut Header {
+    fn alloc(type_: NumberType) -> NonNull<Header> {
         unsafe {
-            let ptr = alloc(Self::layout(type_).unwrap()).cast::<Header>();
+            let ptr = alloc_infallible(Self::layout(type_).unwrap()).cast::<Header>();
             ptr.write(Header {
                 type_,
                 static_: 0,
@@ -396,10 +398,10 @@ impl INumber {
         }
     }
 
-    fn dealloc(ptr: *mut Header) {
+    fn dealloc(ptr: NonNull<Header>) {
         unsafe {
-            let layout = Self::layout((*ptr).type_).unwrap();
-            dealloc(ptr.cast::<u8>(), layout);
+            let layout = Self::layout(ptr.as_ref().type_).unwrap();
+            dealloc_infallible(ptr.cast::<u8>(), layout);
         }
     }
 
@@ -430,11 +432,11 @@ impl INumber {
             ))
         }
     }
-    fn header(&self) -> ThinRef<Header> {
+    fn header<'a>(&'a self) -> ThinRef<'a, Header> {
         unsafe { ThinRef::new(self.0.ptr().cast()) }
     }
 
-    fn header_mut(&mut self) -> ThinMut<Header> {
+    fn header_mut<'a>(&'a mut self) -> ThinMut<'a, Header> {
         unsafe { ThinMut::new(self.0.ptr().cast()) }
     }
 
