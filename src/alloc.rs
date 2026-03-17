@@ -22,7 +22,6 @@ pub unsafe fn realloc_infallible(
 
     let new_ptr = std::alloc::realloc(ptr.as_ptr(), old_layout, new_layout.size());
     if new_ptr.is_null() {
-        dealloc_infallible(ptr, old_layout);
         handle_alloc_error(new_layout);
     }
     NonNull::new_unchecked(new_ptr)

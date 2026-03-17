@@ -600,8 +600,8 @@ mod tests {
             let mut arr = IArray::new();
 
             for j in 0..1000 {
-                let index = rng.gen_range(0..arr.len() + 1);
-                if rng.gen() {
+                let index = rng.random_range(0..arr.len() + 1);
+                if rng.random() {
                     arr.insert(index, j);
                 } else {
                     arr.remove(index);

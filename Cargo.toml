@@ -1,6 +1,6 @@
 [package]
 name = "ijson"
-version = "0.1.4"
+version = "0.1.5"
 authors = ["Diggory Blake <diggsey@googlemail.com>"]
 edition = "2018"
 readme = "README.md"
@@ -14,13 +14,13 @@ tracing = ["mockalloc/tracing"]
 
 [dependencies]
 dashmap = { version = "5.5", features = ["raw-api"] }
-lazy_static = "1.4.0"
-serde = "1.0.173"
-serde_json = "1.0.103"
-ctor = { version = "0.2.4", optional = true }
-indexmap = { version = "2.0.0", optional = true }
+lazy_static = "1.5.0"
+serde = "1.0.228"
+serde_json = "1.0.149"
+ctor = { version = "0.6.3", optional = true }
+indexmap = { version = "2.13.0", optional = true }
 
 [dev-dependencies]
 mockalloc = "0.1.2"
-ctor = "0.1.16"
-rand = "0.8.4"
+ctor = "0.6.3"
+rand = "0.10.0"
