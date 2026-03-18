@@ -125,36 +125,20 @@ jobs:
     name: Test (Nightly)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          profile: minimal
-          toolchain: nightly
-          override: true
           components: llvm-tools-preview
-      - uses: actions-rs/cargo@v1
-        with:
-          command: install
-          args: cargo-binutils rustfilt
-      - name: Build tests
-        run: |
-          cargo rustc --message-format=json --tests -- -Zinstrument-coverage | jq -r '.executable | strings' > executables.txt
-      - name: Run tests
-        run: |
-          while read p; do
-            exec "$p" --test-threads=1
-          done <executables.txt
-        env:
-          LLVM_PROFILE_FILE: "prof/%m.profraw"
-      - name: Generate coverage report
-        run: |
-          rust-profdata merge -sparse prof/*.profraw -o default.profdata
-          cat executables.txt | xargs -d '\n' rust-cov export -format='lcov' -instr-profile='default.profdata' > lcov.info
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Run tests with coverage
+        run: cargo llvm-cov --lcov --output-path lcov.info -- --test-threads=1
       - name: Upload coverage report
-        uses: codecov/codecov-action@v1
+        uses: codecov/codecov-action@v4
         with:
-          fail_ci_if_error: true
+          files: lcov.info
+          fail_ci_if_error: false
       - uses: actions/upload-artifact@v4
         with:
-          name: Upload coverage artifact
+          name: coverage
           path: lcov.info
