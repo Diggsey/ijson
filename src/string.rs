@@ -297,6 +297,19 @@ impl Deref for IString {
     }
 }
 
+/// Implement Borrow is incorrect:
+/// > In particular Eq, Ord and Hash must be equivalent for borrowed and owned values: x.borrow() == y.borrow()
+/// > should give the same result as x == y.
+///
+/// While Eq and Ord are equivalent, Hash is not, since the hash of an `IString` is the hash of its pointer,
+/// while the hash of a `&str` is the hash of its contents. This can lead to surprising behavior when using
+/// `IString` as keys in a `HashMap` or `HashSet`, since lookups with `&str` will not find the corresponding
+/// `IString` key.
+///
+/// Only enable this feature as a temporary compatibility measure for libraries that require `Borrow<str>`
+/// to be implemented, and be aware of the potential pitfalls when using `IString` as keys in hash-based
+/// collections.    
+#[cfg(feature = "broken-borrow-impl-compat")]
 impl Borrow<str> for IString {
     fn borrow(&self) -> &str {
         self.as_str()
