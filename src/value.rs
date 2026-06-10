@@ -1,12 +1,12 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
-use std::fmt::{self, Debug, Formatter};
+use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::Hash;
 use std::hint::unreachable_unchecked;
-use std::mem;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
+use std::{io, mem};
 
 #[cfg(feature = "indexmap")]
 use indexmap::IndexMap;
@@ -901,6 +901,41 @@ impl<I: ValueIndex> IndexMut<I> for IValue {
     #[inline]
     fn index_mut(&mut self, index: I) -> &mut IValue {
         index.index_or_insert(self)
+    }
+}
+
+impl Display for IValue {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        struct WriterFormatter<'a, 'b: 'a> {
+            inner: &'a mut fmt::Formatter<'b>,
+        }
+        impl<'a, 'b> io::Write for WriterFormatter<'a, 'b> {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                // Safety: the serializer below only emits valid utf8 when using
+                // the default formatter.
+                let s = unsafe { str::from_utf8_unchecked(buf) };
+
+                // Error value does not matter because Display impl just maps it
+                // back to fmt::Error.
+                let io_error = |_| io::Error::new(io::ErrorKind::Other, "fmt error");
+                self.inner.write_str(s).map_err(io_error)?;
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let alternate = f.alternate();
+        let mut wr = WriterFormatter { inner: f };
+        if alternate {
+            // {:#}
+            serde_json::to_writer_pretty(&mut wr, self).map_err(|_| fmt::Error)
+        } else {
+            // {}
+            serde_json::to_writer(&mut wr, self).map_err(|_| fmt::Error)
+        }
     }
 }
 
