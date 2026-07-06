@@ -670,6 +670,52 @@ impl TryFrom<f32> for INumber {
     }
 }
 
+/// Converts a [`serde_json::Number`] into an [`INumber`].
+///
+/// Conversion may be lossy if the number is not exactly representable as an
+/// `INumber`. The exact behaviour in that case (e.g. clamping an out-of-range
+/// magnitude) is not guaranteed to be stable across versions.
+impl From<serde_json::Number> for INumber {
+    fn from(n: serde_json::Number) -> Self {
+        if let Some(v) = n.as_u64() {
+            INumber::from(v)
+        } else if let Some(v) = n.as_i64() {
+            INumber::from(v)
+        } else {
+            // A serde_json number is always representable as an f64, so this
+            // cannot return `None`; if it does, an invariant broke.
+            let v = n
+                .as_f64()
+                .expect("a serde_json number is always an integer or float");
+            // Standard JSON numbers are finite. Only the `arbitrary_precision`
+            // feature can parse a magnitude beyond f64's range (an infinity);
+            // clamp it so the result stays a finite, representable number and
+            // `try_from` cannot fail.
+            INumber::try_from(v.clamp(f64::MIN, f64::MAX)).expect("a clamped f64 is always finite")
+        }
+    }
+}
+
+/// Converts an [`INumber`] into a [`serde_json::Number`].
+///
+/// Conversion may be lossy if the number is not exactly representable as a
+/// `serde_json::Number`. The exact behaviour in that case (e.g. rounding) is
+/// not guaranteed to be stable across versions.
+impl From<INumber> for serde_json::Number {
+    fn from(n: INumber) -> Self {
+        if let Some(v) = n.to_u64() {
+            serde_json::Number::from(v)
+        } else if let Some(v) = n.to_i64() {
+            serde_json::Number::from(v)
+        } else {
+            // Not an integer, so it is stored as an f64. An `INumber` is always
+            // finite, so `from_f64` cannot fail; a failure here would mean the
+            // `INumber` invariant was violated.
+            serde_json::Number::from_f64(n.to_f64_lossy()).expect("an INumber is always finite")
+        }
+    }
+}
+
 impl PartialEq for INumber {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal

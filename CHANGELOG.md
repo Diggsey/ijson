@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.7
+
+- Add `FromIterator<T: Into<IValue>>` for `IValue` (collects into an array) and `FromIterator<(K: Into<IString>, V: Into<IValue>)>` for `IValue` (collects into an object), mirroring `serde_json::Value`.
+- Add `From<serde_json::Value> for IValue` and `From<IValue> for serde_json::Value` for smoother interoperability with `serde_json`.
+
 ## 0.1.6
 
 - **Breaking:** Remove `Borrow<str>` impl for `IString` by default. The impl violates the `Borrow` contract because `IString` hashes by pointer, not by contents, causing silent lookup failures in `HashMap`/`HashSet` when using `&str` keys. A `broken-borrow-impl-compat` feature flag is available as a temporary compatibility measure.
