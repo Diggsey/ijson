@@ -1002,7 +1002,7 @@ impl From<serde_json::Value> for IValue {
             serde_json::Value::Number(n) => INumber::from(n).into(),
             serde_json::Value::String(s) => s.into(),
             serde_json::Value::Array(a) => a.into_iter().collect(),
-            serde_json::Value::Object(o) => o.into_iter().collect(),
+            serde_json::Value::Object(o) => IObject::from(o).into(),
         }
     }
 }
@@ -1023,11 +1023,7 @@ impl From<IValue> for serde_json::Value {
             Destructured::Array(a) => {
                 serde_json::Value::Array(a.into_iter().map(Into::into).collect())
             }
-            Destructured::Object(o) => serde_json::Value::Object(
-                o.into_iter()
-                    .map(|(k, v)| (k.as_str().to_owned(), v.into()))
-                    .collect(),
-            ),
+            Destructured::Object(o) => serde_json::Value::Object(o.into()),
         }
     }
 }

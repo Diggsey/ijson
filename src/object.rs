@@ -1085,6 +1085,33 @@ impl<K: Into<IString>, V: Into<IValue>> From<IndexMap<K, V>> for IObject {
     }
 }
 
+/// Converts a [`serde_json::Map`] into an [`IObject`].
+///
+/// Conversion of numeric values may be lossy if a number is not exactly
+/// representable in the destination type. The exact behaviour in that case is
+/// not guaranteed to be stable across versions.
+impl From<serde_json::Map<String, serde_json::Value>> for IObject {
+    fn from(other: serde_json::Map<String, serde_json::Value>) -> Self {
+        let mut res = Self::with_capacity(other.len());
+        res.extend(other.into_iter().map(|(k, v)| (k, IValue::from(v))));
+        res
+    }
+}
+
+/// Converts an [`IObject`] into a [`serde_json::Map`].
+///
+/// Conversion of numeric values may be lossy if a number is not exactly
+/// representable in the destination type. The exact behaviour in that case is
+/// not guaranteed to be stable across versions.
+impl From<IObject> for serde_json::Map<String, serde_json::Value> {
+    fn from(other: IObject) -> Self {
+        other
+            .into_iter()
+            .map(|(k, v)| (k.as_str().to_owned(), serde_json::Value::from(v)))
+            .collect()
+    }
+}
+
 impl Default for IObject {
     fn default() -> Self {
         Self::new()
@@ -1117,6 +1144,23 @@ mod tests {
         assert_eq!(y["a"], IValue::NULL);
         assert_eq!(y["b"], IValue::TRUE);
         assert_eq!(y["c"], IValue::FALSE);
+    }
+
+    #[mockalloc::test]
+    fn can_convert_serde_json_map() {
+        let mut map = serde_json::Map::new();
+        map.insert("a".to_owned(), serde_json::Value::Null);
+        map.insert("b".to_owned(), serde_json::json!(42));
+        map.insert("c".to_owned(), serde_json::json!("hi"));
+
+        let obj = IObject::from(map.clone());
+        assert_eq!(obj.len(), 3);
+        assert_eq!(obj["a"], IValue::NULL);
+        assert_eq!(obj["b"], IValue::from(42));
+        assert_eq!(obj["c"], IValue::from("hi"));
+
+        let back: serde_json::Map<String, serde_json::Value> = obj.into();
+        assert_eq!(back, map);
     }
 
     #[mockalloc::test]
