@@ -4,6 +4,7 @@
 
 - Add `FromIterator<T: Into<IValue>>` for `IValue` (collects into an array) and `FromIterator<(K: Into<IString>, V: Into<IValue>)>` for `IValue` (collects into an object), mirroring `serde_json::Value`.
 - Add `From<serde_json::Value> for IValue` and `From<IValue> for serde_json::Value` for smoother interoperability with `serde_json`.
+- Add `From<serde_json::Map<String, serde_json::Value>> for IObject` and the reverse, matching the existing `HashMap`/`BTreeMap`/`IndexMap` conversions.
 
 ## 0.1.6
 
