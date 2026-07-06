@@ -4,6 +4,7 @@ use std::convert::TryFrom;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::hint::unreachable_unchecked;
+use std::iter::FromIterator;
 use std::mem;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
@@ -973,6 +974,64 @@ impl From<f64> for IValue {
     }
 }
 
+/// Collects an iterator of values into an array [`IValue`].
+impl<T: Into<IValue>> FromIterator<T> for IValue {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        IArray::from_iter(iter).into()
+    }
+}
+
+/// Collects an iterator of key-value pairs into an object [`IValue`].
+impl<K: Into<IString>, V: Into<IValue>> FromIterator<(K, V)> for IValue {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        IObject::from_iter(iter).into()
+    }
+}
+
+/// Converts a [`serde_json::Value`] into an [`IValue`].
+///
+/// Conversion of numeric values may be lossy if the number is not exactly
+/// representable in the destination type. The exact behaviour in that case
+/// (e.g. rounding, or clamping an out-of-range magnitude) is not guaranteed
+/// to be stable across versions.
+impl From<serde_json::Value> for IValue {
+    fn from(other: serde_json::Value) -> Self {
+        match other {
+            serde_json::Value::Null => IValue::NULL,
+            serde_json::Value::Bool(b) => b.into(),
+            serde_json::Value::Number(n) => INumber::from(n).into(),
+            serde_json::Value::String(s) => s.into(),
+            serde_json::Value::Array(a) => a.into_iter().collect(),
+            serde_json::Value::Object(o) => o.into_iter().collect(),
+        }
+    }
+}
+
+/// Converts an [`IValue`] into a [`serde_json::Value`].
+///
+/// Conversion of numeric values may be lossy if the number is not exactly
+/// representable in the destination type. The exact behaviour in that case
+/// (e.g. rounding, or clamping an out-of-range magnitude) is not guaranteed
+/// to be stable across versions.
+impl From<IValue> for serde_json::Value {
+    fn from(other: IValue) -> Self {
+        match other.destructure() {
+            Destructured::Null => serde_json::Value::Null,
+            Destructured::Bool(b) => serde_json::Value::Bool(b),
+            Destructured::Number(n) => serde_json::Value::Number(n.into()),
+            Destructured::String(s) => serde_json::Value::String(s.as_str().to_owned()),
+            Destructured::Array(a) => {
+                serde_json::Value::Array(a.into_iter().map(Into::into).collect())
+            }
+            Destructured::Object(o) => serde_json::Value::Object(
+                o.into_iter()
+                    .map(|(k, v)| (k.as_str().to_owned(), v.into()))
+                    .collect(),
+            ),
+        }
+    }
+}
+
 impl Default for IValue {
     fn default() -> Self {
         Self::NULL
@@ -1114,5 +1173,48 @@ mod tests {
         let x = IValue::from(o.clone());
 
         assert_eq!(x.into_object(), Ok(o));
+    }
+
+    #[mockalloc::test]
+    fn test_from_iter_array() {
+        let x: IValue = (0..5).collect();
+        let y: IValue = ijson!([0, 1, 2, 3, 4]);
+        assert_eq!(x, y);
+
+        let empty: IValue = std::iter::empty::<i32>().collect();
+        assert_eq!(empty, ijson!([]));
+    }
+
+    #[mockalloc::test]
+    fn test_from_iter_object() {
+        let x: IValue = (0..3).map(|i| (i.to_string(), i)).collect();
+        let y: IValue = ijson!({"0": 0, "1": 1, "2": 2});
+        assert_eq!(x, y);
+
+        let empty: IValue = std::iter::empty::<(String, i32)>().collect();
+        assert_eq!(empty, ijson!({}));
+    }
+
+    #[mockalloc::test]
+    fn test_serde_json_roundtrip() {
+        let json = serde_json::json!({
+            "null": null,
+            "bool": true,
+            "int": 42,
+            "neg": -17,
+            "big": 18446744073709551615u64,
+            "float": 63.5,
+            "string": "hello",
+            "array": [1, 2, 3, "four", false, null],
+            "object": {"nested": [1.5, {"deep": true}]}
+        });
+
+        let ivalue: IValue = json.clone().into();
+        let back: serde_json::Value = ivalue.clone().into();
+        assert_eq!(json, back);
+
+        // Also check consistency with the serde-based conversion.
+        let via_serde: IValue = crate::to_value(&json).unwrap();
+        assert_eq!(ivalue, via_serde);
     }
 }
