@@ -24,8 +24,11 @@ mod macros;
 
 mod alloc;
 pub mod array;
+mod inline;
+mod interned;
 pub mod number;
 pub mod object;
+mod scalar;
 pub mod string;
 mod thin;
 mod value;

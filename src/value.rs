@@ -12,6 +12,7 @@ use std::ptr::NonNull;
 use indexmap::IndexMap;
 
 use super::array::IArray;
+use super::inline::{FALSE_BITS, INLINE_CONST_FLAG, INLINE_STR_FAMILY, NULL_BITS, TRUE_BITS};
 use super::number::INumber;
 use super::object::IObject;
 use super::string::IString;
@@ -171,34 +172,8 @@ pub(crate) const ALIGNMENT: usize = 8;
 // All heap allocations pointed to by an `IValue` are aligned to `ALIGNMENT`, so
 // the low 3 bits of the pointer are free to hold the `TypeTag`. Every non-inline
 // tag therefore corresponds to a pointer; the `Inline` tag (0) instead stores
-// the whole value inline.
-//
-// # Inline layout (tag `Inline`)
-//
-// Bit 3 selects the inline sub-family:
-//   - 0 => number: a decimal `mantissa * 10^exp` (see the `number` module).
-//   - 1 => string or constant, distinguished by bit 7 ([`INLINE_CONST_FLAG`]):
-//       - bit 7 = 0 => string: bits 4-6 length, following bytes the UTF-8 data.
-//       - bit 7 = 1 => constant: `null` / `false` / `true`.
-//
-// The all-zero value is never produced (the number exponent is biased so integer
-// zero is non-zero), reserving it as the `NonNull` niche.
-
-/// Bit 3 of an inline value: set for the string/constant sub-family, clear for
-/// inline numbers.
-pub(crate) const INLINE_STR_FAMILY: usize = 1 << 3;
-/// Bit 7 of an inline string-family value: set for a constant (`null`/`false`/
-/// `true`), clear for an actual inline string.
-pub(crate) const INLINE_CONST_FLAG: usize = 1 << 7;
-
-// Bit patterns of the inline constants (the `Inline` tag is 0, so these equal
-// the raw `ptr_usize()` of `NULL`/`FALSE`/`TRUE`). The constant is selected by
-// bits 4-6 (0 = null, 1 = false, 2 = true). These are compared directly in the
-// hot dispatch path rather than materialising `IValue::NULL` etc., because those
-// are droppable temporaries whose `Drop` would re-enter `type_` and recurse.
-const NULL_BITS: usize = INLINE_STR_FAMILY | INLINE_CONST_FLAG;
-const FALSE_BITS: usize = NULL_BITS | (1 << 4);
-const TRUE_BITS: usize = NULL_BITS | (2 << 4);
+// the whole value inline. The inline family's bit layout, flags, and constant
+// bit patterns live in the `inline` module.
 
 #[repr(usize)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -307,21 +282,6 @@ impl IValue {
     }
     pub(crate) fn type_tag(&self) -> TypeTag {
         self.ptr_usize().into()
-    }
-
-    /// Returns `true` if this value is an inline number (tag `Inline`, number
-    /// sub-family). See the `number` module for the decimal layout.
-    pub(crate) fn is_inline_number(&self) -> bool {
-        self.type_tag() == TypeTag::Inline && self.ptr_usize() & INLINE_STR_FAMILY == 0
-    }
-
-    /// Returns `true` if this value is a string stored inline rather than as a
-    /// pointer to an interned heap allocation. Inline strings carry the `Inline`
-    /// tag with the string sub-family bit set and the constant bit clear.
-    pub(crate) fn is_inline_string(&self) -> bool {
-        self.type_tag() == TypeTag::Inline
-            && self.ptr_usize() & INLINE_STR_FAMILY != 0
-            && self.ptr_usize() & INLINE_CONST_FLAG == 0
     }
 
     /// Returns the type of this value.
@@ -782,8 +742,8 @@ impl Clone for IValue {
             TypeTag::NumberI64
             | TypeTag::NumberU64
             | TypeTag::NumberF64
-            | TypeTag::NumberReserved => unsafe { self.as_number_unchecked() }.clone_impl(),
-            TypeTag::String => unsafe { self.as_string_unchecked() }.clone_impl(),
+            | TypeTag::NumberReserved => unsafe { self.scalar_clone() },
+            TypeTag::String => unsafe { self.interned_clone() },
             TypeTag::Array => unsafe { self.as_array_unchecked() }.clone_impl(),
             TypeTag::Object => unsafe { self.as_object_unchecked() }.clone_impl(),
         }
@@ -802,8 +762,8 @@ impl Drop for IValue {
             TypeTag::NumberI64
             | TypeTag::NumberU64
             | TypeTag::NumberF64
-            | TypeTag::NumberReserved => unsafe { self.as_number_unchecked_mut() }.drop_impl(),
-            TypeTag::String => unsafe { self.as_string_unchecked_mut() }.drop_impl(),
+            | TypeTag::NumberReserved => unsafe { self.scalar_drop() },
+            TypeTag::String => unsafe { self.interned_drop() },
             TypeTag::Array => unsafe { self.as_array_unchecked_mut() }.drop_impl(),
             TypeTag::Object => unsafe { self.as_object_unchecked_mut() }.drop_impl(),
         }
@@ -818,17 +778,15 @@ impl Hash for IValue {
             // that e.g. `2` and `2.0` agree.
             TypeTag::Inline => {
                 if self.is_inline_number() {
-                    // Safety: checked it is an inline number
-                    unsafe { self.as_number_unchecked() }.hash(state);
+                    self.number_hash(state);
                 } else {
                     self.ptr.hash(state);
                 }
             }
-            // Safety: the tag identifies the representation
             TypeTag::NumberI64
             | TypeTag::NumberU64
             | TypeTag::NumberF64
-            | TypeTag::NumberReserved => unsafe { self.as_number_unchecked() }.hash(state),
+            | TypeTag::NumberReserved => self.number_hash(state),
             // Interned strings hash by their canonical pointer
             TypeTag::String => self.ptr.hash(state),
             TypeTag::Array => unsafe { self.as_array_unchecked() }.hash(state),
