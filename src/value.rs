@@ -773,43 +773,66 @@ impl IValue {
 
 impl Clone for IValue {
     fn clone(&self) -> Self {
-        match self.type_() {
-            // Inline types can be trivially copied
-            ValueType::Null | ValueType::Bool => Self { ptr: self.ptr },
-            // Safety: We checked the type
-            ValueType::Array => unsafe { self.as_array_unchecked() }.clone_impl(),
-            ValueType::Object => unsafe { self.as_object_unchecked() }.clone_impl(),
-            ValueType::String => unsafe { self.as_string_unchecked() }.clone_impl(),
-            ValueType::Number => unsafe { self.as_number_unchecked() }.clone_impl(),
+        // Dispatch on the raw representation tag rather than the semantic
+        // `type_()`. Inline values own no heap storage, so they are copied
+        // bit-for-bit; only the pointer representations delegate to their module.
+        match self.type_tag() {
+            TypeTag::Inline => Self { ptr: self.ptr },
+            // Safety: the tag identifies the representation
+            TypeTag::NumberI64
+            | TypeTag::NumberU64
+            | TypeTag::NumberF64
+            | TypeTag::NumberReserved => unsafe { self.as_number_unchecked() }.clone_impl(),
+            TypeTag::String => unsafe { self.as_string_unchecked() }.clone_impl(),
+            TypeTag::Array => unsafe { self.as_array_unchecked() }.clone_impl(),
+            TypeTag::Object => unsafe { self.as_object_unchecked() }.clone_impl(),
         }
     }
 }
 
 impl Drop for IValue {
     fn drop(&mut self) {
-        match self.type_() {
-            // Inline types can be trivially dropped
-            ValueType::Null | ValueType::Bool => {}
-            // Safety: We checked the type
-            ValueType::Array => unsafe { self.as_array_unchecked_mut() }.drop_impl(),
-            ValueType::Object => unsafe { self.as_object_unchecked_mut() }.drop_impl(),
-            ValueType::String => unsafe { self.as_string_unchecked_mut() }.drop_impl(),
-            ValueType::Number => unsafe { self.as_number_unchecked_mut() }.drop_impl(),
+        // Dispatch on the raw representation tag. Inline values own no heap
+        // storage and need no cleanup; only the pointer representations free
+        // their allocation. Deliberately avoids `type_()` (a semantic query) so
+        // teardown can never re-enter type classification.
+        match self.type_tag() {
+            TypeTag::Inline => {}
+            // Safety: the tag identifies the representation
+            TypeTag::NumberI64
+            | TypeTag::NumberU64
+            | TypeTag::NumberF64
+            | TypeTag::NumberReserved => unsafe { self.as_number_unchecked_mut() }.drop_impl(),
+            TypeTag::String => unsafe { self.as_string_unchecked_mut() }.drop_impl(),
+            TypeTag::Array => unsafe { self.as_array_unchecked_mut() }.drop_impl(),
+            TypeTag::Object => unsafe { self.as_object_unchecked_mut() }.drop_impl(),
         }
     }
 }
 
 impl Hash for IValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        match self.type_() {
-            // Inline and interned types can be trivially hashed
-            ValueType::Null | ValueType::Bool | ValueType::String => self.ptr.hash(state),
-            // Safety: We checked the type
-            ValueType::Array => unsafe { self.as_array_unchecked() }.hash(state),
-            // Safety: We checked the type
-            ValueType::Object => unsafe { self.as_object_unchecked() }.hash(state),
-            // Safety: We checked the type
-            ValueType::Number => unsafe { self.as_number_unchecked() }.hash(state),
+        match self.type_tag() {
+            // Inline strings, `null` and the booleans have a canonical bit
+            // pattern and hash by it; inline numbers must hash numerically so
+            // that e.g. `2` and `2.0` agree.
+            TypeTag::Inline => {
+                if self.is_inline_number() {
+                    // Safety: checked it is an inline number
+                    unsafe { self.as_number_unchecked() }.hash(state);
+                } else {
+                    self.ptr.hash(state);
+                }
+            }
+            // Safety: the tag identifies the representation
+            TypeTag::NumberI64
+            | TypeTag::NumberU64
+            | TypeTag::NumberF64
+            | TypeTag::NumberReserved => unsafe { self.as_number_unchecked() }.hash(state),
+            // Interned strings hash by their canonical pointer
+            TypeTag::String => self.ptr.hash(state),
+            TypeTag::Array => unsafe { self.as_array_unchecked() }.hash(state),
+            TypeTag::Object => unsafe { self.as_object_unchecked() }.hash(state),
         }
     }
 }
@@ -978,19 +1001,28 @@ impl<I: ValueIndex> IndexMut<I> for IValue {
 
 impl Debug for IValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // Safety: each arm only borrows the value as the representation its tag
+        // identifies.
         unsafe {
-            match self.type_() {
-                // Inline and interned types can be trivially hashed
-                ValueType::Null => f.write_str("null"),
-                ValueType::Bool => Debug::fmt(&self.is_true(), f),
-                // Safety: We checked the type
-                ValueType::String => Debug::fmt(self.as_string_unchecked(), f),
-                // Safety: We checked the type
-                ValueType::Array => Debug::fmt(self.as_array_unchecked(), f),
-                // Safety: We checked the type
-                ValueType::Object => Debug::fmt(self.as_object_unchecked(), f),
-                // Safety: We checked the type
-                ValueType::Number => Debug::fmt(self.as_number_unchecked(), f),
+            match self.type_tag() {
+                TypeTag::Inline => {
+                    if self.is_inline_number() {
+                        Debug::fmt(self.as_number_unchecked(), f)
+                    } else if self.is_inline_string() {
+                        Debug::fmt(self.as_string_unchecked(), f)
+                    } else if self.is_null() {
+                        f.write_str("null")
+                    } else {
+                        Debug::fmt(&self.is_true(), f)
+                    }
+                }
+                TypeTag::NumberI64
+                | TypeTag::NumberU64
+                | TypeTag::NumberF64
+                | TypeTag::NumberReserved => Debug::fmt(self.as_number_unchecked(), f),
+                TypeTag::String => Debug::fmt(self.as_string_unchecked(), f),
+                TypeTag::Array => Debug::fmt(self.as_array_unchecked(), f),
+                TypeTag::Object => Debug::fmt(self.as_object_unchecked(), f),
             }
         }
     }

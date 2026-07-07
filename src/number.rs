@@ -505,20 +505,18 @@ impl INumber {
         }
     }
 
+    // Only reached for heap numbers: `IValue::clone` copies inline values
+    // directly. Copies the payload into a fresh allocation.
     pub(crate) fn clone_impl(&self) -> IValue {
-        if self.0.is_inline_number() {
-            // Safety: inline numbers are plain values.
-            unsafe { self.0.raw_copy() }
-        } else {
-            // Safety: heap number; copy its payload into a fresh allocation.
-            unsafe { new_heap(self.0.type_tag(), heap_bits(&self.0)) }
-        }
+        debug_assert!(!self.0.is_inline_number());
+        // Safety: heap number payload.
+        unsafe { new_heap(self.0.type_tag(), heap_bits(&self.0)) }
     }
+    // Only reached for heap numbers: `IValue::drop` leaves inline values alone.
     pub(crate) fn drop_impl(&mut self) {
-        if !self.0.is_inline_number() {
-            // Safety: heap number; free its payload.
-            unsafe { dealloc_infallible(self.0.ptr(), heap_layout()) }
-        }
+        debug_assert!(!self.0.is_inline_number());
+        // Safety: heap number; free its payload.
+        unsafe { dealloc_infallible(self.0.ptr(), heap_layout()) }
     }
 }
 

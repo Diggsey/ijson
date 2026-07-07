@@ -318,18 +318,17 @@ impl IString {
         Self::new_inline("")
     }
 
+    // Only reached for heap (interned) strings: `IValue::clone` copies inline
+    // strings directly. Bumps the reference count and copies the pointer.
     pub(crate) fn clone_impl(&self) -> IValue {
-        // Inline strings are trivially copyable; only heap strings are refcounted.
-        if !self.0.is_inline_string() {
-            self.header().rc.fetch_add(1, AtomicOrdering::Relaxed);
-        }
+        debug_assert!(!self.0.is_inline_string());
+        self.header().rc.fetch_add(1, AtomicOrdering::Relaxed);
         unsafe { self.0.raw_copy() }
     }
+    // Only reached for heap (interned) strings: `IValue::drop` leaves inline
+    // strings alone.
     pub(crate) fn drop_impl(&mut self) {
-        // Inline strings own no allocation, so there is nothing to free.
-        if self.0.is_inline_string() {
-            return;
-        }
+        debug_assert!(!self.0.is_inline_string());
         let hd = self.header();
 
         // If the reference count is greater than 1, we can safely decrement it without
