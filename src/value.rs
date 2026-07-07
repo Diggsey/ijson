@@ -169,6 +169,12 @@ impl Deref for BoolMut<'_> {
 
 pub(crate) const ALIGNMENT: usize = 4;
 
+/// Bit 2 of a `StringOrNull`-tagged value flags an inline string (as opposed to
+/// a pointer to an interned heap string). Heap string headers are 8-aligned, so
+/// this bit is always clear for a heap string pointer, making it a reliable
+/// discriminator. See the `string` module for the full inline layout.
+pub(crate) const INLINE_STRING_FLAG: usize = 0b100;
+
 #[repr(usize)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TypeTag {
@@ -226,6 +232,15 @@ impl IValue {
         Self::new_ptr(NonNull::from_ref(r).cast(), tag)
     }
 
+    // Safety: `bits` must be a valid inline-string encoding, i.e. non-zero,
+    // with the `StringOrNull` tag in the low bits and `INLINE_STRING_FLAG` set.
+    // See the `string` module for the layout.
+    pub(crate) unsafe fn new_inline_string(bits: usize) -> Self {
+        Self {
+            ptr: NonNull::new_unchecked(bits as *mut u8),
+        }
+    }
+
     /// JSON `null`.
     pub const NULL: Self = unsafe { Self::new_inline(TypeTag::StringOrNull) };
     /// JSON `false`.
@@ -263,6 +278,17 @@ impl IValue {
     }
     fn type_tag(&self) -> TypeTag {
         self.ptr_usize().into()
+    }
+
+    /// Returns `true` if this value is a string stored inline rather than as a
+    /// pointer to an interned heap allocation.
+    ///
+    /// Short strings are stored directly inside the pointer-sized value (see the
+    /// `string` module). They carry the `StringOrNull` tag with
+    /// [`INLINE_STRING_FLAG`] set; heap string headers are 8-aligned so that bit
+    /// is always clear for them, and `null` never has it set either.
+    pub(crate) fn is_inline_string(&self) -> bool {
+        self.type_tag() == TypeTag::StringOrNull && self.ptr_usize() & INLINE_STRING_FLAG != 0
     }
 
     /// Returns the type of this value.
