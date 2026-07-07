@@ -179,17 +179,23 @@ impl IString {
     // pointer-sized value, avoiding any allocation or interning.
     fn new_inline(s: &str) -> Self {
         debug_assert!(s.len() <= INLINE_CAPACITY);
-        // The byte-sized inline flag must match the shared `usize` constant.
-        debug_assert_eq!(INLINE_STRING_FLAG, 0b100);
 
+        // Build the payload with the tag bits left clear; `IValue::new_inline`
+        // ORs in the `StringOrNull` tag. The control byte carries the inline
+        // flag and the length, and the remaining bytes carry the characters.
         let mut bytes = [0u8; std::mem::size_of::<usize>()];
         bytes[INLINE_CONTROL_OFFSET] =
-            TypeTag::StringOrNull as u8 | 0b100 | ((s.len() as u8) << INLINE_LEN_SHIFT);
+            INLINE_STRING_FLAG as u8 | ((s.len() as u8) << INLINE_LEN_SHIFT);
         bytes[INLINE_CHAR_OFFSET..INLINE_CHAR_OFFSET + s.len()].copy_from_slice(s.as_bytes());
 
-        // Safety: the control byte sets the `StringOrNull` tag and inline flag,
-        // so the value is non-zero and correctly discriminated.
-        unsafe { IString(IValue::new_inline_string(usize::from_ne_bytes(bytes))) }
+        // Safety: the inline flag keeps the value non-zero, and the payload
+        // leaves the tag bits clear.
+        unsafe {
+            IString(IValue::new_inline(
+                TypeTag::StringOrNull,
+                usize::from_ne_bytes(bytes),
+            ))
+        }
     }
 
     // The byte length of an inline string, read from the control byte.

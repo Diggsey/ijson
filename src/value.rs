@@ -215,10 +215,14 @@ unsafe impl Send for IValue {}
 unsafe impl Sync for IValue {}
 
 impl IValue {
-    // Safety: Tag must not be `Number`
-    const unsafe fn new_inline(tag: TypeTag) -> Self {
+    // Safety: Tag must not be `Number`, and `payload` must leave the tag bits
+    // (the low `ALIGNMENT.trailing_zeros()` bits) clear so it does not corrupt
+    // the tag when ORed in. Used both for the inline singletons (payload `0`)
+    // and for inline strings (payload carries the inline flag, length, and
+    // characters — see the `string` module).
+    pub(crate) const unsafe fn new_inline(tag: TypeTag, payload: usize) -> Self {
         Self {
-            ptr: NonNull::new_unchecked(tag as usize as *mut u8),
+            ptr: NonNull::new_unchecked((tag as usize | payload) as *mut u8),
         }
     }
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
@@ -232,21 +236,12 @@ impl IValue {
         Self::new_ptr(NonNull::from_ref(r).cast(), tag)
     }
 
-    // Safety: `bits` must be a valid inline-string encoding, i.e. non-zero,
-    // with the `StringOrNull` tag in the low bits and `INLINE_STRING_FLAG` set.
-    // See the `string` module for the layout.
-    pub(crate) unsafe fn new_inline_string(bits: usize) -> Self {
-        Self {
-            ptr: NonNull::new_unchecked(bits as *mut u8),
-        }
-    }
-
     /// JSON `null`.
-    pub const NULL: Self = unsafe { Self::new_inline(TypeTag::StringOrNull) };
+    pub const NULL: Self = unsafe { Self::new_inline(TypeTag::StringOrNull, 0) };
     /// JSON `false`.
-    pub const FALSE: Self = unsafe { Self::new_inline(TypeTag::ArrayOrFalse) };
+    pub const FALSE: Self = unsafe { Self::new_inline(TypeTag::ArrayOrFalse, 0) };
     /// JSON `true`.
-    pub const TRUE: Self = unsafe { Self::new_inline(TypeTag::ObjectOrTrue) };
+    pub const TRUE: Self = unsafe { Self::new_inline(TypeTag::ObjectOrTrue, 0) };
 
     pub(crate) fn ptr_usize(&self) -> usize {
         self.ptr.as_ptr() as usize
