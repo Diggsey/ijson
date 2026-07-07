@@ -180,7 +180,7 @@ impl Deref for BoolMut<'_> {
     }
 }
 
-pub(crate) const ALIGNMENT: usize = 8;
+const ALIGNMENT: usize = 8;
 
 // All heap allocations pointed to by an `IValue` are aligned to `ALIGNMENT`, so
 // the low 3 bits of the pointer are free to hold the `TypeTag`. Every non-inline
@@ -190,7 +190,7 @@ pub(crate) const ALIGNMENT: usize = 8;
 
 #[repr(usize)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TypeTag {
+enum TypeTag {
     /// A value stored entirely inline (null, bool, small number, short string).
     Inline = 0,
     /// Pointer to a heap `i64` payload.
@@ -245,19 +245,19 @@ impl IValue {
     // corrupt the tag when ORed in) and, together with the tag, must not be
     // all-zero (reserved as the niche). Used to build inline values; `tag` is
     // normally `Inline`, with the payload carrying the sub-family and data.
-    pub(crate) const unsafe fn new_inline(tag: TypeTag, payload: usize) -> Self {
+    const unsafe fn new_inline(tag: TypeTag, payload: usize) -> Self {
         Self {
             ptr: NonNull::new_unchecked((tag as usize | payload) as *mut u8),
         }
     }
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
-    pub(crate) unsafe fn new_ptr(p: NonNull<u8>, tag: TypeTag) -> Self {
+    unsafe fn new_ptr(p: NonNull<u8>, tag: TypeTag) -> Self {
         Self {
             ptr: p.add(tag as usize),
         }
     }
     // Safety: Reference must be aligned to at least ALIGNMENT
-    pub(crate) unsafe fn new_ref<T>(r: &T, tag: TypeTag) -> Self {
+    unsafe fn new_ref<T>(r: &T, tag: TypeTag) -> Self {
         Self::new_ptr(NonNull::from_ref(r).cast(), tag)
     }
 
@@ -268,23 +268,23 @@ impl IValue {
     /// JSON `true`.
     pub const TRUE: Self = unsafe { Self::new_inline(TypeTag::Inline, inline::TRUE) };
 
-    pub(crate) fn ptr_usize(&self) -> usize {
+    fn ptr_usize(&self) -> usize {
         self.ptr.as_ptr() as usize
     }
     // Safety: Must only be called on non-inline types
-    pub(crate) unsafe fn ptr(&self) -> NonNull<u8> {
+    unsafe fn ptr(&self) -> NonNull<u8> {
         self.ptr.offset(-((self.ptr_usize() % ALIGNMENT) as isize))
     }
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
-    pub(crate) unsafe fn set_ptr(&mut self, ptr: NonNull<u8>) {
+    unsafe fn set_ptr(&mut self, ptr: NonNull<u8>) {
         let tag = self.type_tag();
         self.ptr = ptr.add(tag as usize);
     }
     // Safety: Reference must be aligned to at least ALIGNMENT
-    pub(crate) unsafe fn set_ref<T>(&mut self, r: &T) {
+    unsafe fn set_ref<T>(&mut self, r: &T) {
         self.set_ptr(NonNull::from_ref(r).cast());
     }
-    pub(crate) unsafe fn raw_copy(&self) -> Self {
+    unsafe fn raw_copy(&self) -> Self {
         Self { ptr: self.ptr }
     }
     pub(crate) fn raw_eq(&self, other: &Self) -> bool {
@@ -293,7 +293,7 @@ impl IValue {
     pub(crate) fn raw_hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.ptr.hash(state);
     }
-    pub(crate) fn type_tag(&self) -> TypeTag {
+    fn type_tag(&self) -> TypeTag {
         self.ptr_usize().into()
     }
 
