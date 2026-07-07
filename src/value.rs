@@ -284,15 +284,11 @@ impl IValue {
         self.ptr_usize().into()
     }
 
-    /// Whether this value is a number stored inline. Combines the tag (this
-    /// module's concern) with the inline module's sub-family classification.
-    pub(crate) fn is_inline_number(&self) -> bool {
-        self.type_tag() == TypeTag::Inline && inline::is_number(self.ptr_usize())
-    }
-
-    /// Whether this value is a string stored inline rather than interned.
-    pub(crate) fn is_inline_string(&self) -> bool {
-        self.type_tag() == TypeTag::Inline && inline::is_string(self.ptr_usize())
+    /// Whether this value is stored inline (tag `Inline`) rather than behind a
+    /// pointer. What *kind* of inline value it is remains the `inline` module's
+    /// concern.
+    pub(crate) fn is_inline(&self) -> bool {
+        self.type_tag() == TypeTag::Inline
     }
 
     /// Returns the type of this value.
@@ -458,10 +454,7 @@ impl IValue {
     /// Returns `true` if this is a number.
     #[must_use]
     pub fn is_number(&self) -> bool {
-        matches!(
-            self.type_tag(),
-            TypeTag::NumberI64 | TypeTag::NumberU64 | TypeTag::NumberF64 | TypeTag::NumberReserved
-        ) || self.is_inline_number()
+        self.type_() == ValueType::Number
     }
 
     unsafe fn unchecked_cast_ref<T>(&self) -> &T {
@@ -575,7 +568,7 @@ impl IValue {
     /// Returns `true` if this is a string.
     #[must_use]
     pub fn is_string(&self) -> bool {
-        self.type_tag() == TypeTag::String || self.is_inline_string()
+        self.type_() == ValueType::String
     }
 
     // Safety: Must be a string
@@ -778,16 +771,7 @@ impl Drop for IValue {
 impl Hash for IValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self.type_tag() {
-            // Inline strings, `null` and the booleans have a canonical bit
-            // pattern and hash by it; inline numbers must hash numerically so
-            // that e.g. `2` and `2.0` agree.
-            TypeTag::Inline => {
-                if self.is_inline_number() {
-                    self.number_hash(state);
-                } else {
-                    self.ptr.hash(state);
-                }
-            }
+            TypeTag::Inline => inline::hash(self.ptr_usize(), state),
             TypeTag::NumberI64
             | TypeTag::NumberU64
             | TypeTag::NumberF64
@@ -964,28 +948,17 @@ impl<I: ValueIndex> IndexMut<I> for IValue {
 
 impl Debug for IValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // Safety: each arm only borrows the value as the representation its tag
-        // identifies.
+        // Debug is a semantic (display) operation, so it dispatches on the JSON
+        // type; `type_()` delegates inline classification to the `inline` module.
+        // Safety: each arm only borrows the value as the type it just checked.
         unsafe {
-            match self.type_tag() {
-                TypeTag::Inline => {
-                    if self.is_inline_number() {
-                        Debug::fmt(self.as_number_unchecked(), f)
-                    } else if self.is_inline_string() {
-                        Debug::fmt(self.as_string_unchecked(), f)
-                    } else if self.is_null() {
-                        f.write_str("null")
-                    } else {
-                        Debug::fmt(&self.is_true(), f)
-                    }
-                }
-                TypeTag::NumberI64
-                | TypeTag::NumberU64
-                | TypeTag::NumberF64
-                | TypeTag::NumberReserved => Debug::fmt(self.as_number_unchecked(), f),
-                TypeTag::String => Debug::fmt(self.as_string_unchecked(), f),
-                TypeTag::Array => Debug::fmt(self.as_array_unchecked(), f),
-                TypeTag::Object => Debug::fmt(self.as_object_unchecked(), f),
+            match self.type_() {
+                ValueType::Null => f.write_str("null"),
+                ValueType::Bool => Debug::fmt(&self.is_true(), f),
+                ValueType::Number => Debug::fmt(self.as_number_unchecked(), f),
+                ValueType::String => Debug::fmt(self.as_string_unchecked(), f),
+                ValueType::Array => Debug::fmt(self.as_array_unchecked(), f),
+                ValueType::Object => Debug::fmt(self.as_object_unchecked(), f),
             }
         }
     }

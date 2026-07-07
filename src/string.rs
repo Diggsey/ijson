@@ -35,7 +35,7 @@ impl IValue {
     }
 
     pub(crate) fn string_len(&self) -> usize {
-        if self.type_tag() == TypeTag::Inline {
+        if self.is_inline() {
             inl::len(self.ptr_usize())
         } else {
             // Safety: not an inline string, so it is interned.
@@ -44,7 +44,7 @@ impl IValue {
     }
 
     pub(crate) fn string_bytes(&self) -> &[u8] {
-        if self.type_tag() == TypeTag::Inline {
+        if self.is_inline() {
             // Safety: an inline string keeps its bytes within `self`'s storage.
             unsafe { inl::bytes(NonNull::from(self).cast(), self.ptr_usize()) }
         } else {
@@ -304,7 +304,7 @@ mod tests {
             let a = IString::intern(s);
             let b = IString::intern(s);
 
-            assert!(a.0.is_inline_string(), "{:?} should be inline", s);
+            assert!(a.0.is_inline(), "{:?} should be inline", s);
             assert_eq!(a.as_str(), s.as_str());
             assert_eq!(a.as_bytes(), s.as_bytes());
             assert_eq!(a.len(), s.len());
@@ -325,8 +325,8 @@ mod tests {
         let a = IString::intern(&inline);
         let b = IString::intern(&heap);
 
-        assert!(a.0.is_inline_string());
-        assert!(!b.0.is_inline_string());
+        assert!(a.0.is_inline());
+        assert!(!b.0.is_inline());
         assert_eq!(a.as_str(), inline);
         assert_eq!(b.as_str(), heap);
         assert_ne!(a, b);
@@ -340,7 +340,7 @@ mod tests {
         let a = IString::new();
         let b = IString::intern("");
 
-        assert!(a.0.is_inline_string());
+        assert!(a.0.is_inline());
         assert_eq!(a, b);
         assert!(a.is_empty());
         assert_eq!(a.as_str(), "");

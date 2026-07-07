@@ -99,13 +99,11 @@ impl IValue {
     }
 
     fn number_num_val(&self) -> NumVal {
-        if self.type_tag() == TypeTag::Inline {
+        if self.is_inline() {
             let bits = self.ptr_usize();
-            let m = inl::mantissa(bits);
-            let exp = inl::code_exp(inl::code(bits));
-            match inl::decimal_to_i128(m, exp) {
+            match inl::value_i128(bits) {
                 Some(i) => NumVal::Int(i),
-                None => NumVal::Float(inl::decimal_to_f64_lossy(m, exp)),
+                None => NumVal::Float(inl::to_f64_lossy(bits)),
             }
         } else {
             // Safety: not inline, so it is a heap scalar number.
@@ -146,9 +144,8 @@ impl IValue {
     }
 
     pub(crate) fn number_to_f64(&self) -> Option<f64> {
-        if self.type_tag() == TypeTag::Inline {
-            let bits = self.ptr_usize();
-            inl::decimal_to_f64_exact(inl::mantissa(bits), inl::code_exp(inl::code(bits)))
+        if self.is_inline() {
+            inl::to_f64_exact(self.ptr_usize())
         } else {
             // Safety: not inline, so it is a heap scalar number.
             unsafe {
@@ -168,9 +165,8 @@ impl IValue {
     }
 
     pub(crate) fn number_to_f64_lossy(&self) -> f64 {
-        if self.type_tag() == TypeTag::Inline {
-            let bits = self.ptr_usize();
-            inl::decimal_to_f64_lossy(inl::mantissa(bits), inl::code_exp(inl::code(bits)))
+        if self.is_inline() {
+            inl::to_f64_lossy(self.ptr_usize())
         } else {
             // Safety: not inline, so it is a heap scalar number.
             unsafe {
@@ -184,8 +180,8 @@ impl IValue {
     }
 
     pub(crate) fn number_has_decimal_point(&self) -> bool {
-        if self.type_tag() == TypeTag::Inline {
-            inl::code_has_dot(inl::code(self.ptr_usize()))
+        if self.is_inline() {
+            inl::has_decimal_point(self.ptr_usize())
         } else {
             self.type_tag() == TypeTag::NumberF64
         }
@@ -491,7 +487,7 @@ mod tests {
     fn stores_small_integers_inline() {
         for v in [0i64, 1, -1, 42, -42, 1000, -1000, 1_000_000] {
             let n = INumber::from(v);
-            assert!(n.0.is_inline_number(), "{} should be inline", v);
+            assert!(n.0.is_inline(), "{} should be inline", v);
             assert_eq!(n.to_i64(), Some(v));
             assert!(!n.has_decimal_point());
         }
@@ -506,7 +502,7 @@ mod tests {
             (2.0, "2.0"),
         ] {
             let n = INumber::try_from(v).unwrap();
-            assert!(n.0.is_inline_number(), "{} should be inline", s);
+            assert!(n.0.is_inline(), "{} should be inline", s);
             assert_eq!(n.to_f64(), Some(v), "{}", s);
             assert!(n.has_decimal_point(), "{}", s);
         }
@@ -538,7 +534,7 @@ mod tests {
         };
         for v in [big_round, -big_round] {
             let n = INumber::from(v);
-            assert!(n.0.is_inline_number(), "{} should factor inline", v);
+            assert!(n.0.is_inline(), "{} should factor inline", v);
             assert_eq!(n.to_i64(), Some(v));
         }
         // Assorted large integers round-trip regardless of representation.
@@ -565,11 +561,11 @@ mod tests {
     #[mockalloc::test]
     fn large_values_use_heap() {
         let big = INumber::from(u64::MAX);
-        assert!(!big.0.is_inline_number());
+        assert!(!big.0.is_inline());
         assert_eq!(big.to_u64(), Some(u64::MAX));
 
         let pi = INumber::try_from(std::f64::consts::PI).unwrap();
-        assert!(!pi.0.is_inline_number());
+        assert!(!pi.0.is_inline());
         assert_eq!(pi.to_f64(), Some(std::f64::consts::PI));
         assert!(pi.has_decimal_point());
     }

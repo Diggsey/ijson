@@ -27,6 +27,7 @@
 #![allow(clippy::float_cmp)]
 
 use std::convert::TryFrom;
+use std::hash::{Hash, Hasher};
 
 const EXP_SHIFT: u32 = 4;
 const MANTISSA_SHIFT: u32 = 8;
@@ -49,14 +50,14 @@ fn exp_code(exp: i32, dot: bool) -> usize {
         _ => unreachable!("inline exponent out of range"),
     }
 }
-pub(crate) fn code_exp(code: usize) -> i32 {
+fn code_exp(code: usize) -> i32 {
     match code {
         0..=6 => code as i32 - 7,
         7 | 8 => 0,
         _ => code as i32 - 8,
     }
 }
-pub(crate) fn code_has_dot(code: usize) -> bool {
+fn code_has_dot(code: usize) -> bool {
     code <= 6 || code == 8
 }
 
@@ -68,11 +69,11 @@ fn encode(mantissa: i64, code: usize) -> usize {
     ((mantissa as usize) << MANTISSA_SHIFT) | (code << EXP_SHIFT)
 }
 
-pub(crate) fn mantissa(bits: usize) -> i64 {
+fn mantissa(bits: usize) -> i64 {
     // Arithmetic shift sign-extends the mantissa from the top bits.
     ((bits as isize) >> MANTISSA_SHIFT) as i64
 }
-pub(crate) fn code(bits: usize) -> usize {
+fn code(bits: usize) -> usize {
     (bits >> EXP_SHIFT) & 0xf
 }
 
@@ -182,7 +183,7 @@ pub(crate) fn encode_f64(value: f64) -> Option<usize> {
 // --- Decimal decoders -------------------------------------------------------
 
 /// The exact integer value of `mantissa * 10^exp`, if it is an integer.
-pub(crate) fn decimal_to_i128(m: i64, exp: i32) -> Option<i128> {
+fn decimal_to_i128(m: i64, exp: i32) -> Option<i128> {
     if exp >= 0 {
         i128::from(m).checked_mul(10i128.pow(exp as u32))
     } else {
@@ -196,7 +197,7 @@ pub(crate) fn decimal_to_i128(m: i64, exp: i32) -> Option<i128> {
     }
 }
 
-pub(crate) fn decimal_to_f64_lossy(m: i64, exp: i32) -> f64 {
+fn decimal_to_f64_lossy(m: i64, exp: i32) -> f64 {
     // The inline exponent range is small, so `10^|exp|` is an exact integer and
     // an exact `f64`; using it (rather than the non-deterministic `powi`) keeps
     // the result deterministic and exact whenever the value is representable.
@@ -208,7 +209,7 @@ pub(crate) fn decimal_to_f64_lossy(m: i64, exp: i32) -> f64 {
 }
 
 /// `true` if `v` is exactly representable as an `f64`.
-pub(crate) fn i128_fits_f64(v: i128) -> bool {
+fn i128_fits_f64(v: i128) -> bool {
     if v == 0 {
         return true;
     }
@@ -217,7 +218,7 @@ pub(crate) fn i128_fits_f64(v: i128) -> bool {
 }
 
 /// The exact `f64` value of `mantissa * 10^exp`, if it is exactly representable.
-pub(crate) fn decimal_to_f64_exact(m: i64, exp: i32) -> Option<f64> {
+fn decimal_to_f64_exact(m: i64, exp: i32) -> Option<f64> {
     if m == 0 {
         return Some(0.0);
     }
@@ -236,5 +237,47 @@ pub(crate) fn decimal_to_f64_exact(m: i64, exp: i32) -> Option<f64> {
                            // (it only adjusts the exponent), and avoids the non-deterministic
                            // `powi`.
         i128_fits_f64(num).then_some(num as f64 / (1u64 << k) as f64)
+    }
+}
+
+// --- High-level per-value operations (on the raw inline bits) ----------------
+
+fn decode(bits: usize) -> (i64, i32) {
+    (mantissa(bits), code_exp(code(bits)))
+}
+
+/// The exact integer value, if this inline number is an integer.
+pub(crate) fn value_i128(bits: usize) -> Option<i128> {
+    let (m, exp) = decode(bits);
+    decimal_to_i128(m, exp)
+}
+
+/// The exact `f64` value, if exactly representable.
+pub(crate) fn to_f64_exact(bits: usize) -> Option<f64> {
+    let (m, exp) = decode(bits);
+    decimal_to_f64_exact(m, exp)
+}
+
+/// The (possibly lossy) `f64` value.
+pub(crate) fn to_f64_lossy(bits: usize) -> f64 {
+    let (m, exp) = decode(bits);
+    decimal_to_f64_lossy(m, exp)
+}
+
+/// Whether the source of this inline number had a decimal point.
+pub(crate) fn has_decimal_point(bits: usize) -> bool {
+    code_has_dot(code(bits))
+}
+
+/// Hashes an inline number by its numeric value (so `2` and `2.0` agree, and
+/// the scheme matches the heap number hash).
+pub(crate) fn hash<H: Hasher>(bits: usize, state: &mut H) {
+    match value_i128(bits) {
+        Some(v) if i64::try_from(v).is_ok() => (v as i64).hash(state),
+        Some(v) if u64::try_from(v).is_ok() => (v as u64).hash(state),
+        _ => {
+            let f = to_f64_lossy(bits);
+            (if f == 0.0 { 0 } else { f.to_bits() }).hash(state);
+        }
     }
 }
