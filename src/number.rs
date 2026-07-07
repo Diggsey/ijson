@@ -2,15 +2,15 @@
 //!
 //! `INumber` is a *type* that spans several representations — the inline decimal
 //! (see [`crate::inline::number`]) and the heap scalars `i64`/`u64`/`f64` (see
-//! [`crate::scalar`]). The number-specific logic lives as methods on [`IValue`]
-//! which pick the representation by tag; `INumber` is a thin wrapper that
-//! delegates up to them.
+//! [`crate::scalar`]). The number-specific logic lives as free functions here
+//! which pick the representation by tag; both the root value type and the thin
+//! `INumber` wrapper delegate to them.
 #![allow(clippy::float_cmp)]
 
 use std::cmp::Ordering;
 use std::convert::{TryFrom, TryInto};
 use std::fmt::{self, Debug, Formatter};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 
 use crate::inline::number as inl;
 use crate::scalar;
@@ -61,150 +61,173 @@ fn cmp_num(a: &NumVal, b: &NumVal) -> Ordering {
     }
 }
 
-/// Number-type methods on [`IValue`], spanning the inline and scalar
-/// representations. Each assumes the value is a number (the wrappers and the
-/// public `IValue` accessors check first).
-impl IValue {
-    pub(crate) fn new_number_i64(value: i64) -> Self {
+// Number-type operations spanning the inline and scalar representations. These
+// are free functions on `&IValue` (not methods on `IValue`); the root value type
+// delegates to them, and `INumber` delegates to them too. Each assumes the value
+// is a number.
+
+pub(crate) fn new_i64(value: i64) -> IValue {
+    match inl::encode_int(i128::from(value)) {
+        // Safety: `encode_int` returns valid inline bits; the scalar allocation
+        // is aligned and non-null.
+        Some(bits) => unsafe { IValue::new_inline(TypeTag::Inline, bits) },
+        None => unsafe { IValue::new_ptr(scalar::alloc(value as u64), TypeTag::NumberI64) },
+    }
+}
+
+pub(crate) fn new_u64(value: u64) -> IValue {
+    if let Ok(v) = i64::try_from(value) {
+        new_i64(v)
+    } else {
+        // Too large for `i64`; still prefer inline if it factors, else heap `u64`.
         match inl::encode_int(i128::from(value)) {
-            // Safety: `encode_int` returns valid inline bits; the scalar
-            // allocation is aligned and non-null.
-            Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
-            None => unsafe { Self::new_ptr(scalar::alloc(value as u64), TypeTag::NumberI64) },
+            Some(bits) => unsafe { IValue::new_inline(TypeTag::Inline, bits) },
+            None => unsafe { IValue::new_ptr(scalar::alloc(value), TypeTag::NumberU64) },
         }
     }
+}
 
-    pub(crate) fn new_number_u64(value: u64) -> Self {
-        if let Ok(v) = i64::try_from(value) {
-            Self::new_number_i64(v)
-        } else {
-            // Too large for `i64`; still prefer inline if it factors, else heap `u64`.
-            match inl::encode_int(i128::from(value)) {
-                Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
-                None => unsafe { Self::new_ptr(scalar::alloc(value), TypeTag::NumberU64) },
+pub(crate) fn new_f64(value: f64) -> IValue {
+    match inl::encode_f64(value) {
+        Some(bits) => unsafe { IValue::new_inline(TypeTag::Inline, bits) },
+        None => unsafe { IValue::new_ptr(scalar::alloc(value.to_bits()), TypeTag::NumberF64) },
+    }
+}
+
+// Safety: reads the heap scalar payload; only called for heap number tags.
+unsafe fn scalar_bits(v: &IValue) -> u64 {
+    scalar::read(v.ptr())
+}
+
+fn num_val(v: &IValue) -> NumVal {
+    if v.is_inline() {
+        let bits = v.ptr_usize();
+        match inl::value_i128(bits) {
+            Some(i) => NumVal::Int(i),
+            None => NumVal::Float(inl::to_f64_lossy(bits)),
+        }
+    } else {
+        // Safety: not inline, so it is a heap scalar number.
+        unsafe {
+            match v.type_tag() {
+                TypeTag::NumberI64 => NumVal::Int(i128::from(scalar_bits(v) as i64)),
+                TypeTag::NumberU64 => NumVal::Int(i128::from(scalar_bits(v))),
+                _ => NumVal::Float(f64::from_bits(scalar_bits(v))),
             }
         }
     }
+}
 
-    pub(crate) fn new_number_f64(value: f64) -> Self {
-        match inl::encode_f64(value) {
-            Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
-            None => unsafe { Self::new_ptr(scalar::alloc(value.to_bits()), TypeTag::NumberF64) },
+pub(crate) fn to_i64(v: &IValue) -> Option<i64> {
+    match num_val(v) {
+        NumVal::Int(x) => i64::try_from(x).ok(),
+        NumVal::Float(x) => {
+            (x.fract() == 0.0 && x >= i64::MIN as f64 && x < i64::MAX as f64).then_some(x as i64)
         }
     }
+}
 
-    // Safety: reads the heap scalar payload; only called for heap number tags.
-    unsafe fn scalar_bits(&self) -> u64 {
-        scalar::read(self.ptr())
+pub(crate) fn to_u64(v: &IValue) -> Option<u64> {
+    match num_val(v) {
+        NumVal::Int(x) => u64::try_from(x).ok(),
+        NumVal::Float(x) => {
+            (x.fract() == 0.0 && x >= 0.0 && x < u64::MAX as f64).then_some(x as u64)
+        }
     }
+}
 
-    fn number_num_val(&self) -> NumVal {
-        if self.is_inline() {
-            let bits = self.ptr_usize();
-            match inl::value_i128(bits) {
-                Some(i) => NumVal::Int(i),
-                None => NumVal::Float(inl::to_f64_lossy(bits)),
-            }
-        } else {
-            // Safety: not inline, so it is a heap scalar number.
-            unsafe {
-                match self.type_tag() {
-                    TypeTag::NumberI64 => NumVal::Int(i128::from(self.scalar_bits() as i64)),
-                    TypeTag::NumberU64 => NumVal::Int(i128::from(self.scalar_bits())),
-                    _ => NumVal::Float(f64::from_bits(self.scalar_bits())),
+pub(crate) fn to_f64(v: &IValue) -> Option<f64> {
+    if v.is_inline() {
+        inl::to_f64_exact(v.ptr_usize())
+    } else {
+        // Safety: not inline, so it is a heap scalar number.
+        unsafe {
+            match v.type_tag() {
+                TypeTag::NumberI64 => {
+                    let x = scalar_bits(v) as i64;
+                    can_represent_as_f64(x.unsigned_abs()).then_some(x as f64)
                 }
-            }
-        }
-    }
-
-    pub(crate) fn number_to_i64(&self) -> Option<i64> {
-        match self.number_num_val() {
-            NumVal::Int(v) => i64::try_from(v).ok(),
-            NumVal::Float(v) => {
-                if v.fract() == 0.0 && v >= i64::MIN as f64 && v < i64::MAX as f64 {
-                    Some(v as i64)
-                } else {
-                    None
+                TypeTag::NumberU64 => {
+                    let x = scalar_bits(v);
+                    can_represent_as_f64(x).then_some(x as f64)
                 }
+                _ => Some(f64::from_bits(scalar_bits(v))),
             }
         }
     }
+}
 
-    pub(crate) fn number_to_u64(&self) -> Option<u64> {
-        match self.number_num_val() {
-            NumVal::Int(v) => u64::try_from(v).ok(),
-            NumVal::Float(v) => {
-                if v.fract() == 0.0 && v >= 0.0 && v < u64::MAX as f64 {
-                    Some(v as u64)
-                } else {
-                    None
-                }
+pub(crate) fn to_f64_lossy(v: &IValue) -> f64 {
+    if v.is_inline() {
+        inl::to_f64_lossy(v.ptr_usize())
+    } else {
+        // Safety: not inline, so it is a heap scalar number.
+        unsafe {
+            match v.type_tag() {
+                TypeTag::NumberI64 => scalar_bits(v) as i64 as f64,
+                TypeTag::NumberU64 => scalar_bits(v) as f64,
+                _ => f64::from_bits(scalar_bits(v)),
             }
         }
     }
+}
 
-    pub(crate) fn number_to_f64(&self) -> Option<f64> {
-        if self.is_inline() {
-            inl::to_f64_exact(self.ptr_usize())
-        } else {
-            // Safety: not inline, so it is a heap scalar number.
-            unsafe {
-                match self.type_tag() {
-                    TypeTag::NumberI64 => {
-                        let v = self.scalar_bits() as i64;
-                        can_represent_as_f64(v.unsigned_abs()).then_some(v as f64)
-                    }
-                    TypeTag::NumberU64 => {
-                        let v = self.scalar_bits();
-                        can_represent_as_f64(v).then_some(v as f64)
-                    }
-                    _ => Some(f64::from_bits(self.scalar_bits())),
-                }
-            }
-        }
+pub(crate) fn has_decimal_point(v: &IValue) -> bool {
+    if v.is_inline() {
+        inl::has_decimal_point(v.ptr_usize())
+    } else {
+        v.type_tag() == TypeTag::NumberF64
     }
+}
 
-    pub(crate) fn number_to_f64_lossy(&self) -> f64 {
-        if self.is_inline() {
-            inl::to_f64_lossy(self.ptr_usize())
-        } else {
-            // Safety: not inline, so it is a heap scalar number.
-            unsafe {
-                match self.type_tag() {
-                    TypeTag::NumberI64 => self.scalar_bits() as i64 as f64,
-                    TypeTag::NumberU64 => self.scalar_bits() as f64,
-                    _ => f64::from_bits(self.scalar_bits()),
-                }
-            }
-        }
+pub(crate) fn to_i32(v: &IValue) -> Option<i32> {
+    to_i64(v).and_then(|x| x.try_into().ok())
+}
+pub(crate) fn to_u32(v: &IValue) -> Option<u32> {
+    to_u64(v).and_then(|x| x.try_into().ok())
+}
+pub(crate) fn to_isize(v: &IValue) -> Option<isize> {
+    to_i64(v).and_then(|x| x.try_into().ok())
+}
+pub(crate) fn to_usize(v: &IValue) -> Option<usize> {
+    to_u64(v).and_then(|x| x.try_into().ok())
+}
+pub(crate) fn to_f32(v: &IValue) -> Option<f32> {
+    // A value is exactly an f32 only if it is exactly an f64.
+    let x = to_f64(v)?;
+    let u = x as f32;
+    (f64::from(u) == x).then_some(u)
+}
+pub(crate) fn to_f32_lossy(v: &IValue) -> f32 {
+    to_f64_lossy(v) as f32
+}
+
+pub(crate) fn hash<H: Hasher>(v: &IValue, state: &mut H) {
+    if let Some(x) = to_i64(v) {
+        x.hash(state);
+    } else if let Some(x) = to_u64(v) {
+        x.hash(state);
+    } else {
+        let f = to_f64_lossy(v);
+        (if f == 0.0 { 0 } else { f.to_bits() }).hash(state);
     }
+}
 
-    pub(crate) fn number_has_decimal_point(&self) -> bool {
-        if self.is_inline() {
-            inl::has_decimal_point(self.ptr_usize())
-        } else {
-            self.type_tag() == TypeTag::NumberF64
-        }
+pub(crate) fn cmp(a: &IValue, b: &IValue) -> Ordering {
+    if a.raw_eq(b) {
+        Ordering::Equal
+    } else {
+        cmp_num(&num_val(a), &num_val(b))
     }
+}
 
-    pub(crate) fn number_hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        if let Some(v) = self.number_to_i64() {
-            v.hash(state);
-        } else if let Some(v) = self.number_to_u64() {
-            v.hash(state);
-        } else {
-            let v = self.number_to_f64_lossy();
-            let bits = if v == 0.0 { 0 } else { v.to_bits() };
-            bits.hash(state);
-        }
-    }
-
-    pub(crate) fn number_cmp(&self, other: &IValue) -> Ordering {
-        if self.raw_eq(other) {
-            Ordering::Equal
-        } else {
-            cmp_num(&self.number_num_val(), &other.number_num_val())
-        }
+pub(crate) fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+    if let Some(x) = to_i64(v) {
+        Debug::fmt(&x, f)
+    } else if let Some(x) = to_u64(v) {
+        Debug::fmt(&x, f)
+    } else {
+        Debug::fmt(&to_f64_lossy(v), f)
     }
 }
 
@@ -235,131 +258,128 @@ impl INumber {
     /// Returns the number zero (without a decimal point). Does not allocate.
     #[must_use]
     pub fn zero() -> Self {
-        INumber(IValue::new_number_i64(0))
+        INumber(new_i64(0))
     }
     /// Returns the number one (without a decimal point). Does not allocate.
     #[must_use]
     pub fn one() -> Self {
-        INumber(IValue::new_number_i64(1))
+        INumber(new_i64(1))
     }
 
     /// Converts this number to an i64 if it can be represented exactly.
     #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
-        self.0.number_to_i64()
+        to_i64(&self.0)
     }
     /// Converts this number to a u64 if it can be represented exactly.
     #[must_use]
     pub fn to_u64(&self) -> Option<u64> {
-        self.0.number_to_u64()
+        to_u64(&self.0)
     }
     /// Converts this number to an f64 if it can be represented exactly.
     #[must_use]
     pub fn to_f64(&self) -> Option<f64> {
-        self.0.number_to_f64()
+        to_f64(&self.0)
     }
     /// Converts this number to an f32 if it can be represented exactly.
     #[must_use]
     pub fn to_f32(&self) -> Option<f32> {
-        // A value is exactly an f32 only if it is exactly an f64.
-        let v = self.to_f64()?;
-        let u = v as f32;
-        (f64::from(u) == v).then_some(u)
+        to_f32(&self.0)
     }
     /// Converts this number to an i32 if it can be represented exactly.
     #[must_use]
     pub fn to_i32(&self) -> Option<i32> {
-        self.to_i64().and_then(|x| x.try_into().ok())
+        to_i32(&self.0)
     }
     /// Converts this number to a u32 if it can be represented exactly.
     #[must_use]
     pub fn to_u32(&self) -> Option<u32> {
-        self.to_u64().and_then(|x| x.try_into().ok())
+        to_u32(&self.0)
     }
     /// Converts this number to an isize if it can be represented exactly.
     #[must_use]
     pub fn to_isize(&self) -> Option<isize> {
-        self.to_i64().and_then(|x| x.try_into().ok())
+        to_isize(&self.0)
     }
     /// Converts this number to a usize if it can be represented exactly.
     #[must_use]
     pub fn to_usize(&self) -> Option<usize> {
-        self.to_u64().and_then(|x| x.try_into().ok())
+        to_usize(&self.0)
     }
     /// Converts this number to an f64, potentially losing precision in the process.
     #[must_use]
     pub fn to_f64_lossy(&self) -> f64 {
-        self.0.number_to_f64_lossy()
+        to_f64_lossy(&self.0)
     }
     /// Converts this number to an f32, potentially losing precision in the process.
     #[must_use]
     pub fn to_f32_lossy(&self) -> f32 {
-        self.to_f64_lossy() as f32
+        to_f32_lossy(&self.0)
     }
 
     /// This allows distinguishing between `1.0` and `1` in the original JSON.
     /// Numeric operations will otherwise treat these two values as equivalent.
     #[must_use]
     pub fn has_decimal_point(&self) -> bool {
-        self.0.number_has_decimal_point()
+        has_decimal_point(&self.0)
     }
 }
 
 impl Hash for INumber {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.number_hash(state);
+        hash(&self.0, state);
     }
 }
 
 impl From<u64> for INumber {
     fn from(v: u64) -> Self {
-        INumber(IValue::new_number_u64(v))
+        INumber(new_u64(v))
     }
 }
 impl From<u32> for INumber {
     fn from(v: u32) -> Self {
-        INumber(IValue::new_number_u64(u64::from(v)))
+        INumber(new_u64(u64::from(v)))
     }
 }
 impl From<u16> for INumber {
     fn from(v: u16) -> Self {
-        INumber(IValue::new_number_u64(u64::from(v)))
+        INumber(new_u64(u64::from(v)))
     }
 }
 impl From<u8> for INumber {
     fn from(v: u8) -> Self {
-        INumber(IValue::new_number_u64(u64::from(v)))
+        INumber(new_u64(u64::from(v)))
     }
 }
 impl From<usize> for INumber {
     fn from(v: usize) -> Self {
-        INumber(IValue::new_number_u64(v as u64))
+        INumber(new_u64(v as u64))
     }
 }
 
 impl From<i64> for INumber {
     fn from(v: i64) -> Self {
-        INumber(IValue::new_number_i64(v))
+        INumber(new_i64(v))
     }
 }
 impl From<i32> for INumber {
     fn from(v: i32) -> Self {
-        INumber(IValue::new_number_i64(i64::from(v)))
+        INumber(new_i64(i64::from(v)))
     }
 }
 impl From<i16> for INumber {
     fn from(v: i16) -> Self {
-        INumber(IValue::new_number_i64(i64::from(v)))
+        INumber(new_i64(i64::from(v)))
     }
 }
 impl From<i8> for INumber {
     fn from(v: i8) -> Self {
-        INumber(IValue::new_number_i64(i64::from(v)))
+        INumber(new_i64(i64::from(v)))
     }
 }
 impl From<isize> for INumber {
     fn from(v: isize) -> Self {
-        INumber(IValue::new_number_i64(v as i64))
+        INumber(new_i64(v as i64))
     }
 }
 
@@ -367,7 +387,7 @@ impl TryFrom<f64> for INumber {
     type Error = ();
     fn try_from(v: f64) -> Result<Self, ()> {
         if v.is_finite() {
-            Ok(INumber(IValue::new_number_f64(v)))
+            Ok(INumber(new_f64(v)))
         } else {
             Err(())
         }
@@ -378,7 +398,7 @@ impl TryFrom<f32> for INumber {
     type Error = ();
     fn try_from(v: f32) -> Result<Self, ()> {
         if v.is_finite() {
-            Ok(INumber(IValue::new_number_f64(f64::from(v))))
+            Ok(INumber(new_f64(f64::from(v))))
         } else {
             Err(())
         }
@@ -440,7 +460,7 @@ impl PartialEq for INumber {
 impl Eq for INumber {}
 impl Ord for INumber {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.number_cmp(&other.0)
+        cmp(&self.0, &other.0)
     }
 }
 impl PartialOrd for INumber {

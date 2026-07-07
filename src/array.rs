@@ -4,7 +4,7 @@ use std::alloc::{Layout, LayoutError};
 use std::borrow::{Borrow, BorrowMut};
 use std::cmp::{self, Ordering};
 use std::fmt::{self, Debug, Formatter};
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::ptr::NonNull;
@@ -100,6 +100,35 @@ impl Debug for IntoIter {
 pub struct IArray(pub(crate) IValue);
 
 value_subtype_impls!(IArray, into_array, as_array, as_array_mut);
+
+// Array-representation operations that the root value type delegates to. Each
+// takes an `&IValue` known to be an array (`IArray` is a transparent wrapper).
+// Safety (all): `v` must be an array.
+unsafe fn as_array(v: &IValue) -> &IArray {
+    &*(v as *const IValue).cast::<IArray>()
+}
+unsafe fn as_array_mut(v: &mut IValue) -> &mut IArray {
+    &mut *(v as *mut IValue).cast::<IArray>()
+}
+
+pub(crate) unsafe fn clone(v: &IValue) -> IValue {
+    as_array(v).clone_impl()
+}
+pub(crate) unsafe fn drop(v: &mut IValue) {
+    as_array_mut(v).drop_impl();
+}
+pub(crate) unsafe fn hash<H: Hasher>(v: &IValue, state: &mut H) {
+    as_array(v).hash(state);
+}
+pub(crate) unsafe fn eq(a: &IValue, b: &IValue) -> bool {
+    as_array(a) == as_array(b)
+}
+pub(crate) unsafe fn cmp(a: &IValue, b: &IValue) -> Option<Ordering> {
+    as_array(a).partial_cmp(as_array(b))
+}
+pub(crate) unsafe fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+    Debug::fmt(as_array(v), f)
+}
 
 static EMPTY_HEADER: Header = Header { len: 0, cap: 0 };
 

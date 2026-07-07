@@ -524,6 +524,32 @@ pub struct IObject(pub(crate) IValue);
 
 value_subtype_impls!(IObject, into_object, as_object, as_object_mut);
 
+// Object-representation operations that the root value type delegates to. Each
+// takes an `&IValue` known to be an object (`IObject` is a transparent wrapper).
+// Safety (all): `v` must be an object.
+unsafe fn as_object(v: &IValue) -> &IObject {
+    &*(v as *const IValue).cast::<IObject>()
+}
+unsafe fn as_object_mut(v: &mut IValue) -> &mut IObject {
+    &mut *(v as *mut IValue).cast::<IObject>()
+}
+
+pub(crate) unsafe fn clone(v: &IValue) -> IValue {
+    as_object(v).clone_impl()
+}
+pub(crate) unsafe fn drop(v: &mut IValue) {
+    as_object_mut(v).drop_impl();
+}
+pub(crate) unsafe fn hash<H: Hasher>(v: &IValue, state: &mut H) {
+    as_object(v).hash(state);
+}
+pub(crate) unsafe fn eq(a: &IValue, b: &IValue) -> bool {
+    as_object(a) == as_object(b)
+}
+pub(crate) unsafe fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+    Debug::fmt(as_object(v), f)
+}
+
 static EMPTY_HEADER: Header = Header { len: 0, cap: 0 };
 
 impl IObject {

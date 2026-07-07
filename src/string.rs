@@ -2,9 +2,9 @@
 //!
 //! `IString` is a *type* that spans two representations — an inline short string
 //! (see [`crate::inline::string`]) and a heap interned string (see
-//! [`crate::interned`]). The string-specific logic lives as methods on
-//! [`IValue`] which pick the representation by tag; `IString` is a thin wrapper
-//! that delegates up to them.
+//! [`crate::interned`]). The string-specific logic lives as free functions here
+//! which pick the representation by tag; both the root value type and the thin
+//! `IString` wrapper delegate to them.
 
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Display, Formatter};
@@ -21,42 +21,55 @@ pub fn init_cache() {
     interned::init_cache();
 }
 
-/// String-type methods on [`IValue`], spanning the inline and interned
-/// representations. Each assumes the value is a string.
-impl IValue {
-    pub(crate) fn new_string(s: &str) -> Self {
-        if s.len() <= inl::CAPACITY {
-            // Safety: `encode` returns valid inline-string bits.
-            unsafe { Self::new_inline(TypeTag::Inline, inl::encode(s)) }
-        } else {
-            // Safety: `intern` returns a live, aligned interned header pointer.
-            unsafe { Self::new_ptr(interned::intern(s), TypeTag::String) }
-        }
-    }
+// String-type operations spanning the inline and interned representations. These
+// are free functions on `&IValue` (not methods on `IValue`); the root value type
+// delegates to them, and `IString` delegates to them too. Each assumes the value
+// is a string.
 
-    pub(crate) fn string_len(&self) -> usize {
-        if self.is_inline() {
-            inl::len(self.ptr_usize())
-        } else {
-            // Safety: not an inline string, so it is interned.
-            unsafe { interned::len(self.ptr()) }
-        }
+pub(crate) fn new(s: &str) -> IValue {
+    if s.len() <= inl::CAPACITY {
+        // Safety: `encode` returns valid inline-string bits.
+        unsafe { IValue::new_inline(TypeTag::Inline, inl::encode(s)) }
+    } else {
+        // Safety: `intern` returns a live, aligned interned header pointer.
+        unsafe { IValue::new_ptr(interned::intern(s), TypeTag::String) }
     }
+}
 
-    pub(crate) fn string_bytes(&self) -> &[u8] {
-        if self.is_inline() {
-            // Safety: an inline string keeps its bytes within `self`'s storage.
-            unsafe { inl::bytes(NonNull::from(self).cast(), self.ptr_usize()) }
-        } else {
-            // Safety: not an inline string, so it is interned.
-            unsafe { interned::bytes(self.ptr()) }
-        }
+pub(crate) fn len(v: &IValue) -> usize {
+    if v.is_inline() {
+        inl::len(v.ptr_usize())
+    } else {
+        // Safety: not an inline string, so it is interned.
+        unsafe { interned::len(v.ptr()) }
     }
+}
 
-    pub(crate) fn string_as_str(&self) -> &str {
-        // Safety: inline and interned string bytes are both valid UTF-8.
-        unsafe { std::str::from_utf8_unchecked(self.string_bytes()) }
+pub(crate) fn bytes(v: &IValue) -> &[u8] {
+    if v.is_inline() {
+        // Safety: an inline string keeps its bytes within `v`'s storage.
+        unsafe { inl::bytes(NonNull::from(v).cast(), v.ptr_usize()) }
+    } else {
+        // Safety: not an inline string, so it is interned.
+        unsafe { interned::bytes(v.ptr()) }
     }
+}
+
+pub(crate) fn as_str(v: &IValue) -> &str {
+    // Safety: inline and interned string bytes are both valid UTF-8.
+    unsafe { std::str::from_utf8_unchecked(bytes(v)) }
+}
+
+pub(crate) fn cmp(a: &IValue, b: &IValue) -> Ordering {
+    if a.raw_eq(b) {
+        Ordering::Equal
+    } else {
+        as_str(a).cmp(as_str(b))
+    }
+}
+
+pub(crate) fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+    Debug::fmt(as_str(v), f)
 }
 
 /// The `IString` type is an interned, immutable string, and is where this crate
@@ -92,13 +105,13 @@ impl IString {
     /// global cache. Longer strings are interned in the global string cache.
     #[must_use]
     pub fn intern(s: &str) -> Self {
-        IString(IValue::new_string(s))
+        IString(new(s))
     }
 
     /// Returns the length (in bytes) of this string.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.string_len()
+        len(&self.0)
     }
 
     /// Returns `true` if this is the empty string "".
@@ -110,13 +123,13 @@ impl IString {
     /// Obtains a `&str` from this `IString`. This is a cheap operation.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        self.0.string_as_str()
+        as_str(&self.0)
     }
 
     /// Obtains a byte slice from this `IString`. This is a cheap operation.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        self.0.string_bytes()
+        bytes(&self.0)
     }
 
     /// Returns the empty string.

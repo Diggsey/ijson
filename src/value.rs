@@ -11,10 +11,10 @@ use std::ptr::NonNull;
 #[cfg(feature = "indexmap")]
 use indexmap::IndexMap;
 
-use super::array::IArray;
-use super::number::INumber;
-use super::object::IObject;
-use super::string::IString;
+use super::array::{self, IArray};
+use super::number::{self, INumber};
+use super::object::{self, IObject};
+use super::string::{self, IString};
 use super::{inline, interned, scalar};
 
 /// Stores an arbitrary JSON value.
@@ -514,54 +514,54 @@ impl IValue {
     /// Converts this value to an i64 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
-        self.as_number()?.to_i64()
+        self.is_number().then(|| number::to_i64(self)).flatten()
     }
     /// Converts this value to a u64 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_u64(&self) -> Option<u64> {
-        self.as_number()?.to_u64()
+        self.is_number().then(|| number::to_u64(self)).flatten()
     }
     /// Converts this value to an f64 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_f64(&self) -> Option<f64> {
-        self.as_number()?.to_f64()
+        self.is_number().then(|| number::to_f64(self)).flatten()
     }
     /// Converts this value to an f32 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_f32(&self) -> Option<f32> {
-        self.as_number()?.to_f32()
+        self.is_number().then(|| number::to_f32(self)).flatten()
     }
     /// Converts this value to an i32 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_i32(&self) -> Option<i32> {
-        self.as_number()?.to_i32()
+        self.is_number().then(|| number::to_i32(self)).flatten()
     }
     /// Converts this value to a u32 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_u32(&self) -> Option<u32> {
-        self.as_number()?.to_u32()
+        self.is_number().then(|| number::to_u32(self)).flatten()
     }
     /// Converts this value to an isize if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_isize(&self) -> Option<isize> {
-        self.as_number()?.to_isize()
+        self.is_number().then(|| number::to_isize(self)).flatten()
     }
     /// Converts this value to a usize if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_usize(&self) -> Option<usize> {
-        self.as_number()?.to_usize()
+        self.is_number().then(|| number::to_usize(self)).flatten()
     }
     /// Converts this value to an f64 if it is a number, potentially losing precision
     /// in the process.
     #[must_use]
     pub fn to_f64_lossy(&self) -> Option<f64> {
-        Some(self.as_number()?.to_f64_lossy())
+        self.is_number().then(|| number::to_f64_lossy(self))
     }
     /// Converts this value to an f32 if it is a number, potentially losing precision
     /// in the process.
     #[must_use]
     pub fn to_f32_lossy(&self) -> Option<f32> {
-        Some(self.as_number()?.to_f32_lossy())
+        self.is_number().then(|| number::to_f32_lossy(self))
     }
 
     // # String methods
@@ -742,8 +742,8 @@ impl Clone for IValue {
                 interned::bump_rc(self.ptr());
                 self.raw_copy()
             },
-            TypeTag::Array => unsafe { self.as_array_unchecked() }.clone_impl(),
-            TypeTag::Object => unsafe { self.as_object_unchecked() }.clone_impl(),
+            TypeTag::Array => unsafe { array::clone(self) },
+            TypeTag::Object => unsafe { object::clone(self) },
         }
     }
 }
@@ -762,8 +762,8 @@ impl Drop for IValue {
             | TypeTag::NumberF64
             | TypeTag::NumberReserved => unsafe { scalar::free(self.ptr()) },
             TypeTag::String => unsafe { interned::release(self.ptr()) },
-            TypeTag::Array => unsafe { self.as_array_unchecked_mut() }.drop_impl(),
-            TypeTag::Object => unsafe { self.as_object_unchecked_mut() }.drop_impl(),
+            TypeTag::Array => unsafe { array::drop(self) },
+            TypeTag::Object => unsafe { object::drop(self) },
         }
     }
 }
@@ -775,31 +775,30 @@ impl Hash for IValue {
             TypeTag::NumberI64
             | TypeTag::NumberU64
             | TypeTag::NumberF64
-            | TypeTag::NumberReserved => self.number_hash(state),
+            | TypeTag::NumberReserved => number::hash(self, state),
             // Interned strings hash by their canonical pointer
             TypeTag::String => self.ptr.hash(state),
-            TypeTag::Array => unsafe { self.as_array_unchecked() }.hash(state),
-            TypeTag::Object => unsafe { self.as_object_unchecked() }.hash(state),
+            TypeTag::Array => unsafe { array::hash(self, state) },
+            TypeTag::Object => unsafe { object::hash(self, state) },
         }
     }
 }
 
 impl PartialEq for IValue {
     fn eq(&self, other: &Self) -> bool {
-        let (t1, t2) = (self.type_(), other.type_());
-        if t1 == t2 {
-            // Safety: Only methods for the appropriate type are called
-            unsafe {
-                match t1 {
-                    // Inline and interned types can be trivially compared
-                    ValueType::Null | ValueType::Bool | ValueType::String => self.ptr == other.ptr,
-                    ValueType::Number => self.as_number_unchecked() == other.as_number_unchecked(),
-                    ValueType::Array => self.as_array_unchecked() == other.as_array_unchecked(),
-                    ValueType::Object => self.as_object_unchecked() == other.as_object_unchecked(),
-                }
+        let t = self.type_();
+        if t != other.type_() {
+            return false;
+        }
+        // Safety: both values are of type `t`; only that type's op is called
+        unsafe {
+            match t {
+                // `null`, booleans and (canonical) strings compare by bits
+                ValueType::Null | ValueType::Bool | ValueType::String => self.raw_eq(other),
+                ValueType::Number => number::cmp(self, other) == Ordering::Equal,
+                ValueType::Array => array::eq(self, other),
+                ValueType::Object => object::eq(self, other),
             }
-        } else {
-            false
         }
     }
 }
@@ -809,21 +808,14 @@ impl PartialOrd for IValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let (t1, t2) = (self.type_(), other.type_());
         if t1 == t2 {
-            // Safety: Only methods for the appropriate type are called
+            // Safety: both values are of type `t1`; only that type's op is called
             unsafe {
                 match t1 {
-                    // Inline and interned types can be trivially compared
                     ValueType::Null => Some(Ordering::Equal),
                     ValueType::Bool => self.is_true().partial_cmp(&other.is_true()),
-                    ValueType::String => self
-                        .as_string_unchecked()
-                        .partial_cmp(other.as_string_unchecked()),
-                    ValueType::Number => self
-                        .as_number_unchecked()
-                        .partial_cmp(other.as_number_unchecked()),
-                    ValueType::Array => self
-                        .as_array_unchecked()
-                        .partial_cmp(other.as_array_unchecked()),
+                    ValueType::String => Some(string::cmp(self, other)),
+                    ValueType::Number => Some(number::cmp(self, other)),
+                    ValueType::Array => array::cmp(self, other),
                     ValueType::Object => None,
                 }
             }
@@ -950,15 +942,17 @@ impl Debug for IValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         // Debug is a semantic (display) operation, so it dispatches on the JSON
         // type; `type_()` delegates inline classification to the `inline` module.
+        // Debug is a semantic (display) operation, so it dispatches on the JSON
+        // type and delegates to the owning module.
         // Safety: each arm only borrows the value as the type it just checked.
         unsafe {
             match self.type_() {
                 ValueType::Null => f.write_str("null"),
                 ValueType::Bool => Debug::fmt(&self.is_true(), f),
-                ValueType::Number => Debug::fmt(self.as_number_unchecked(), f),
-                ValueType::String => Debug::fmt(self.as_string_unchecked(), f),
-                ValueType::Array => Debug::fmt(self.as_array_unchecked(), f),
-                ValueType::Object => Debug::fmt(self.as_object_unchecked(), f),
+                ValueType::Number => number::debug(self, f),
+                ValueType::String => string::debug(self, f),
+                ValueType::Array => array::debug(self, f),
+                ValueType::Object => object::debug(self, f),
             }
         }
     }
