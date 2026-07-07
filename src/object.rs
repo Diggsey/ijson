@@ -21,7 +21,7 @@ use super::string::IString;
 use super::value::{IValue, TypeTag};
 
 #[repr(C)]
-#[repr(align(4))]
+#[repr(align(8))]
 struct Header {
     len: usize,
     cap: usize,
@@ -559,7 +559,7 @@ impl IObject {
     /// Constructs a new empty `IObject`. Does not allocate.
     #[must_use]
     pub fn new() -> Self {
-        unsafe { Self(IValue::new_ref(&EMPTY_HEADER, TypeTag::ObjectOrTrue)) }
+        unsafe { Self(IValue::new_ref(&EMPTY_HEADER, TypeTag::Object)) }
     }
 
     /// Constructs a new `IObject` with the specified capacity. At least that many entries
@@ -569,7 +569,7 @@ impl IObject {
         if cap == 0 {
             Self::new()
         } else {
-            Self(unsafe { IValue::new_ptr(Self::alloc(cap).cast(), TypeTag::ObjectOrTrue) })
+            Self(unsafe { IValue::new_ptr(Self::alloc(cap).cast(), TypeTag::Object) })
         }
     }
 

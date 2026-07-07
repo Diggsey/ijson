@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
-use std::hint::unreachable_unchecked;
 use std::iter::FromIterator;
 use std::mem;
 use std::ops::{Deref, Index, IndexMut};
@@ -167,26 +166,65 @@ impl Deref for BoolMut<'_> {
     }
 }
 
-pub(crate) const ALIGNMENT: usize = 4;
+pub(crate) const ALIGNMENT: usize = 8;
 
-/// Bit 2 of a `StringOrNull`-tagged value flags an inline string (as opposed to
-/// a pointer to an interned heap string). Heap string headers are 8-aligned, so
-/// this bit is always clear for a heap string pointer, making it a reliable
-/// discriminator. See the `string` module for the full inline layout.
-pub(crate) const INLINE_STRING_FLAG: usize = 0b100;
+// All heap allocations pointed to by an `IValue` are aligned to `ALIGNMENT`, so
+// the low 3 bits of the pointer are free to hold the `TypeTag`. Every non-inline
+// tag therefore corresponds to a pointer; the `Inline` tag (0) instead stores
+// the whole value inline.
+//
+// # Inline layout (tag `Inline`)
+//
+// Bit 3 selects the inline sub-family:
+//   - 0 => number: a decimal `mantissa * 10^exp` (see the `number` module).
+//   - 1 => string or constant, distinguished by bit 7 ([`INLINE_CONST_FLAG`]):
+//       - bit 7 = 0 => string: bits 4-6 length, following bytes the UTF-8 data.
+//       - bit 7 = 1 => constant: `null` / `false` / `true`.
+//
+// The all-zero value is never produced (the number exponent is biased so integer
+// zero is non-zero), reserving it as the `NonNull` niche.
+
+/// Bit 3 of an inline value: set for the string/constant sub-family, clear for
+/// inline numbers.
+pub(crate) const INLINE_STR_FAMILY: usize = 1 << 3;
+/// Bit 7 of an inline string-family value: set for a constant (`null`/`false`/
+/// `true`), clear for an actual inline string.
+pub(crate) const INLINE_CONST_FLAG: usize = 1 << 7;
+
+// Bit patterns of the inline constants (the `Inline` tag is 0, so these equal
+// the raw `ptr_usize()` of `NULL`/`FALSE`/`TRUE`). The constant is selected by
+// bits 4-6 (0 = null, 1 = false, 2 = true). These are compared directly in the
+// hot dispatch path rather than materialising `IValue::NULL` etc., because those
+// are droppable temporaries whose `Drop` would re-enter `type_` and recurse.
+const NULL_BITS: usize = INLINE_STR_FAMILY | INLINE_CONST_FLAG;
+const FALSE_BITS: usize = NULL_BITS | (1 << 4);
+const TRUE_BITS: usize = NULL_BITS | (2 << 4);
 
 #[repr(usize)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TypeTag {
-    Number = 0,
-    StringOrNull = 1,
-    ArrayOrFalse = 2,
-    ObjectOrTrue = 3,
+    /// A value stored entirely inline (null, bool, small number, short string).
+    Inline = 0,
+    /// Pointer to a heap `i64` payload.
+    NumberI64 = 1,
+    /// Pointer to a heap `u64` payload.
+    NumberU64 = 2,
+    /// Pointer to a heap `f64` payload.
+    NumberF64 = 3,
+    /// Reserved for a future arbitrary-precision number representation.
+    #[allow(dead_code)]
+    NumberReserved = 4,
+    /// Pointer to an interned string header.
+    String = 5,
+    /// Pointer to an array header.
+    Array = 6,
+    /// Pointer to an object header.
+    Object = 7,
 }
 
 impl From<usize> for TypeTag {
     fn from(other: usize) -> Self {
-        // Safety: `% ALIGNMENT` can only return valid variants
+        // Safety: `% ALIGNMENT` (== 8) can only return valid variants 0..=7
         unsafe { mem::transmute(other % ALIGNMENT) }
     }
 }
@@ -215,11 +253,10 @@ unsafe impl Send for IValue {}
 unsafe impl Sync for IValue {}
 
 impl IValue {
-    // Safety: Tag must not be `Number`, and `payload` must leave the tag bits
-    // (the low `ALIGNMENT.trailing_zeros()` bits) clear so it does not corrupt
-    // the tag when ORed in. Used both for the inline singletons (payload `0`)
-    // and for inline strings (payload carries the inline flag, length, and
-    // characters — see the `string` module).
+    // Safety: `payload` must leave the low 3 tag bits clear (so it does not
+    // corrupt the tag when ORed in) and, together with the tag, must not be
+    // all-zero (reserved as the niche). Used to build inline values; `tag` is
+    // normally `Inline`, with the payload carrying the sub-family and data.
     pub(crate) const unsafe fn new_inline(tag: TypeTag, payload: usize) -> Self {
         Self {
             ptr: NonNull::new_unchecked((tag as usize | payload) as *mut u8),
@@ -237,11 +274,11 @@ impl IValue {
     }
 
     /// JSON `null`.
-    pub const NULL: Self = unsafe { Self::new_inline(TypeTag::StringOrNull, 0) };
+    pub const NULL: Self = unsafe { Self::new_inline(TypeTag::Inline, NULL_BITS) };
     /// JSON `false`.
-    pub const FALSE: Self = unsafe { Self::new_inline(TypeTag::ArrayOrFalse, 0) };
+    pub const FALSE: Self = unsafe { Self::new_inline(TypeTag::Inline, FALSE_BITS) };
     /// JSON `true`.
-    pub const TRUE: Self = unsafe { Self::new_inline(TypeTag::ObjectOrTrue, 0) };
+    pub const TRUE: Self = unsafe { Self::new_inline(TypeTag::Inline, TRUE_BITS) };
 
     pub(crate) fn ptr_usize(&self) -> usize {
         self.ptr.as_ptr() as usize
@@ -268,40 +305,49 @@ impl IValue {
     pub(crate) fn raw_hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.ptr.hash(state);
     }
-    fn is_ptr(&self) -> bool {
-        self.ptr_usize() >= ALIGNMENT
-    }
-    fn type_tag(&self) -> TypeTag {
+    pub(crate) fn type_tag(&self) -> TypeTag {
         self.ptr_usize().into()
     }
 
+    /// Returns `true` if this value is an inline number (tag `Inline`, number
+    /// sub-family). See the `number` module for the decimal layout.
+    pub(crate) fn is_inline_number(&self) -> bool {
+        self.type_tag() == TypeTag::Inline && self.ptr_usize() & INLINE_STR_FAMILY == 0
+    }
+
     /// Returns `true` if this value is a string stored inline rather than as a
-    /// pointer to an interned heap allocation.
-    ///
-    /// Short strings are stored directly inside the pointer-sized value (see the
-    /// `string` module). They carry the `StringOrNull` tag with
-    /// [`INLINE_STRING_FLAG`] set; heap string headers are 8-aligned so that bit
-    /// is always clear for them, and `null` never has it set either.
+    /// pointer to an interned heap allocation. Inline strings carry the `Inline`
+    /// tag with the string sub-family bit set and the constant bit clear.
     pub(crate) fn is_inline_string(&self) -> bool {
-        self.type_tag() == TypeTag::StringOrNull && self.ptr_usize() & INLINE_STRING_FLAG != 0
+        self.type_tag() == TypeTag::Inline
+            && self.ptr_usize() & INLINE_STR_FAMILY != 0
+            && self.ptr_usize() & INLINE_CONST_FLAG == 0
     }
 
     /// Returns the type of this value.
     #[must_use]
     pub fn type_(&self) -> ValueType {
-        match (self.type_tag(), self.is_ptr()) {
-            // Pointers
-            (TypeTag::Number, true) => ValueType::Number,
-            (TypeTag::StringOrNull, true) => ValueType::String,
-            (TypeTag::ArrayOrFalse, true) => ValueType::Array,
-            (TypeTag::ObjectOrTrue, true) => ValueType::Object,
-
-            // Non-pointers
-            (TypeTag::StringOrNull, false) => ValueType::Null,
-            (TypeTag::ArrayOrFalse, false) | (TypeTag::ObjectOrTrue, false) => ValueType::Bool,
-
-            // Safety: due to invariants on IValue
-            _ => unsafe { unreachable_unchecked() },
+        match self.type_tag() {
+            // Heap number pointers
+            TypeTag::NumberI64
+            | TypeTag::NumberU64
+            | TypeTag::NumberF64
+            | TypeTag::NumberReserved => ValueType::Number,
+            TypeTag::String => ValueType::String,
+            TypeTag::Array => ValueType::Array,
+            TypeTag::Object => ValueType::Object,
+            TypeTag::Inline => {
+                let bits = self.ptr_usize();
+                if bits & INLINE_STR_FAMILY == 0 {
+                    ValueType::Number
+                } else if bits & INLINE_CONST_FLAG == 0 {
+                    ValueType::String
+                } else if bits == NULL_BITS {
+                    ValueType::Null
+                } else {
+                    ValueType::Bool
+                }
+            }
         }
     }
 
@@ -414,26 +460,27 @@ impl IValue {
     /// Returns `true` if this is the `null` value.
     #[must_use]
     pub fn is_null(&self) -> bool {
-        self.ptr == Self::NULL.ptr
+        self.ptr_usize() == NULL_BITS
     }
 
     // # Bool methods
     /// Returns `true` if this is a boolean.
     #[must_use]
     pub fn is_bool(&self) -> bool {
-        self.ptr == Self::TRUE.ptr || self.ptr == Self::FALSE.ptr
+        let bits = self.ptr_usize();
+        bits == TRUE_BITS || bits == FALSE_BITS
     }
 
     /// Returns `true` if this is the `true` value.
     #[must_use]
     pub fn is_true(&self) -> bool {
-        self.ptr == Self::TRUE.ptr
+        self.ptr_usize() == TRUE_BITS
     }
 
     /// Returns `true` if this is the `false` value.
     #[must_use]
     pub fn is_false(&self) -> bool {
-        self.ptr == Self::FALSE.ptr
+        self.ptr_usize() == FALSE_BITS
     }
 
     /// Converts this value to a `bool`.
@@ -451,7 +498,10 @@ impl IValue {
     /// Returns `true` if this is a number.
     #[must_use]
     pub fn is_number(&self) -> bool {
-        self.type_tag() == TypeTag::Number
+        matches!(
+            self.type_tag(),
+            TypeTag::NumberI64 | TypeTag::NumberU64 | TypeTag::NumberF64 | TypeTag::NumberReserved
+        ) || self.is_inline_number()
     }
 
     unsafe fn unchecked_cast_ref<T>(&self) -> &T {
@@ -565,7 +615,7 @@ impl IValue {
     /// Returns `true` if this is a string.
     #[must_use]
     pub fn is_string(&self) -> bool {
-        self.type_tag() == TypeTag::StringOrNull && self.is_ptr()
+        self.type_tag() == TypeTag::String || self.is_inline_string()
     }
 
     // Safety: Must be a string
@@ -618,7 +668,7 @@ impl IValue {
     /// Returns `true` if this is an array.
     #[must_use]
     pub fn is_array(&self) -> bool {
-        self.type_tag() == TypeTag::ArrayOrFalse && self.is_ptr()
+        self.type_tag() == TypeTag::Array
     }
 
     // Safety: Must be an array
@@ -671,7 +721,7 @@ impl IValue {
     /// Returns `true` if this is an object.
     #[must_use]
     pub fn is_object(&self) -> bool {
-        self.type_tag() == TypeTag::ObjectOrTrue && self.is_ptr()
+        self.type_tag() == TypeTag::Object
     }
 
     // Safety: Must be an array
@@ -1115,7 +1165,9 @@ mod tests {
         }
     }
 
-    #[mockalloc::test]
+    // Not a `mockalloc::test`: numbers in this range are now stored inline and
+    // perform no allocation, which `mockalloc` treats as an error.
+    #[test]
     fn test_number() {
         for v in 300..400 {
             let mut x = IValue::from(v);

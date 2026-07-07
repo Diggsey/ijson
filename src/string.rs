@@ -15,19 +15,19 @@ use lazy_static::lazy_static;
 use crate::alloc::{alloc_infallible, dealloc_infallible};
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
-use super::value::{IValue, TypeTag, INLINE_STRING_FLAG};
+use super::value::{IValue, TypeTag, INLINE_STR_FAMILY};
 
 /// The number of string bytes that fit inline in a pointer-sized [`IValue`].
 /// This is 7 on 64-bit platforms and 3 on 32-bit platforms (one byte is used
-/// for the tag, inline flag, and length).
+/// for the tag, sub-family flag, and length).
 pub(crate) const INLINE_CAPACITY: usize = std::mem::size_of::<usize>() - 1;
 
 // The inline string control byte occupies the low byte of the value. It stores
-// the `StringOrNull` tag (bits 0-1), the inline flag (bit 2, matching
-// `INLINE_STRING_FLAG`), and the length (bits 3-5). The remaining bytes hold up
-// to `INLINE_CAPACITY` UTF-8 bytes. `INLINE_STRING_FLAG` is a `usize`, so the
-// byte-sized form is asserted equal below.
-const INLINE_LEN_SHIFT: u32 = 3;
+// the `Inline` tag (bits 0-2), the string sub-family flag (bit 3, matching
+// `INLINE_STR_FAMILY`), and the length (bits 4-6). Bit 7 is clear (set only for
+// the `null`/`false`/`true` constants). The remaining bytes hold up to
+// `INLINE_CAPACITY` UTF-8 bytes.
+const INLINE_LEN_SHIFT: u32 = 4;
 const INLINE_LEN_MASK: usize = 0b111;
 
 // Memory offsets (within the value) of the control byte and the first character
@@ -141,10 +141,7 @@ impl WeakIString {
     fn upgrade(&self) -> IString {
         unsafe {
             self.ptr.as_ref().rc.fetch_add(1, AtomicOrdering::Relaxed);
-            IString(IValue::new_ptr(
-                self.ptr.cast::<u8>(),
-                TypeTag::StringOrNull,
-            ))
+            IString(IValue::new_ptr(self.ptr.cast::<u8>(), TypeTag::String))
         }
     }
 }
@@ -181,18 +178,19 @@ impl IString {
         debug_assert!(s.len() <= INLINE_CAPACITY);
 
         // Build the payload with the tag bits left clear; `IValue::new_inline`
-        // ORs in the `StringOrNull` tag. The control byte carries the inline
-        // flag and the length, and the remaining bytes carry the characters.
+        // ORs in the `Inline` tag (0). The control byte sets the string
+        // sub-family flag and the length, and the remaining bytes carry the
+        // characters.
         let mut bytes = [0u8; std::mem::size_of::<usize>()];
         bytes[INLINE_CONTROL_OFFSET] =
-            INLINE_STRING_FLAG as u8 | ((s.len() as u8) << INLINE_LEN_SHIFT);
+            INLINE_STR_FAMILY as u8 | ((s.len() as u8) << INLINE_LEN_SHIFT);
         bytes[INLINE_CHAR_OFFSET..INLINE_CHAR_OFFSET + s.len()].copy_from_slice(s.as_bytes());
 
-        // Safety: the inline flag keeps the value non-zero, and the payload
-        // leaves the tag bits clear.
+        // Safety: the string sub-family flag keeps the value non-zero, and the
+        // payload leaves the tag bits clear.
         unsafe {
             IString(IValue::new_inline(
-                TypeTag::StringOrNull,
+                TypeTag::Inline,
                 usize::from_ne_bytes(bytes),
             ))
         }

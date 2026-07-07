@@ -16,7 +16,7 @@ use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 use super::value::{IValue, TypeTag};
 
 #[repr(C)]
-#[repr(align(4))]
+#[repr(align(8))]
 struct Header {
     len: usize,
     cap: usize,
@@ -139,7 +139,7 @@ impl IArray {
     /// Constructs a new empty `IArray`. Does not allocate.
     #[must_use]
     pub fn new() -> Self {
-        unsafe { IArray(IValue::new_ref(&EMPTY_HEADER, TypeTag::ArrayOrFalse)) }
+        unsafe { IArray(IValue::new_ref(&EMPTY_HEADER, TypeTag::Array)) }
     }
 
     /// Constructs a new `IArray` with the specified capacity. At least that many items
@@ -149,7 +149,7 @@ impl IArray {
         if cap == 0 {
             Self::new()
         } else {
-            IArray(unsafe { IValue::new_ptr(Self::alloc(cap).cast(), TypeTag::ArrayOrFalse) })
+            IArray(unsafe { IValue::new_ptr(Self::alloc(cap).cast(), TypeTag::Array) })
         }
     }
 
