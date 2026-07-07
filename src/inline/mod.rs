@@ -14,37 +14,41 @@
 pub(crate) mod number;
 pub(crate) mod string;
 
-use crate::value::{IValue, TypeTag};
+use crate::value::ValueType;
 
-/// Bit 3 of an inline value: set for the string/constant sub-family, clear for
-/// inline numbers.
-pub(crate) const INLINE_STR_FAMILY: usize = 1 << 3;
-/// Bit 7 of an inline string-family value: set for a constant (`null`/`false`/
-/// `true`), clear for an actual inline string.
-pub(crate) const INLINE_CONST_FLAG: usize = 1 << 7;
+// Bit 3 of an inline value: set for the string/constant sub-family, clear for
+// inline numbers.
+const STR_FAMILY: usize = 1 << 3;
+// Bit 7 of an inline string-family value: set for a constant (`null`/`false`/
+// `true`), clear for an actual inline string.
+const CONST_FLAG: usize = 1 << 7;
 
-// Bit patterns of the inline constants (the `Inline` tag is 0, so these equal
-// the raw `ptr_usize()` of `NULL`/`FALSE`/`TRUE`). The constant is selected by
-// bits 4-6 (0 = null, 1 = false, 2 = true). These are compared directly rather
-// than materialising `IValue::NULL` etc., because those are droppable
-// temporaries whose `Drop` would re-enter type classification and recurse.
-pub(crate) const NULL_BITS: usize = INLINE_STR_FAMILY | INLINE_CONST_FLAG;
-pub(crate) const FALSE_BITS: usize = NULL_BITS | (1 << 4);
-pub(crate) const TRUE_BITS: usize = NULL_BITS | (2 << 4);
+// Bit patterns of the inline constants (the `Inline` tag is 0, so these are the
+// whole inline value). The constant is selected by bits 4-6 (0 = null,
+// 1 = false, 2 = true).
+pub(crate) const NULL: usize = STR_FAMILY | CONST_FLAG;
+pub(crate) const FALSE: usize = NULL | (1 << 4);
+pub(crate) const TRUE: usize = NULL | (2 << 4);
 
-impl IValue {
-    /// Returns `true` if this value is an inline number (tag `Inline`, number
-    /// sub-family). See [`number`] for the decimal layout.
-    pub(crate) fn is_inline_number(&self) -> bool {
-        self.type_tag() == TypeTag::Inline && self.ptr_usize() & INLINE_STR_FAMILY == 0
+/// The JSON type of an inline value, from its raw bits.
+pub(crate) fn value_type(bits: usize) -> ValueType {
+    if is_number(bits) {
+        ValueType::Number
+    } else if is_string(bits) {
+        ValueType::String
+    } else if bits == NULL {
+        ValueType::Null
+    } else {
+        ValueType::Bool
     }
+}
 
-    /// Returns `true` if this value is a string stored inline rather than as a
-    /// pointer to an interned heap allocation. Inline strings carry the `Inline`
-    /// tag with the string sub-family bit set and the constant bit clear.
-    pub(crate) fn is_inline_string(&self) -> bool {
-        self.type_tag() == TypeTag::Inline
-            && self.ptr_usize() & INLINE_STR_FAMILY != 0
-            && self.ptr_usize() & INLINE_CONST_FLAG == 0
-    }
+/// `true` if the inline value is a number (number sub-family).
+pub(crate) fn is_number(bits: usize) -> bool {
+    bits & STR_FAMILY == 0
+}
+
+/// `true` if the inline value is a string (string sub-family, not a constant).
+pub(crate) fn is_string(bits: usize) -> bool {
+    bits & STR_FAMILY != 0 && bits & CONST_FLAG == 0
 }

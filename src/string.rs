@@ -10,10 +10,11 @@ use std::cmp::Ordering;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::Hash;
 use std::ops::Deref;
+use std::ptr::NonNull;
 
 use crate::inline::string as inl;
 use crate::interned;
-use crate::value::IValue;
+use crate::value::{IValue, TypeTag};
 
 #[doc(hidden)]
 pub fn init_cache() {
@@ -25,27 +26,30 @@ pub fn init_cache() {
 impl IValue {
     pub(crate) fn new_string(s: &str) -> Self {
         if s.len() <= inl::CAPACITY {
-            inl::encode(s)
+            // Safety: `encode` returns valid inline-string bits.
+            unsafe { Self::new_inline(TypeTag::Inline, inl::encode(s)) }
         } else {
-            interned::intern(s)
+            // Safety: `intern` returns a live, aligned interned header pointer.
+            unsafe { Self::new_ptr(interned::intern(s), TypeTag::String) }
         }
     }
 
     pub(crate) fn string_len(&self) -> usize {
-        if self.is_inline_string() {
-            self.inline_string_len()
+        if self.type_tag() == TypeTag::Inline {
+            inl::len(self.ptr_usize())
         } else {
             // Safety: not an inline string, so it is interned.
-            unsafe { self.interned_len() }
+            unsafe { interned::len(self.ptr()) }
         }
     }
 
     pub(crate) fn string_bytes(&self) -> &[u8] {
-        if self.is_inline_string() {
-            self.inline_string_bytes()
+        if self.type_tag() == TypeTag::Inline {
+            // Safety: an inline string keeps its bytes within `self`'s storage.
+            unsafe { inl::bytes(NonNull::from(self).cast(), self.ptr_usize()) }
         } else {
             // Safety: not an inline string, so it is interned.
-            unsafe { self.interned_bytes() }
+            unsafe { interned::bytes(self.ptr()) }
         }
     }
 

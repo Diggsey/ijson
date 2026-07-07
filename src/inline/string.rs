@@ -5,11 +5,15 @@
 //! byte — the `Inline` tag (bits 0-2), the string sub-family flag (bit 3), and
 //! the length (bits 4-6), with bit 7 clear (set only for the `null`/`false`/
 //! `true` constants). The remaining bytes hold the UTF-8 data.
+//!
+//! These operate on the raw inline bits (and, for the borrowed bytes, a pointer
+//! to the value's own storage); they do not know about `IValue`.
 
-use super::INLINE_STR_FAMILY;
-use crate::value::{IValue, TypeTag};
+use std::ptr::NonNull;
 
-/// The number of string bytes that fit inline in a pointer-sized [`IValue`]:
+use super::STR_FAMILY;
+
+/// The number of string bytes that fit inline in a pointer-sized value:
 /// 7 on 64-bit platforms and 3 on 32-bit (one byte is the control byte).
 pub(crate) const CAPACITY: usize = std::mem::size_of::<usize>() - 1;
 
@@ -29,40 +33,27 @@ const CONTROL_OFFSET: usize = std::mem::size_of::<usize>() - 1;
 #[cfg(target_endian = "big")]
 const CHAR_OFFSET: usize = 0;
 
-/// Encodes a string of at most [`CAPACITY`] bytes directly into a value.
-pub(crate) fn encode(s: &str) -> IValue {
+/// The inline bits for a string of at most [`CAPACITY`] bytes.
+pub(crate) fn encode(s: &str) -> usize {
     debug_assert!(s.len() <= CAPACITY);
 
-    // Build the payload with the tag bits left clear; `IValue::new_inline` ORs
-    // in the `Inline` tag (0). The control byte sets the string sub-family flag
-    // and the length, and the remaining bytes carry the characters.
+    // The control byte sets the string sub-family flag and the length (the
+    // `Inline` tag bits are zero), and the remaining bytes carry the characters.
     let mut bytes = [0u8; std::mem::size_of::<usize>()];
-    bytes[CONTROL_OFFSET] = INLINE_STR_FAMILY as u8 | ((s.len() as u8) << LEN_SHIFT);
+    bytes[CONTROL_OFFSET] = STR_FAMILY as u8 | ((s.len() as u8) << LEN_SHIFT);
     bytes[CHAR_OFFSET..CHAR_OFFSET + s.len()].copy_from_slice(s.as_bytes());
-
-    // Safety: the string sub-family flag keeps the value non-zero, and the
-    // payload leaves the tag bits clear.
-    unsafe { IValue::new_inline(TypeTag::Inline, usize::from_ne_bytes(bytes)) }
+    usize::from_ne_bytes(bytes)
 }
 
-impl IValue {
-    /// The byte length of an inline string, read from the control byte.
-    ///
-    /// Only meaningful when this is an inline string.
-    pub(crate) fn inline_string_len(&self) -> usize {
-        (self.ptr_usize() >> LEN_SHIFT) & LEN_MASK
-    }
+/// The byte length of an inline string, read from the control byte.
+pub(crate) fn len(bits: usize) -> usize {
+    (bits >> LEN_SHIFT) & LEN_MASK
+}
 
-    /// The UTF-8 bytes of an inline string, borrowed from within `self`.
-    ///
-    /// Only valid when this is an inline string.
-    pub(crate) fn inline_string_bytes(&self) -> &[u8] {
-        let len = self.inline_string_len();
-        // Safety: an inline string keeps its characters within its own storage
-        // at `CHAR_OFFSET`, and `len <= CAPACITY` fits within the value.
-        unsafe {
-            let base = (self as *const IValue).cast::<u8>();
-            std::slice::from_raw_parts(base.add(CHAR_OFFSET), len)
-        }
-    }
+/// The UTF-8 bytes of an inline string, borrowed from `storage`.
+///
+/// Safety: `storage` must point at the value holding `bits` and remain valid
+/// for `'a`.
+pub(crate) unsafe fn bytes<'a>(storage: NonNull<u8>, bits: usize) -> &'a [u8] {
+    std::slice::from_raw_parts(storage.as_ptr().add(CHAR_OFFSET), len(bits))
 }

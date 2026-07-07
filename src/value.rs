@@ -12,10 +12,10 @@ use std::ptr::NonNull;
 use indexmap::IndexMap;
 
 use super::array::IArray;
-use super::inline::{FALSE_BITS, INLINE_CONST_FLAG, INLINE_STR_FAMILY, NULL_BITS, TRUE_BITS};
 use super::number::INumber;
 use super::object::IObject;
 use super::string::IString;
+use super::{inline, interned, scalar};
 
 /// Stores an arbitrary JSON value.
 ///
@@ -249,11 +249,11 @@ impl IValue {
     }
 
     /// JSON `null`.
-    pub const NULL: Self = unsafe { Self::new_inline(TypeTag::Inline, NULL_BITS) };
+    pub const NULL: Self = unsafe { Self::new_inline(TypeTag::Inline, inline::NULL) };
     /// JSON `false`.
-    pub const FALSE: Self = unsafe { Self::new_inline(TypeTag::Inline, FALSE_BITS) };
+    pub const FALSE: Self = unsafe { Self::new_inline(TypeTag::Inline, inline::FALSE) };
     /// JSON `true`.
-    pub const TRUE: Self = unsafe { Self::new_inline(TypeTag::Inline, TRUE_BITS) };
+    pub const TRUE: Self = unsafe { Self::new_inline(TypeTag::Inline, inline::TRUE) };
 
     pub(crate) fn ptr_usize(&self) -> usize {
         self.ptr.as_ptr() as usize
@@ -284,6 +284,17 @@ impl IValue {
         self.ptr_usize().into()
     }
 
+    /// Whether this value is a number stored inline. Combines the tag (this
+    /// module's concern) with the inline module's sub-family classification.
+    pub(crate) fn is_inline_number(&self) -> bool {
+        self.type_tag() == TypeTag::Inline && inline::is_number(self.ptr_usize())
+    }
+
+    /// Whether this value is a string stored inline rather than interned.
+    pub(crate) fn is_inline_string(&self) -> bool {
+        self.type_tag() == TypeTag::Inline && inline::is_string(self.ptr_usize())
+    }
+
     /// Returns the type of this value.
     #[must_use]
     pub fn type_(&self) -> ValueType {
@@ -296,18 +307,7 @@ impl IValue {
             TypeTag::String => ValueType::String,
             TypeTag::Array => ValueType::Array,
             TypeTag::Object => ValueType::Object,
-            TypeTag::Inline => {
-                let bits = self.ptr_usize();
-                if bits & INLINE_STR_FAMILY == 0 {
-                    ValueType::Number
-                } else if bits & INLINE_CONST_FLAG == 0 {
-                    ValueType::String
-                } else if bits == NULL_BITS {
-                    ValueType::Null
-                } else {
-                    ValueType::Bool
-                }
-            }
+            TypeTag::Inline => inline::value_type(self.ptr_usize()),
         }
     }
 
@@ -420,7 +420,7 @@ impl IValue {
     /// Returns `true` if this is the `null` value.
     #[must_use]
     pub fn is_null(&self) -> bool {
-        self.ptr_usize() == NULL_BITS
+        self.ptr_usize() == inline::NULL
     }
 
     // # Bool methods
@@ -428,19 +428,19 @@ impl IValue {
     #[must_use]
     pub fn is_bool(&self) -> bool {
         let bits = self.ptr_usize();
-        bits == TRUE_BITS || bits == FALSE_BITS
+        bits == inline::TRUE || bits == inline::FALSE
     }
 
     /// Returns `true` if this is the `true` value.
     #[must_use]
     pub fn is_true(&self) -> bool {
-        self.ptr_usize() == TRUE_BITS
+        self.ptr_usize() == inline::TRUE
     }
 
     /// Returns `true` if this is the `false` value.
     #[must_use]
     pub fn is_false(&self) -> bool {
-        self.ptr_usize() == FALSE_BITS
+        self.ptr_usize() == inline::FALSE
     }
 
     /// Converts this value to a `bool`.
@@ -742,8 +742,13 @@ impl Clone for IValue {
             TypeTag::NumberI64
             | TypeTag::NumberU64
             | TypeTag::NumberF64
-            | TypeTag::NumberReserved => unsafe { self.scalar_clone() },
-            TypeTag::String => unsafe { self.interned_clone() },
+            | TypeTag::NumberReserved => unsafe {
+                Self::new_ptr(scalar::alloc(scalar::read(self.ptr())), self.type_tag())
+            },
+            TypeTag::String => unsafe {
+                interned::bump_rc(self.ptr());
+                self.raw_copy()
+            },
             TypeTag::Array => unsafe { self.as_array_unchecked() }.clone_impl(),
             TypeTag::Object => unsafe { self.as_object_unchecked() }.clone_impl(),
         }
@@ -762,8 +767,8 @@ impl Drop for IValue {
             TypeTag::NumberI64
             | TypeTag::NumberU64
             | TypeTag::NumberF64
-            | TypeTag::NumberReserved => unsafe { self.scalar_drop() },
-            TypeTag::String => unsafe { self.interned_drop() },
+            | TypeTag::NumberReserved => unsafe { scalar::free(self.ptr()) },
+            TypeTag::String => unsafe { interned::release(self.ptr()) },
             TypeTag::Array => unsafe { self.as_array_unchecked_mut() }.drop_impl(),
             TypeTag::Object => unsafe { self.as_object_unchecked_mut() }.drop_impl(),
         }

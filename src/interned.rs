@@ -18,7 +18,6 @@ use lazy_static::lazy_static;
 
 use crate::alloc::{alloc_infallible, dealloc_infallible};
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
-use crate::value::{IValue, TypeTag};
 
 #[repr(C)]
 #[repr(align(8))]
@@ -112,11 +111,12 @@ impl WeakIString {
         // Safety: pointer is always valid
         unsafe { ThinRef::new(self.ptr) }
     }
-    fn upgrade(&self) -> IValue {
+    // Bumps the reference count and returns the (aligned) header pointer.
+    fn upgrade(&self) -> NonNull<u8> {
         unsafe {
             self.ptr.as_ref().rc.fetch_add(1, AtomicOrdering::Relaxed);
-            IValue::new_ptr(self.ptr.cast::<u8>(), TypeTag::String)
         }
+        self.ptr.cast::<u8>()
     }
 }
 
@@ -152,8 +152,9 @@ fn dealloc(ptr: NonNull<Header>) {
     }
 }
 
-/// Interns a string in the global cache, returning a heap string value.
-pub(crate) fn intern(s: &str) -> IValue {
+/// Interns a string in the global cache, returning the aligned header pointer
+/// (with the reference count already bumped).
+pub(crate) fn intern(s: &str) -> NonNull<u8> {
     let cache = &*STRING_CACHE;
     let shard_index = cache.determine_map(s);
 
@@ -172,70 +173,65 @@ pub(crate) fn intern(s: &str) -> IValue {
     }
 }
 
-impl IValue {
-    // Safety: must be a heap (interned) string.
-    fn interned_header<'a>(&'a self) -> ThinRef<'a, Header> {
-        unsafe { ThinRef::new(self.ptr().cast()) }
-    }
+// Safety (all functions): `ptr` must be the aligned header pointer of a live
+// interned string.
+unsafe fn as_header<'a>(ptr: NonNull<u8>) -> ThinRef<'a, Header> {
+    ThinRef::new(ptr.cast())
+}
 
-    /// The byte length of a heap string. Safety: must be a heap string.
-    pub(crate) unsafe fn interned_len(&self) -> usize {
-        self.interned_header().len()
-    }
+/// The byte length of an interned string.
+pub(crate) unsafe fn len(ptr: NonNull<u8>) -> usize {
+    as_header(ptr).len()
+}
 
-    /// The UTF-8 bytes of a heap string. Safety: must be a heap string.
-    pub(crate) unsafe fn interned_bytes(&self) -> &[u8] {
-        self.interned_header().bytes()
-    }
+/// The UTF-8 bytes of an interned string.
+pub(crate) unsafe fn bytes<'a>(ptr: NonNull<u8>) -> &'a [u8] {
+    as_header(ptr).bytes()
+}
 
-    /// Clones a heap string by bumping its reference count. Safety: must be a
-    /// heap string.
-    pub(crate) unsafe fn interned_clone(&self) -> IValue {
-        self.interned_header()
-            .rc
-            .fetch_add(1, AtomicOrdering::Relaxed);
-        self.raw_copy()
-    }
+/// Clones an interned string by bumping its reference count.
+pub(crate) unsafe fn bump_rc(ptr: NonNull<u8>) {
+    as_header(ptr).rc.fetch_add(1, AtomicOrdering::Relaxed);
+}
 
-    /// Drops a heap string, freeing it when the reference count reaches zero.
-    /// Safety: must be a heap string.
-    pub(crate) unsafe fn interned_drop(&mut self) {
-        let hd = self.interned_header();
+/// Releases a reference to an interned string, freeing it when the reference
+/// count reaches zero.
+pub(crate) unsafe fn release(ptr: NonNull<u8>) {
+    let hd = as_header(ptr);
 
-        // If the reference count is greater than 1, we can safely decrement it without
-        // locking the string cache.
-        let mut rc = hd.rc.load(AtomicOrdering::Relaxed);
-        while rc > 1 {
-            match hd.rc.compare_exchange_weak(
-                rc,
-                rc - 1,
-                AtomicOrdering::Relaxed,
-                AtomicOrdering::Relaxed,
-            ) {
-                Ok(_) => return,
-                Err(new_rc) => rc = new_rc,
-            }
+    // If the reference count is greater than 1, we can safely decrement it without
+    // locking the string cache.
+    let mut rc = hd.rc.load(AtomicOrdering::Relaxed);
+    while rc > 1 {
+        match hd.rc.compare_exchange_weak(
+            rc,
+            rc - 1,
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(new_rc) => rc = new_rc,
         }
+    }
 
-        // Slow path: we observed a reference count of 1, so we need to lock the string cache
-        let cache = &*STRING_CACHE;
-        // Safety: the number of shards is fixed
-        let shard = cache.shards().get_unchecked(hd.shard_index());
-        let mut guard = shard.write();
-        if hd.rc.fetch_sub(1, AtomicOrdering::Relaxed) == 1 {
-            // Reference count reached zero, free the string
-            assert!(guard.remove(hd.str()).is_some());
+    // Slow path: we observed a reference count of 1, so we need to lock the string cache
+    let cache = &*STRING_CACHE;
+    // Safety: the number of shards is fixed
+    let shard = cache.shards().get_unchecked(hd.shard_index());
+    let mut guard = shard.write();
+    if hd.rc.fetch_sub(1, AtomicOrdering::Relaxed) == 1 {
+        // Reference count reached zero, free the string
+        assert!(guard.remove(hd.str()).is_some());
 
-            // Shrink the shard if it's mostly empty.
-            // The second condition is necessary because `HashMap` sometimes
-            // reports a capacity of zero even when it's still backed by an
-            // allocation.
-            if guard.len() * 3 < guard.capacity() || guard.is_empty() {
-                guard.shrink_to_fit();
-            }
-            drop(guard);
-
-            dealloc(self.ptr().cast());
+        // Shrink the shard if it's mostly empty.
+        // The second condition is necessary because `HashMap` sometimes
+        // reports a capacity of zero even when it's still backed by an
+        // allocation.
+        if guard.len() * 3 < guard.capacity() || guard.is_empty() {
+            guard.shrink_to_fit();
         }
+        drop(guard);
+
+        dealloc(ptr.cast());
     }
 }

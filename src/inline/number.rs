@@ -28,8 +28,6 @@
 
 use std::convert::TryFrom;
 
-use crate::value::{IValue, TypeTag};
-
 const EXP_SHIFT: u32 = 4;
 const MANTISSA_SHIFT: u32 = 8;
 /// Bits available for the signed inline mantissa (56 on 64-bit, 24 on 32-bit).
@@ -62,20 +60,20 @@ pub(crate) fn code_has_dot(code: usize) -> bool {
     code <= 6 || code == 8
 }
 
-fn encode(mantissa: i64, code: usize) -> IValue {
-    let payload = ((mantissa as usize) << MANTISSA_SHIFT) | (code << EXP_SHIFT);
-    // Safety: tag Inline (0) with the number sub-family (bit 3 clear); the low 3
-    // bits are clear and canonical values never encode (mantissa 0, code 0), so
-    // the result is non-zero.
-    unsafe { IValue::new_inline(TypeTag::Inline, payload) }
+// The inline bits for `mantissa * 10^exp` with the given exponent code. The
+// `Inline` tag (0) and number sub-family (bit 3) are both zero here, so the low
+// bits are clear; canonical values never encode (mantissa 0, code 0), so the
+// result is non-zero.
+fn encode(mantissa: i64, code: usize) -> usize {
+    ((mantissa as usize) << MANTISSA_SHIFT) | (code << EXP_SHIFT)
 }
 
-pub(crate) fn mantissa(v: &IValue) -> i64 {
+pub(crate) fn mantissa(bits: usize) -> i64 {
     // Arithmetic shift sign-extends the mantissa from the top bits.
-    ((v.ptr_usize() as isize) >> MANTISSA_SHIFT) as i64
+    ((bits as isize) >> MANTISSA_SHIFT) as i64
 }
-pub(crate) fn code(v: &IValue) -> usize {
-    (v.ptr_usize() >> EXP_SHIFT) & 0xf
+pub(crate) fn code(bits: usize) -> usize {
+    (bits >> EXP_SHIFT) & 0xf
 }
 
 // --- f64 decomposition ------------------------------------------------------
@@ -131,7 +129,7 @@ fn f64_scaled_integer(m: u64, e2: i32, neg: bool, k: u32) -> Option<i128> {
 
 /// Encodes an integer with no decimal point, factoring out trailing zeros as
 /// needed to fit the mantissa.
-pub(crate) fn encode_int(value: i128) -> Option<IValue> {
+pub(crate) fn encode_int(value: i128) -> Option<usize> {
     let mut m = value;
     let mut exp = 0i32;
     loop {
@@ -148,7 +146,7 @@ pub(crate) fn encode_int(value: i128) -> Option<IValue> {
 
 /// Encodes an integer-valued number that had a decimal point (`"N.0"`); these
 /// only fit inline at exponent 0.
-fn encode_int_dot(value: i128) -> Option<IValue> {
+fn encode_int_dot(value: i128) -> Option<usize> {
     if fits_mantissa(value) {
         Some(encode(value as i64, 8))
     } else {
@@ -157,7 +155,7 @@ fn encode_int_dot(value: i128) -> Option<IValue> {
 }
 
 /// Encodes a finite `f64` inline as an exact decimal, if it fits.
-pub(crate) fn encode_f64(value: f64) -> Option<IValue> {
+pub(crate) fn encode_f64(value: f64) -> Option<usize> {
     if value == 0.0 {
         // 0.0 / -0.0: integer zero that had a decimal point.
         return Some(encode(0, 8));

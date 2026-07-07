@@ -66,8 +66,12 @@ fn cmp_num(a: &NumVal, b: &NumVal) -> Ordering {
 /// public `IValue` accessors check first).
 impl IValue {
     pub(crate) fn new_number_i64(value: i64) -> Self {
-        inl::encode_int(i128::from(value))
-            .unwrap_or_else(|| scalar::new(TypeTag::NumberI64, value as u64))
+        match inl::encode_int(i128::from(value)) {
+            // Safety: `encode_int` returns valid inline bits; the scalar
+            // allocation is aligned and non-null.
+            Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
+            None => unsafe { Self::new_ptr(scalar::alloc(value as u64), TypeTag::NumberI64) },
+        }
     }
 
     pub(crate) fn new_number_u64(value: u64) -> Self {
@@ -75,19 +79,30 @@ impl IValue {
             Self::new_number_i64(v)
         } else {
             // Too large for `i64`; still prefer inline if it factors, else heap `u64`.
-            inl::encode_int(i128::from(value))
-                .unwrap_or_else(|| scalar::new(TypeTag::NumberU64, value))
+            match inl::encode_int(i128::from(value)) {
+                Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
+                None => unsafe { Self::new_ptr(scalar::alloc(value), TypeTag::NumberU64) },
+            }
         }
     }
 
     pub(crate) fn new_number_f64(value: f64) -> Self {
-        inl::encode_f64(value).unwrap_or_else(|| scalar::new(TypeTag::NumberF64, value.to_bits()))
+        match inl::encode_f64(value) {
+            Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
+            None => unsafe { Self::new_ptr(scalar::alloc(value.to_bits()), TypeTag::NumberF64) },
+        }
+    }
+
+    // Safety: reads the heap scalar payload; only called for heap number tags.
+    unsafe fn scalar_bits(&self) -> u64 {
+        scalar::read(self.ptr())
     }
 
     fn number_num_val(&self) -> NumVal {
-        if self.is_inline_number() {
-            let m = inl::mantissa(self);
-            let exp = inl::code_exp(inl::code(self));
+        if self.type_tag() == TypeTag::Inline {
+            let bits = self.ptr_usize();
+            let m = inl::mantissa(bits);
+            let exp = inl::code_exp(inl::code(bits));
             match inl::decimal_to_i128(m, exp) {
                 Some(i) => NumVal::Int(i),
                 None => NumVal::Float(inl::decimal_to_f64_lossy(m, exp)),
@@ -131,8 +146,9 @@ impl IValue {
     }
 
     pub(crate) fn number_to_f64(&self) -> Option<f64> {
-        if self.is_inline_number() {
-            inl::decimal_to_f64_exact(inl::mantissa(self), inl::code_exp(inl::code(self)))
+        if self.type_tag() == TypeTag::Inline {
+            let bits = self.ptr_usize();
+            inl::decimal_to_f64_exact(inl::mantissa(bits), inl::code_exp(inl::code(bits)))
         } else {
             // Safety: not inline, so it is a heap scalar number.
             unsafe {
@@ -152,8 +168,9 @@ impl IValue {
     }
 
     pub(crate) fn number_to_f64_lossy(&self) -> f64 {
-        if self.is_inline_number() {
-            inl::decimal_to_f64_lossy(inl::mantissa(self), inl::code_exp(inl::code(self)))
+        if self.type_tag() == TypeTag::Inline {
+            let bits = self.ptr_usize();
+            inl::decimal_to_f64_lossy(inl::mantissa(bits), inl::code_exp(inl::code(bits)))
         } else {
             // Safety: not inline, so it is a heap scalar number.
             unsafe {
@@ -167,8 +184,8 @@ impl IValue {
     }
 
     pub(crate) fn number_has_decimal_point(&self) -> bool {
-        if self.is_inline_number() {
-            inl::code_has_dot(inl::code(self))
+        if self.type_tag() == TypeTag::Inline {
+            inl::code_has_dot(inl::code(self.ptr_usize()))
         } else {
             self.type_tag() == TypeTag::NumberF64
         }
