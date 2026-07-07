@@ -11,11 +11,24 @@ use std::ptr::NonNull;
 #[cfg(feature = "indexmap")]
 use indexmap::IndexMap;
 
-use super::array::{self, IArray};
-use super::number::{self, INumber};
-use super::object::{self, IObject};
-use super::string::{self, IString};
-use super::{inline, interned, scalar};
+// Representations and per-type logic all live as submodules of `value`, so this
+// module (which owns `IValue`) delegates *down* into them for every low-level
+// operation. The public wrapper types (`IArray`, `INumber`, `IObject`,
+// `IString`) live in the top-level modules and only ever appear here as the
+// return types of the destructuring API — never as the target of a low-level
+// representation operation.
+pub(crate) mod array;
+pub(crate) mod inline;
+pub(crate) mod interned;
+pub(crate) mod number;
+pub(crate) mod object;
+pub(crate) mod scalar;
+pub(crate) mod string;
+
+use crate::array::IArray;
+use crate::number::INumber;
+use crate::object::IObject;
+use crate::string::IString;
 
 /// Stores an arbitrary JSON value.
 ///

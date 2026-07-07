@@ -1,69 +1,26 @@
-//! Functionality relating to the JSON array type
+//! Functionality relating to the JSON array type.
+//!
+//! [`IArray`] is the public *type* for JSON arrays. It is a thin, transparent
+//! wrapper around an [`IValue`] that is known to be an array; the heap layout and
+//! every operation on it live in the [`crate::value::array`] representation
+//! module. Each method here simply delegates *down* to that module.
+//!
+//! # Safety
+//!
+//! `IArray` maintains the invariant that its wrapped `IValue` (`self.0`) always
+//! has the `Array` tag, which is exactly the precondition the `value::array`
+//! functions require. Every delegation below relies on that invariant.
 
-use std::alloc::{Layout, LayoutError};
 use std::borrow::{Borrow, BorrowMut};
-use std::cmp::{self, Ordering};
+use std::cmp::Ordering;
 use std::fmt::{self, Debug, Formatter};
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::iter::FromIterator;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
-use std::ptr::NonNull;
 use std::slice::SliceIndex;
 
-use crate::alloc::{alloc_infallible, dealloc_infallible, realloc_infallible};
-use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
-
-use super::value::{IValue, TypeTag};
-
-#[repr(C)]
-#[repr(align(8))]
-struct Header {
-    len: usize,
-    cap: usize,
-}
-
-trait HeaderRef<'a>: ThinRefExt<'a, Header> {
-    fn array_ptr(&self) -> *const IValue {
-        // Safety: pointers to the end of structs are allowed
-        unsafe { self.ptr().add(1).cast::<IValue>() }
-    }
-    fn items_slice(&self) -> &'a [IValue] {
-        // Safety: Header `len` must be accurate
-        unsafe { std::slice::from_raw_parts(self.array_ptr(), self.len) }
-    }
-}
-
-trait HeaderMut<'a>: ThinMutExt<'a, Header> {
-    fn array_ptr_mut(mut self) -> *mut IValue {
-        // Safety: pointers to the end of structs are allowed
-        unsafe { self.ptr_mut().add(1).cast::<IValue>() }
-    }
-    fn items_slice_mut(self) -> &'a mut [IValue] {
-        // Safety: Header `len` must be accurate
-        let len = self.len;
-        unsafe { std::slice::from_raw_parts_mut(self.array_ptr_mut(), len) }
-    }
-    // Safety: Space must already be allocated for the item
-    unsafe fn push(&mut self, item: IValue) {
-        let index = self.len;
-        self.reborrow().array_ptr_mut().add(index).write(item);
-        self.len += 1;
-    }
-    fn pop(&mut self) -> Option<IValue> {
-        if self.len == 0 {
-            None
-        } else {
-            self.len -= 1;
-            let index = self.len;
-
-            // Safety: We just checked that an item exists
-            unsafe { Some(self.reborrow().array_ptr_mut().add(index).read()) }
-        }
-    }
-}
-
-impl<'a, T: ThinRefExt<'a, Header>> HeaderRef<'a> for T {}
-impl<'a, T: ThinMutExt<'a, Header>> HeaderMut<'a> for T {}
+use crate::value::array as repr;
+use crate::value::IValue;
 
 /// Iterator over [`IValue`]s returned from [`IArray::into_iter`]
 pub struct IntoIter {
@@ -101,110 +58,33 @@ pub struct IArray(pub(crate) IValue);
 
 value_subtype_impls!(IArray, into_array, as_array, as_array_mut);
 
-// Array-representation operations that the root value type delegates to. Each
-// takes an `&IValue` known to be an array (`IArray` is a transparent wrapper).
-// Safety (all): `v` must be an array.
-unsafe fn as_array(v: &IValue) -> &IArray {
-    &*(v as *const IValue).cast::<IArray>()
-}
-unsafe fn as_array_mut(v: &mut IValue) -> &mut IArray {
-    &mut *(v as *mut IValue).cast::<IArray>()
-}
-
-pub(crate) unsafe fn clone(v: &IValue) -> IValue {
-    as_array(v).clone_impl()
-}
-pub(crate) unsafe fn drop(v: &mut IValue) {
-    as_array_mut(v).drop_impl();
-}
-pub(crate) unsafe fn hash<H: Hasher>(v: &IValue, state: &mut H) {
-    as_array(v).hash(state);
-}
-pub(crate) unsafe fn eq(a: &IValue, b: &IValue) -> bool {
-    as_array(a) == as_array(b)
-}
-pub(crate) unsafe fn cmp(a: &IValue, b: &IValue) -> Option<Ordering> {
-    as_array(a).partial_cmp(as_array(b))
-}
-pub(crate) unsafe fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-    Debug::fmt(as_array(v), f)
-}
-
-static EMPTY_HEADER: Header = Header { len: 0, cap: 0 };
-
 impl IArray {
-    fn layout(cap: usize) -> Result<Layout, LayoutError> {
-        Ok(Layout::new::<Header>()
-            .extend(Layout::array::<usize>(cap)?)?
-            .0
-            .pad_to_align())
-    }
-
-    fn alloc(cap: usize) -> NonNull<Header> {
-        unsafe {
-            let ptr = alloc_infallible(Self::layout(cap).unwrap()).cast::<Header>();
-            ptr.write(Header { len: 0, cap });
-            ptr
-        }
-    }
-
-    fn realloc(ptr: NonNull<Header>, new_cap: usize) -> NonNull<Header> {
-        unsafe {
-            let old_layout = Self::layout(ptr.as_ref().cap).unwrap();
-            let new_layout = Self::layout(new_cap).unwrap();
-            let mut ptr = realloc_infallible(ptr.cast(), old_layout, new_layout).cast::<Header>();
-            ptr.as_mut().cap = new_cap;
-            ptr
-        }
-    }
-
-    fn dealloc(ptr: NonNull<Header>) {
-        unsafe {
-            let layout = Self::layout(ptr.as_ref().cap).unwrap();
-            dealloc_infallible(ptr.cast(), layout);
-        }
-    }
-
     /// Constructs a new empty `IArray`. Does not allocate.
     #[must_use]
     pub fn new() -> Self {
-        unsafe { IArray(IValue::new_ref(&EMPTY_HEADER, TypeTag::Array)) }
+        IArray(repr::new())
     }
 
     /// Constructs a new `IArray` with the specified capacity. At least that many items
     /// can be added to the array without reallocating.
     #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
-        if cap == 0 {
-            Self::new()
-        } else {
-            IArray(unsafe { IValue::new_ptr(Self::alloc(cap).cast(), TypeTag::Array) })
-        }
+        IArray(repr::with_capacity(cap))
     }
 
-    fn header<'a>(&'a self) -> ThinRef<'a, Header> {
-        unsafe { ThinRef::new(self.0.ptr().cast()) }
-    }
-
-    // Safety: must not be static
-    unsafe fn header_mut<'a>(&'a mut self) -> ThinMut<'a, Header> {
-        ThinMut::new(self.0.ptr().cast())
-    }
-
-    fn is_static(&self) -> bool {
-        self.capacity() == 0
-    }
     /// Returns the capacity of the array. This is the maximum number of items the array
     /// can hold without reallocating.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.header().cap
+        // Safety: `self.0` is always an array.
+        unsafe { repr::capacity(&self.0) }
     }
 
     /// Returns the number of items currently stored in the array.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.header().len
+        // Safety: `self.0` is always an array.
+        unsafe { repr::len(&self.0) }
     }
 
     /// Returns `true` if the array is empty.
@@ -216,51 +96,27 @@ impl IArray {
     /// Borrows a slice of [`IValue`]s from the array
     #[must_use]
     pub fn as_slice(&self) -> &[IValue] {
-        self.header().items_slice()
+        // Safety: `self.0` is always an array.
+        unsafe { repr::as_slice(&self.0) }
     }
 
     /// Borrows a mutable slice of [`IValue`]s from the array
     pub fn as_mut_slice(&mut self) -> &mut [IValue] {
-        if self.is_static() {
-            &mut []
-        } else {
-            unsafe { self.header_mut().items_slice_mut() }
-        }
-    }
-    fn resize_internal(&mut self, cap: usize) {
-        if self.is_static() || cap == 0 {
-            *self = Self::with_capacity(cap);
-        } else {
-            unsafe {
-                let new_ptr = Self::realloc(self.0.ptr().cast(), cap);
-                self.0.set_ptr(new_ptr.cast());
-            }
-        }
+        // Safety: `self.0` is always an array.
+        unsafe { repr::as_mut_slice(&mut self.0) }
     }
 
     /// Reserves space for at least this many additional items.
     pub fn reserve(&mut self, additional: usize) {
-        let hd = self.header();
-        let current_capacity = hd.cap;
-        let desired_capacity = hd.len.checked_add(additional).unwrap();
-        if current_capacity >= desired_capacity {
-            return;
-        }
-        self.resize_internal(cmp::max(current_capacity * 2, desired_capacity.max(4)));
+        // Safety: `self.0` is always an array.
+        unsafe { repr::reserve(&mut self.0, additional) }
     }
 
     /// Truncates the array by removing items until it is no longer than the specified
     /// length. The capacity is unchanged.
     pub fn truncate(&mut self, len: usize) {
-        if self.is_static() {
-            return;
-        }
-        unsafe {
-            let mut hd = self.header_mut();
-            while hd.len > len {
-                hd.pop();
-            }
-        }
+        // Safety: `self.0` is always an array.
+        unsafe { repr::truncate(&mut self.0, len) }
     }
 
     /// Removes all items from the array. The capacity is unchanged.
@@ -273,19 +129,8 @@ impl IArray {
     /// arrays, insertions near the front will be slow as it will require shifting
     /// a large number of items.
     pub fn insert(&mut self, index: usize, item: impl Into<IValue>) {
-        self.reserve(1);
-
-        unsafe {
-            // Safety: cannot be static after calling `reserve`
-            let mut hd = self.header_mut();
-            assert!(index <= hd.len);
-
-            // Safety: We just reserved enough space for at least one extra item
-            hd.push(item.into());
-            if index < hd.len {
-                hd.items_slice_mut()[index..].rotate_right(1);
-            }
-        }
+        // Safety: `self.0` is always an array.
+        unsafe { repr::insert(&mut self.0, index, item.into()) }
     }
 
     /// Removes and returns the item at the specified index from the array. Any
@@ -297,16 +142,8 @@ impl IArray {
     ///
     /// If the index is outside the array bounds, `None` is returned.
     pub fn remove(&mut self, index: usize) -> Option<IValue> {
-        if index < self.len() {
-            // Safety: cannot be static if index <= len
-            unsafe {
-                let mut hd = self.header_mut();
-                hd.reborrow().items_slice_mut()[index..].rotate_left(1);
-                hd.pop()
-            }
-        } else {
-            None
-        }
+        // Safety: `self.0` is always an array.
+        unsafe { repr::remove(&mut self.0, index) }
     }
 
     /// Removes and returns the item at the specified index from the array by
@@ -318,70 +155,28 @@ impl IArray {
     ///
     /// If the index is outside the array bounds, `None` is returned.
     pub fn swap_remove(&mut self, index: usize) -> Option<IValue> {
-        if index < self.len() {
-            // Safety: cannot be static if index <= len
-            unsafe {
-                let mut hd = self.header_mut();
-                let last_index = hd.len - 1;
-                hd.reborrow().items_slice_mut().swap(index, last_index);
-                hd.pop()
-            }
-        } else {
-            None
-        }
+        // Safety: `self.0` is always an array.
+        unsafe { repr::swap_remove(&mut self.0, index) }
     }
 
     /// Pushes a new item onto the back of the array.
     pub fn push(&mut self, item: impl Into<IValue>) {
-        self.reserve(1);
-        // Safety: We just reserved enough space for at least one extra item
-        unsafe {
-            self.header_mut().push(item.into());
-        }
+        // Safety: `self.0` is always an array.
+        unsafe { repr::push(&mut self.0, item.into()) }
     }
 
     /// Pops the last item from the array and returns it. If the array is
     /// empty, `None` is returned.
     pub fn pop(&mut self) -> Option<IValue> {
-        if self.is_static() {
-            None
-        } else {
-            // Safety: not static
-            unsafe { self.header_mut().pop() }
-        }
+        // Safety: `self.0` is always an array.
+        unsafe { repr::pop(&mut self.0) }
     }
 
     /// Shrinks the memory allocation used by the array such that its
     /// capacity becomes equal to its length.
     pub fn shrink_to_fit(&mut self) {
-        self.resize_internal(self.len());
-    }
-
-    pub(crate) fn clone_impl(&self) -> IValue {
-        let src = self.header().items_slice();
-        let l = src.len();
-        let mut res = Self::with_capacity(l);
-
-        if l > 0 {
-            unsafe {
-                // Safety: we cannot be static if len > 0
-                let mut hd = res.header_mut();
-                for v in src {
-                    // Safety: we reserved enough space at the start
-                    hd.push(v.clone());
-                }
-            }
-        }
-        res.0
-    }
-    pub(crate) fn drop_impl(&mut self) {
-        self.clear();
-        if !self.is_static() {
-            unsafe {
-                Self::dealloc(self.0.ptr().cast());
-                self.0.set_ref(&EMPTY_HEADER);
-            }
-        }
+        // Safety: `self.0` is always an array.
+        unsafe { repr::shrink_to_fit(&mut self.0) }
     }
 }
 
@@ -425,7 +220,8 @@ impl BorrowMut<[IValue]> for IArray {
 
 impl Hash for IArray {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.as_slice().hash(state);
+        // Safety: `self.0` is always an array.
+        unsafe { repr::hash(&self.0, state) }
     }
 }
 
@@ -455,22 +251,16 @@ impl AsRef<[IValue]> for IArray {
 
 impl PartialEq for IArray {
     fn eq(&self, other: &Self) -> bool {
-        if self.0.raw_eq(&other.0) {
-            true
-        } else {
-            self.as_slice() == other.as_slice()
-        }
+        // Safety: `self.0` and `other.0` are always arrays.
+        unsafe { repr::eq(&self.0, &other.0) }
     }
 }
 
 impl Eq for IArray {}
 impl PartialOrd for IArray {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self.0.raw_eq(&other.0) {
-            Some(Ordering::Equal)
-        } else {
-            self.as_slice().partial_cmp(other.as_slice())
-        }
+        // Safety: `self.0` and `other.0` are always arrays.
+        unsafe { repr::cmp(&self.0, &other.0) }
     }
 }
 

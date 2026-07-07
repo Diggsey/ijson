@@ -1,75 +1,23 @@
 //! Functionality relating to the JSON string type.
 //!
-//! `IString` is a *type* that spans two representations — an inline short string
-//! (see [`crate::inline::string`]) and a heap interned string (see
-//! [`crate::interned`]). The string-specific logic lives as free functions here
-//! which pick the representation by tag; both the root value type and the thin
-//! `IString` wrapper delegate to them.
+//! [`IString`] is the public *type* for JSON strings. It is a thin, transparent
+//! wrapper around an [`IValue`] that is known to be a string; the actual logic
+//! (construction, byte/str access, comparison, formatting) lives in the
+//! [`crate::value::string`] module and is shared with `IValue` itself. A string
+//! can be stored either inline or as a heap interned string, but that choice is
+//! entirely hidden behind this type.
 
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::Hash;
 use std::ops::Deref;
-use std::ptr::NonNull;
 
-use crate::inline::string as inl;
-use crate::interned;
-use crate::value::{IValue, TypeTag};
+use crate::value::string as str_repr;
+use crate::value::IValue;
 
 #[doc(hidden)]
 pub fn init_cache() {
-    interned::init_cache();
-}
-
-// String-type operations spanning the inline and interned representations. These
-// are free functions on `&IValue` (not methods on `IValue`); the root value type
-// delegates to them, and `IString` delegates to them too. Each assumes the value
-// is a string.
-
-pub(crate) fn new(s: &str) -> IValue {
-    if s.len() <= inl::CAPACITY {
-        // Safety: `encode` returns valid inline-string bits.
-        unsafe { IValue::new_inline(TypeTag::Inline, inl::encode(s)) }
-    } else {
-        // Safety: `intern` returns a live, aligned interned header pointer.
-        unsafe { IValue::new_ptr(interned::intern(s), TypeTag::String) }
-    }
-}
-
-pub(crate) fn len(v: &IValue) -> usize {
-    if v.is_inline() {
-        inl::len(v.ptr_usize())
-    } else {
-        // Safety: not an inline string, so it is interned.
-        unsafe { interned::len(v.ptr()) }
-    }
-}
-
-pub(crate) fn bytes(v: &IValue) -> &[u8] {
-    if v.is_inline() {
-        // Safety: an inline string keeps its bytes within `v`'s storage.
-        unsafe { inl::bytes(NonNull::from(v).cast(), v.ptr_usize()) }
-    } else {
-        // Safety: not an inline string, so it is interned.
-        unsafe { interned::bytes(v.ptr()) }
-    }
-}
-
-pub(crate) fn as_str(v: &IValue) -> &str {
-    // Safety: inline and interned string bytes are both valid UTF-8.
-    unsafe { std::str::from_utf8_unchecked(bytes(v)) }
-}
-
-pub(crate) fn cmp(a: &IValue, b: &IValue) -> Ordering {
-    if a.raw_eq(b) {
-        Ordering::Equal
-    } else {
-        as_str(a).cmp(as_str(b))
-    }
-}
-
-pub(crate) fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-    Debug::fmt(as_str(v), f)
+    str_repr::init_cache();
 }
 
 /// The `IString` type is an interned, immutable string, and is where this crate
@@ -105,13 +53,13 @@ impl IString {
     /// global cache. Longer strings are interned in the global string cache.
     #[must_use]
     pub fn intern(s: &str) -> Self {
-        IString(new(s))
+        IString(str_repr::new(s))
     }
 
     /// Returns the length (in bytes) of this string.
     #[must_use]
     pub fn len(&self) -> usize {
-        len(&self.0)
+        str_repr::len(&self.0)
     }
 
     /// Returns `true` if this is the empty string "".
@@ -123,13 +71,13 @@ impl IString {
     /// Obtains a `&str` from this `IString`. This is a cheap operation.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        as_str(&self.0)
+        str_repr::as_str(&self.0)
     }
 
     /// Obtains a byte slice from this `IString`. This is a cheap operation.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        bytes(&self.0)
+        str_repr::bytes(&self.0)
     }
 
     /// Returns the empty string.
@@ -273,6 +221,7 @@ impl Display for IString {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::inline::string::CAPACITY;
 
     // A string long enough to always be heap-interned on any platform.
     const LONG_A: &str = "interned_string_a";
@@ -309,7 +258,7 @@ mod tests {
             "no".into(),
             "yes".into(),
             "é".into(), // 2-byte UTF-8, fits on 32-bit and 64-bit
-            "x".repeat(inl::CAPACITY),
+            "x".repeat(CAPACITY),
         ];
         cases.dedup();
 
@@ -332,8 +281,8 @@ mod tests {
     #[mockalloc::test]
     fn inline_heap_boundary() {
         // At the capacity boundary, one side is inline and the other is heap.
-        let inline = "x".repeat(inl::CAPACITY);
-        let heap = "x".repeat(inl::CAPACITY + 1);
+        let inline = "x".repeat(CAPACITY);
+        let heap = "x".repeat(CAPACITY + 1);
 
         let a = IString::intern(&inline);
         let b = IString::intern(&heap);
