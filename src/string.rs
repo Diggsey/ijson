@@ -2,22 +2,21 @@
 //!
 //! [`IString`] is the public *type* for JSON strings. It is a thin, transparent
 //! wrapper around an [`IValue`] that is known to be a string; the actual logic
-//! (construction, byte/str access, comparison, formatting) lives in the
-//! [`crate::value::string`] module and is shared with `IValue` itself. A string
-//! can be stored either inline or as a heap interned string, but that choice is
-//! entirely hidden behind this type.
+//! (construction, byte/str access, comparison, formatting) lives on `IValue` as
+//! its `new_string`/`string_*` methods and is shared with `IValue` itself. A
+//! string can be stored either inline or as a heap interned string, but that
+//! choice is entirely hidden behind this type.
 
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::Hash;
 use std::ops::Deref;
 
-use crate::value::string as str_repr;
 use crate::value::IValue;
 
 #[doc(hidden)]
 pub fn init_cache() {
-    str_repr::init_cache();
+    crate::value::interned::init_cache();
 }
 
 /// The `IString` type is an interned, immutable string, and is where this crate
@@ -53,13 +52,13 @@ impl IString {
     /// global cache. Longer strings are interned in the global string cache.
     #[must_use]
     pub fn intern(s: &str) -> Self {
-        IString(str_repr::new(s))
+        IString(IValue::new_string(s))
     }
 
     /// Returns the length (in bytes) of this string.
     #[must_use]
     pub fn len(&self) -> usize {
-        str_repr::len(&self.0)
+        self.0.string_len()
     }
 
     /// Returns `true` if this is the empty string "".
@@ -71,13 +70,13 @@ impl IString {
     /// Obtains a `&str` from this `IString`. This is a cheap operation.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        str_repr::as_str(&self.0)
+        self.0.string_as_str()
     }
 
     /// Obtains a byte slice from this `IString`. This is a cheap operation.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        str_repr::bytes(&self.0)
+        self.0.string_bytes()
     }
 
     /// Returns the empty string.

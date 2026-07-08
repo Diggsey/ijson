@@ -2,10 +2,10 @@
 //!
 //! [`INumber`] is the public *type* for JSON numbers. It is a thin, transparent
 //! wrapper around an [`IValue`] that is known to be a number; all of the actual
-//! logic (construction, conversions, comparison, hashing) lives in the
-//! [`crate::value::number`] module and is shared with `IValue` itself. The
-//! number can be stored either inline or as a heap scalar, but that choice is
-//! entirely hidden behind this type.
+//! logic (construction, conversions, comparison, hashing) lives on `IValue` as
+//! its `new_*`/`number_*` methods and is shared with `IValue` itself. The number
+//! can be stored either inline or as a heap scalar, but that choice is entirely
+//! hidden behind this type.
 #![allow(clippy::float_cmp)]
 
 use std::cmp::Ordering;
@@ -13,7 +13,6 @@ use std::convert::TryFrom;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 
-use crate::value::number as num;
 use crate::value::IValue;
 
 /// The `INumber` type represents a JSON number. It is decoupled from any specific
@@ -43,128 +42,128 @@ impl INumber {
     /// Returns the number zero (without a decimal point). Does not allocate.
     #[must_use]
     pub fn zero() -> Self {
-        INumber(num::new_i64(0))
+        INumber(IValue::new_i64(0))
     }
     /// Returns the number one (without a decimal point). Does not allocate.
     #[must_use]
     pub fn one() -> Self {
-        INumber(num::new_i64(1))
+        INumber(IValue::new_i64(1))
     }
 
     /// Converts this number to an i64 if it can be represented exactly.
     #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
-        num::to_i64(&self.0)
+        self.0.number_to_i64()
     }
     /// Converts this number to a u64 if it can be represented exactly.
     #[must_use]
     pub fn to_u64(&self) -> Option<u64> {
-        num::to_u64(&self.0)
+        self.0.number_to_u64()
     }
     /// Converts this number to an f64 if it can be represented exactly.
     #[must_use]
     pub fn to_f64(&self) -> Option<f64> {
-        num::to_f64(&self.0)
+        self.0.number_to_f64()
     }
     /// Converts this number to an f32 if it can be represented exactly.
     #[must_use]
     pub fn to_f32(&self) -> Option<f32> {
-        num::to_f32(&self.0)
+        self.0.number_to_f32()
     }
     /// Converts this number to an i32 if it can be represented exactly.
     #[must_use]
     pub fn to_i32(&self) -> Option<i32> {
-        num::to_i32(&self.0)
+        self.0.number_to_i32()
     }
     /// Converts this number to a u32 if it can be represented exactly.
     #[must_use]
     pub fn to_u32(&self) -> Option<u32> {
-        num::to_u32(&self.0)
+        self.0.number_to_u32()
     }
     /// Converts this number to an isize if it can be represented exactly.
     #[must_use]
     pub fn to_isize(&self) -> Option<isize> {
-        num::to_isize(&self.0)
+        self.0.number_to_isize()
     }
     /// Converts this number to a usize if it can be represented exactly.
     #[must_use]
     pub fn to_usize(&self) -> Option<usize> {
-        num::to_usize(&self.0)
+        self.0.number_to_usize()
     }
     /// Converts this number to an f64, potentially losing precision in the process.
     #[must_use]
     pub fn to_f64_lossy(&self) -> f64 {
-        num::to_f64_lossy(&self.0)
+        self.0.number_to_f64_lossy()
     }
     /// Converts this number to an f32, potentially losing precision in the process.
     #[must_use]
     pub fn to_f32_lossy(&self) -> f32 {
-        num::to_f32_lossy(&self.0)
+        self.0.number_to_f32_lossy()
     }
 
     /// This allows distinguishing between `1.0` and `1` in the original JSON.
     /// Numeric operations will otherwise treat these two values as equivalent.
     #[must_use]
     pub fn has_decimal_point(&self) -> bool {
-        num::has_decimal_point(&self.0)
+        self.0.number_has_decimal_point()
     }
 }
 
 impl Hash for INumber {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        num::hash(&self.0, state);
+        self.0.number_hash(state);
     }
 }
 
 impl From<u64> for INumber {
     fn from(v: u64) -> Self {
-        INumber(num::new_u64(v))
+        INumber(IValue::new_u64(v))
     }
 }
 impl From<u32> for INumber {
     fn from(v: u32) -> Self {
-        INumber(num::new_u64(u64::from(v)))
+        INumber(IValue::new_u64(u64::from(v)))
     }
 }
 impl From<u16> for INumber {
     fn from(v: u16) -> Self {
-        INumber(num::new_u64(u64::from(v)))
+        INumber(IValue::new_u64(u64::from(v)))
     }
 }
 impl From<u8> for INumber {
     fn from(v: u8) -> Self {
-        INumber(num::new_u64(u64::from(v)))
+        INumber(IValue::new_u64(u64::from(v)))
     }
 }
 impl From<usize> for INumber {
     fn from(v: usize) -> Self {
-        INumber(num::new_u64(v as u64))
+        INumber(IValue::new_u64(v as u64))
     }
 }
 
 impl From<i64> for INumber {
     fn from(v: i64) -> Self {
-        INumber(num::new_i64(v))
+        INumber(IValue::new_i64(v))
     }
 }
 impl From<i32> for INumber {
     fn from(v: i32) -> Self {
-        INumber(num::new_i64(i64::from(v)))
+        INumber(IValue::new_i64(i64::from(v)))
     }
 }
 impl From<i16> for INumber {
     fn from(v: i16) -> Self {
-        INumber(num::new_i64(i64::from(v)))
+        INumber(IValue::new_i64(i64::from(v)))
     }
 }
 impl From<i8> for INumber {
     fn from(v: i8) -> Self {
-        INumber(num::new_i64(i64::from(v)))
+        INumber(IValue::new_i64(i64::from(v)))
     }
 }
 impl From<isize> for INumber {
     fn from(v: isize) -> Self {
-        INumber(num::new_i64(v as i64))
+        INumber(IValue::new_i64(v as i64))
     }
 }
 
@@ -172,7 +171,7 @@ impl TryFrom<f64> for INumber {
     type Error = ();
     fn try_from(v: f64) -> Result<Self, ()> {
         if v.is_finite() {
-            Ok(INumber(num::new_f64(v)))
+            Ok(INumber(IValue::new_f64(v)))
         } else {
             Err(())
         }
@@ -183,7 +182,7 @@ impl TryFrom<f32> for INumber {
     type Error = ();
     fn try_from(v: f32) -> Result<Self, ()> {
         if v.is_finite() {
-            Ok(INumber(num::new_f64(f64::from(v))))
+            Ok(INumber(IValue::new_f64(f64::from(v))))
         } else {
             Err(())
         }
@@ -245,7 +244,7 @@ impl PartialEq for INumber {
 impl Eq for INumber {}
 impl Ord for INumber {
     fn cmp(&self, other: &Self) -> Ordering {
-        num::cmp(&self.0, &other.0)
+        self.0.number_cmp(&other.0)
     }
 }
 impl PartialOrd for INumber {
@@ -256,7 +255,7 @@ impl PartialOrd for INumber {
 
 impl Debug for INumber {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        num::debug(&self.0, f)
+        self.0.number_debug(f)
     }
 }
 

@@ -33,6 +33,13 @@ const CONTROL_OFFSET: usize = std::mem::size_of::<usize>() - 1;
 #[cfg(target_endian = "big")]
 const CHAR_OFFSET: usize = 0;
 
+/// The inline bits for `s` if it fits inline (at most [`CAPACITY`] bytes), or
+/// `None` if it is too long and must be stored some other way. This is how the
+/// value layer asks the inline representation whether it can hold a string.
+pub(crate) fn try_encode(s: &str) -> Option<usize> {
+    (s.len() <= CAPACITY).then(|| encode(s))
+}
+
 /// The inline bits for a string of at most [`CAPACITY`] bytes.
 pub(crate) fn encode(s: &str) -> usize {
     debug_assert!(s.len() <= CAPACITY);
