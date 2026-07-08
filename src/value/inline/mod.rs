@@ -44,11 +44,11 @@ pub(crate) fn value_type(bits: usize) -> ValueType {
 }
 
 /// `true` if the inline value is a number (number sub-family).
-pub(crate) fn is_number(bits: usize) -> bool {
+fn is_number(bits: usize) -> bool {
     bits & STR_FAMILY == 0
 }
 
 /// `true` if the inline value is a string (string sub-family, not a constant).
-pub(crate) fn is_string(bits: usize) -> bool {
+fn is_string(bits: usize) -> bool {
     bits & STR_FAMILY != 0 && bits & CONST_FLAG == 0
 }

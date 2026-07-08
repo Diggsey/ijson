@@ -360,17 +360,19 @@ pub(crate) unsafe fn drop(v: &mut IValue) {
     v.set_ref(&EMPTY_HEADER);
 }
 
-pub(crate) unsafe fn hash<H: Hasher>(v: &IValue, state: &mut H) {
+pub(crate) unsafe fn hash(v: &IValue, state: &mut dyn Hasher) {
     let split = header(v).split();
-    split.items.len().hash(state);
+    state.write_usize(split.items.len());
 
+    // Order-independent: sum each entry's hash (computed with a local, concrete
+    // hasher), so objects that differ only in insertion order still hash equal.
     let mut total_hash = 0_u64;
     for kvp in split.items {
         let mut h = DefaultHasher::new();
         (&kvp.key, &kvp.value).hash(&mut h);
         total_hash = total_hash.wrapping_add(h.finish());
     }
-    total_hash.hash(state);
+    state.write_u64(total_hash);
 }
 
 pub(crate) unsafe fn eq(a: &IValue, b: &IValue) -> bool {
