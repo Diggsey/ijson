@@ -9,22 +9,25 @@
 //!   bits 8.. : signed mantissa
 //!
 //! The value is `mantissa * 10^exp`. The 4-bit exponent code encodes both the
-//! power-of-ten exponent and, for integers, whether the source had a decimal
-//! point:
+//! power-of-ten exponent and whether the number has a decimal point:
 //!
-//!   code  0..=6  -> exp -7..=-1  (fractional; always has a decimal point)
-//!   code  7      -> exp 0, with decimal point ("N.0")
-//!   code  8..=14 -> exp 1..=7    (integer; no decimal point)
-//!   code  15     -> exp 0, no decimal point (plain integer)
+//!   code  0..=6  -> exp -7..=-1  (fraction; decimal point)
+//!   code  7      -> exp 0        (integer-valued float "N.0"; decimal point)
+//!   code  8..=14 -> exp 1..=7    (integer-valued float in e-notation, trailing
+//!                                 zeros factored out; decimal point)
+//!   code  15     -> exp 0        (plain integer; no decimal point)
 //!
-//! Every code except the reserved `15` is simply `exp + 7` ([`EXP_BIAS`]), so a
-//! value can recover its exponent with a single subtraction. This is why the two
-//! encodings of exponent 0 are *not* adjacent: a decimal point only ever needs
-//! distinguishing at exponent 0 (a larger integer that had a decimal point
-//! cannot fit the mantissa in fractional form and falls back to a heap `f64`),
-//! so the plain integer at exp 0 is banished to a single reserved code rather
-//! than sitting next to `"N.0"`. A decimal point then corresponds exactly to
-//! `code <= 7` (all such values have `exp <= 0`).
+//! Every code except the reserved `15` is simply `exp + 7` ([`EXP_BIAS`]), so the
+//! exponent is a single subtraction, and every such value has a decimal point:
+//! `has_decimal_point` is exactly `code != 15`.
+//!
+//! Only a plain integer lacks a decimal point, and only at exponent 0. A plain
+//! integer too large for the mantissa is *not* factored into a positive exponent
+//! — that would collide with the e-notation float codes and mislabel it as
+//! having a decimal point (which drives serialization back to a float). Instead
+//! it spills to a heap `i64`/`u64`. Positive exponents are therefore reserved for
+//! floats: `1e18` factors to `mantissa 1e11, exp 7` and stays inline, whereas the
+//! integer `1000000000000000000` goes to the heap.
 //!
 //! The reserved code is the *maximum* (`15`), not `0`: the plain-integer path is
 //! the only one that emits a zero mantissa (integer zero), so placing it at code
@@ -46,10 +49,9 @@ const MANTISSA_BITS: u32 = usize::BITS - MANTISSA_SHIFT;
 const EXP_BIAS: i32 = 7;
 /// Reserved (maximum) code for a plain integer at exponent 0 with no decimal
 /// point. It is the max rather than `0` so that integer zero (mantissa 0) never
-/// becomes the all-zero niche pattern; see the module docs.
+/// becomes the all-zero niche pattern; see the module docs. It is also the *only*
+/// code without a decimal point.
 const INT_EXP0_CODE: usize = 15;
-/// Codes `<= HAS_DOT_MAX` (== `EXP_BIAS`, exp `<= 0`) carry a decimal point.
-const HAS_DOT_MAX: usize = EXP_BIAS as usize;
 
 const POW5: [u128; 8] = [1, 5, 25, 125, 625, 3125, 15625, 78125];
 
@@ -77,8 +79,8 @@ fn code_exp(code: usize) -> i32 {
     }
 }
 fn code_has_dot(code: usize) -> bool {
-    // The reserved code (15) is excluded automatically, as it exceeds HAS_DOT_MAX.
-    code <= HAS_DOT_MAX
+    // Every code but the reserved plain-integer code carries a decimal point.
+    code != INT_EXP0_CODE
 }
 
 // The inline bits for `mantissa * 10^exp` with the given exponent code. The
@@ -148,30 +150,28 @@ fn f64_scaled_integer(m: u64, e2: i32, neg: bool, k: u32) -> Option<i128> {
 
 // --- Inline encoders (return `None` if the value doesn't fit inline) ---------
 
-/// Encodes an integer with no decimal point, factoring out trailing zeros as
-/// needed to fit the mantissa.
+/// Encodes a plain integer (no decimal point). Only exponent 0 is available to
+/// integers — positive inline exponents are reserved for floats — so a value too
+/// large for the mantissa does not fit inline and is stored on the heap instead.
 pub(crate) fn encode_int(value: i128) -> Option<usize> {
+    fits_mantissa(value).then(|| encode(value as i64, exp_code(0, false)))
+}
+
+/// Encodes an integer-valued *float* (`"N.0"`, or e-notation such as `1e18`),
+/// factoring out trailing zeros into a positive exponent as needed to fit the
+/// mantissa. These carry a decimal point, so they use the `dot` codes.
+fn encode_int_float(value: i128) -> Option<usize> {
     let mut m = value;
     let mut exp = 0i32;
     loop {
         if fits_mantissa(m) {
-            return Some(encode(m as i64, exp_code(exp, false)));
+            return Some(encode(m as i64, exp_code(exp, true)));
         }
         if exp >= 7 || m % 10 != 0 {
             return None;
         }
         m /= 10;
         exp += 1;
-    }
-}
-
-/// Encodes an integer-valued number that had a decimal point (`"N.0"`); these
-/// only fit inline at exponent 0.
-fn encode_int_dot(value: i128) -> Option<usize> {
-    if fits_mantissa(value) {
-        Some(encode(value as i64, exp_code(0, true)))
-    } else {
-        None
     }
 }
 
@@ -182,9 +182,10 @@ pub(crate) fn encode_f64(value: f64) -> Option<usize> {
         return Some(encode(0, exp_code(0, true)));
     }
     let (m, e2, neg) = integer_decode(value);
-    // Integer-valued float: store at exp 0 with the decimal-point flag.
+    // Integer-valued float: store with the decimal-point flag, factoring trailing
+    // zeros into a positive exponent for large magnitudes (e.g. `1e18`).
     if let Some(int) = f64_as_integer(m, e2, neg) {
-        return encode_int_dot(int);
+        return encode_int_float(int);
     }
     // Otherwise fractional: the smallest `k` making `value * 10^k` an exact
     // integer gives the canonical (minimal-fraction) form.
@@ -308,27 +309,19 @@ mod tests {
 
     #[test]
     fn exponent_codes_are_linear_and_niche_safe() {
-        // Values that carry a decimal point (fractionals and "N.0") all have
-        // exp <= 0 and land on codes 0..=7, so the exponent is a plain
-        // `code - EXP_BIAS`.
-        for exp in -7..=0 {
+        // Every value with a decimal point spans exp -7..=7 and is linear in the
+        // exponent: `exp = code - EXP_BIAS`. None of them is the reserved code.
+        for exp in -7..=7 {
             let c = exp_code(exp, true);
-            assert!(c <= HAS_DOT_MAX, "dot value exp {} -> code {}", exp, c);
+            assert_ne!(c, INT_EXP0_CODE);
             assert_eq!(code_exp(c), exp);
-            assert!(code_has_dot(c));
+            assert!(code_has_dot(c), "dot value exp {} -> code {}", exp, c);
         }
-        // Integers (no decimal point) occur at exp 0..=7. The exp-0 case is the
-        // reserved max code; the rest are linear.
-        for exp in 0..=7 {
-            let c = exp_code(exp, false);
-            assert_eq!(code_exp(c), exp);
-            assert!(!code_has_dot(c), "integer exp {} -> code {}", exp, c);
-        }
-
-        // The two exp-0 encodings are distinct and non-adjacent: the plain
-        // integer is the reserved max code, "N.0" keeps the linear code.
+        // The only code without a decimal point is the reserved plain-integer
+        // code, used only at exponent 0 and kept apart from the "N.0" code.
         assert_eq!(exp_code(0, false), INT_EXP0_CODE);
-        assert_eq!(exp_code(0, true), EXP_BIAS as usize);
+        assert_eq!(code_exp(INT_EXP0_CODE), 0);
+        assert!(!code_has_dot(INT_EXP0_CODE));
         assert_ne!(exp_code(0, false), exp_code(0, true));
 
         // Integer zero (and 0.0) must never be the all-zero bit pattern that is

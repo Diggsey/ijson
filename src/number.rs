@@ -324,8 +324,11 @@ mod tests {
         for v in [0u64, 1, i64::MAX as u64, i64::MAX as u64 + 1, u64::MAX] {
             assert_eq!(INumber::from(v).to_u64(), Some(v), "{}", v);
         }
-        // A large round integer that exceeds the mantissa still factors into the
-        // inline exponent (the threshold differs by pointer width).
+        // A large round *integer* that exceeds the mantissa does not fit inline:
+        // positive inline exponents are reserved for floats, so it spills to the
+        // heap (but still round-trips). The same magnitude as an e-notation
+        // *float* does factor into a positive inline exponent. The threshold
+        // differs by pointer width.
         let big_round = if usize::BITS == 64 {
             10i64.pow(18)
         } else {
@@ -333,8 +336,14 @@ mod tests {
         };
         for v in [big_round, -big_round] {
             let n = INumber::from(v);
-            assert!(n.0.is_inline(), "{} should factor inline", v);
+            assert!(!n.0.is_inline(), "{} (integer) should be on the heap", v);
             assert_eq!(n.to_i64(), Some(v));
+            assert!(!n.has_decimal_point());
+
+            let f = INumber::try_from(v as f64).unwrap();
+            assert!(f.0.is_inline(), "{} (float) should factor inline", v);
+            assert_eq!(f.to_i64(), Some(v));
+            assert!(f.has_decimal_point());
         }
         // Assorted large integers round-trip regardless of representation.
         for v in [
@@ -400,5 +409,29 @@ mod tests {
         assert!(got.windows(2).all(|w| w[0] <= w[1]), "{:?}", got);
         assert_eq!(got[0], i64::MIN as f64);
         assert_eq!(*got.last().unwrap(), u64::MAX as f64);
+    }
+
+    #[test]
+    fn large_integer_and_enotation_float_serialize_distinctly() {
+        // A plain large integer carries no decimal point and serializes back as
+        // an integer, even though it now lives on the heap.
+        let int: IValue = serde_json::from_str("1000000000000000000").unwrap();
+        assert!(!int.as_number().unwrap().has_decimal_point());
+        assert_eq!(serde_json::to_string(&int).unwrap(), "1000000000000000000");
+
+        // The same magnitude written in e-notation is a float: it factors into a
+        // positive inline exponent, still reports a decimal point, and serializes
+        // back as a float.
+        let float: IValue = serde_json::from_str("1e18").unwrap();
+        assert!(float.as_number().unwrap().has_decimal_point());
+        let s = serde_json::to_string(&float).unwrap();
+        assert!(
+            s.contains('.') || s.contains('e') || s.contains('E'),
+            "expected a float rendering, got {}",
+            s
+        );
+
+        // Regardless of representation they are numerically equal.
+        assert_eq!(int, float);
     }
 }
