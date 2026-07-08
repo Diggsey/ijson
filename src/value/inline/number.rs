@@ -101,6 +101,19 @@ fn code(bits: usize) -> usize {
 
 // --- f64 decomposition ------------------------------------------------------
 
+/// `x << n`, or `None` if the shift would overflow a `u128`. `u128::checked_shl`
+/// only rejects shift *amounts* `>= 128`; it silently drops the high bits when
+/// the *value* overflows, so it cannot be used to detect a too-large product.
+fn shl_checked(x: u128, n: u32) -> Option<u128> {
+    if x == 0 {
+        Some(0)
+    } else if n <= x.leading_zeros() {
+        Some(x << n)
+    } else {
+        None
+    }
+}
+
 /// Decomposes a finite, non-zero `f64` into `(mantissa, exp2, negative)` such
 /// that `value == (-1)^negative * mantissa * 2^exp2`.
 fn integer_decode(value: f64) -> (u64, i32, bool) {
@@ -118,7 +131,7 @@ fn integer_decode(value: f64) -> (u64, i32, bool) {
 /// If `value` (= `sign * m * 2^e2`) is an exact integer, returns it.
 fn f64_as_integer(m: u64, e2: i32, neg: bool) -> Option<i128> {
     let mag: u128 = if e2 >= 0 {
-        (u128::from(m)).checked_shl(e2 as u32)?
+        shl_checked(u128::from(m), e2 as u32)?
     } else {
         let sh = (-e2) as u32;
         if sh >= 64 || m & ((1u64 << sh) - 1) != 0 {
@@ -134,9 +147,7 @@ fn f64_as_integer(m: u64, e2: i32, neg: bool) -> Option<i128> {
 fn f64_scaled_integer(m: u64, e2: i32, neg: bool, k: u32) -> Option<i128> {
     let e = e2 + k as i32;
     let mag: u128 = if e >= 0 {
-        u128::from(m)
-            .checked_mul(POW5[k as usize])?
-            .checked_shl(e as u32)?
+        shl_checked(u128::from(m).checked_mul(POW5[k as usize])?, e as u32)?
     } else {
         let sh = (-e) as u32;
         if sh >= 64 || m & ((1u64 << sh) - 1) != 0 {
@@ -329,5 +340,29 @@ mod tests {
         assert_eq!(encode_int(0), Some(encode(0, INT_EXP0_CODE)));
         assert_ne!(encode_int(0), Some(0));
         assert_ne!(encode_f64(0.0), Some(0));
+    }
+
+    #[test]
+    fn large_magnitudes_never_misencode() {
+        // Regression: `u128::checked_shl` silently drops overflow bits, so
+        // `encode_f64(2^127)` once wrongly produced an inline zero. Whenever a
+        // value encodes inline it must decode back to exactly the input; values
+        // that cannot be represented exactly inline must spill to the heap
+        // (`None`) rather than to a wrong value.
+        for &x in &[
+            0.5_f64,
+            1e18,
+            1e22,
+            1.7014118346046923e38, // 2^127
+            f64::MAX,
+            1e39,
+            6.022e23,
+            9.223372036854776e18,
+            f64::MIN_POSITIVE,
+        ] {
+            if let Some(bits) = encode_f64(x) {
+                assert_eq!(to_f64_lossy(bits), x, "{:e} misencoded inline", x);
+            }
+        }
     }
 }
