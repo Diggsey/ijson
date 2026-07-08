@@ -43,6 +43,9 @@ mod ser;
 pub use de::from_value;
 pub use ser::to_value;
 
+#[cfg(test)]
+mod numeric_edge_cases;
+
 #[cfg(all(test, not(miri)))]
 mod tests {
     use mockalloc::Mockalloc;
