@@ -1074,47 +1074,220 @@ impl IValue {
     }
 }
 
-impl Clone for IValue {
-    fn clone(&self) -> Self {
-        // Dispatch on the raw representation tag rather than the semantic
-        // `type_()`. Inline values own no heap storage, so they are copied
-        // bit-for-bit; only the pointer representations delegate to their module.
+/// The low-level operations each value *representation* provides. Every one is
+/// fundamentally per-representation: cloning an inline value is a bit-copy, a
+/// scalar allocates, an interned string bumps a refcount, and so on. `IValue`'s
+/// `Clone`/`Drop`/`PartialEq`/`PartialOrd`/`Debug` impls therefore find the
+/// representation once, via [`IValue::repr`], and delegate to a trait method.
+///
+/// `Hash` is the sole exception: its `<H: Hasher>` method cannot be a
+/// trait-object method (and erasing the hasher to `&mut dyn Hasher` would make
+/// every write virtual), so it stays a direct match.
+///
+/// # Safety
+///
+/// Every method's `IValue` arguments must belong to this representation. For the
+/// binary `eq`/`partial_cmp`, the first argument is this representation and the
+/// second is guaranteed by the caller to be the same JSON *type* (possibly a
+/// different representation of it — e.g. an inline vs heap number).
+trait ValueRepr {
+    unsafe fn clone(&self, v: &IValue) -> IValue;
+    unsafe fn drop(&self, v: &mut IValue);
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool;
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering>;
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result;
+}
+
+// Inline values (null, bool, inline number, inline string) own no heap storage,
+// so they all clone by copying the pointer word and need no drop.
+struct NullRepr;
+impl ValueRepr for NullRepr {
+    unsafe fn clone(&self, v: &IValue) -> IValue {
+        IValue { ptr: v.ptr }
+    }
+    unsafe fn drop(&self, _v: &mut IValue) {}
+    unsafe fn eq(&self, _a: &IValue, _b: &IValue) -> bool {
+        true
+    }
+    unsafe fn partial_cmp(&self, _a: &IValue, _b: &IValue) -> Option<Ordering> {
+        Some(Ordering::Equal)
+    }
+    unsafe fn debug(&self, _v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str("null")
+    }
+}
+
+struct BoolRepr;
+impl ValueRepr for BoolRepr {
+    unsafe fn clone(&self, v: &IValue) -> IValue {
+        IValue { ptr: v.ptr }
+    }
+    unsafe fn drop(&self, _v: &mut IValue) {}
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
+        a.raw_eq(b)
+    }
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
+        a.is_true().partial_cmp(&b.is_true())
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        Debug::fmt(&v.is_true(), f)
+    }
+}
+
+// A number stored as an inline decimal and one stored as a heap scalar are
+// distinct representations that clone/drop differently, but share the (numeric,
+// cross-representation) comparison, ordering and formatting.
+struct InlineNumberRepr;
+impl ValueRepr for InlineNumberRepr {
+    unsafe fn clone(&self, v: &IValue) -> IValue {
+        IValue { ptr: v.ptr }
+    }
+    unsafe fn drop(&self, _v: &mut IValue) {}
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
+        a.number_cmp(b) == Ordering::Equal
+    }
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
+        Some(a.number_cmp(b))
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        v.number_debug(f)
+    }
+}
+
+struct ScalarRepr;
+impl ValueRepr for ScalarRepr {
+    unsafe fn clone(&self, v: &IValue) -> IValue {
+        IValue::new_ptr(scalar::alloc(scalar::read(v.ptr())), v.type_tag())
+    }
+    unsafe fn drop(&self, v: &mut IValue) {
+        scalar::free(v.ptr());
+    }
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
+        a.number_cmp(b) == Ordering::Equal
+    }
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
+        Some(a.number_cmp(b))
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        v.number_debug(f)
+    }
+}
+
+// Likewise inline vs interned strings differ only in clone/drop; equality is a
+// bit/pointer comparison and ordering/formatting go through shared string ops.
+struct InlineStringRepr;
+impl ValueRepr for InlineStringRepr {
+    unsafe fn clone(&self, v: &IValue) -> IValue {
+        IValue { ptr: v.ptr }
+    }
+    unsafe fn drop(&self, _v: &mut IValue) {}
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
+        a.raw_eq(b)
+    }
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
+        Some(a.string_cmp(b))
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        v.string_debug(f)
+    }
+}
+
+struct InternedRepr;
+impl ValueRepr for InternedRepr {
+    unsafe fn clone(&self, v: &IValue) -> IValue {
+        interned::bump_rc(v.ptr());
+        v.raw_copy()
+    }
+    unsafe fn drop(&self, v: &mut IValue) {
+        interned::release(v.ptr());
+    }
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
+        a.raw_eq(b)
+    }
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
+        Some(a.string_cmp(b))
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        v.string_debug(f)
+    }
+}
+
+struct ArrayRepr;
+impl ValueRepr for ArrayRepr {
+    unsafe fn clone(&self, v: &IValue) -> IValue {
+        array::clone(v)
+    }
+    unsafe fn drop(&self, v: &mut IValue) {
+        array::drop(v);
+    }
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
+        array::eq(a, b)
+    }
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
+        array::cmp(a, b)
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        array::debug(v, f)
+    }
+}
+
+struct ObjectRepr;
+impl ValueRepr for ObjectRepr {
+    unsafe fn clone(&self, v: &IValue) -> IValue {
+        object::clone(v)
+    }
+    unsafe fn drop(&self, v: &mut IValue) {
+        object::drop(v);
+    }
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
+        object::eq(a, b)
+    }
+    unsafe fn partial_cmp(&self, _a: &IValue, _b: &IValue) -> Option<Ordering> {
+        None // objects are unordered
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        object::debug(v, f)
+    }
+}
+
+impl IValue {
+    /// The representation this value is stored in — the single dispatch point the
+    /// trait impls delegate through. Returning a `&'static dyn` built from a match
+    /// of concrete zero-sized markers lets the optimizer devirtualize each arm
+    /// back to a direct call once this is inlined.
+    #[inline]
+    fn repr(&self) -> &'static dyn ValueRepr {
         match self.type_tag() {
-            TypeTag::Inline => Self { ptr: self.ptr },
-            // Safety: the tag identifies the representation
+            TypeTag::Inline => match inline::value_type(self.ptr_usize()) {
+                ValueType::Null => &NullRepr,
+                ValueType::Bool => &BoolRepr,
+                ValueType::Number => &InlineNumberRepr,
+                ValueType::String => &InlineStringRepr,
+                // Inline values are never arrays or objects.
+                ValueType::Array | ValueType::Object => unreachable!(),
+            },
             TypeTag::NumberI64
             | TypeTag::NumberU64
             | TypeTag::NumberF64
-            | TypeTag::NumberReserved => unsafe {
-                Self::new_ptr(scalar::alloc(scalar::read(self.ptr())), self.type_tag())
-            },
-            TypeTag::String => unsafe {
-                interned::bump_rc(self.ptr());
-                self.raw_copy()
-            },
-            TypeTag::Array => unsafe { array::clone(self) },
-            TypeTag::Object => unsafe { object::clone(self) },
+            | TypeTag::NumberReserved => &ScalarRepr,
+            TypeTag::String => &InternedRepr,
+            TypeTag::Array => &ArrayRepr,
+            TypeTag::Object => &ObjectRepr,
         }
+    }
+}
+
+impl Clone for IValue {
+    fn clone(&self) -> Self {
+        // Safety: `repr()` selects this value's own representation.
+        unsafe { self.repr().clone(self) }
     }
 }
 
 impl Drop for IValue {
     fn drop(&mut self) {
-        // Dispatch on the raw representation tag. Inline values own no heap
-        // storage and need no cleanup; only the pointer representations free
-        // their allocation. Deliberately avoids `type_()` (a semantic query) so
-        // teardown can never re-enter type classification.
-        match self.type_tag() {
-            TypeTag::Inline => {}
-            // Safety: the tag identifies the representation
-            TypeTag::NumberI64
-            | TypeTag::NumberU64
-            | TypeTag::NumberF64
-            | TypeTag::NumberReserved => unsafe { scalar::free(self.ptr()) },
-            TypeTag::String => unsafe { interned::release(self.ptr()) },
-            TypeTag::Array => unsafe { array::drop(self) },
-            TypeTag::Object => unsafe { object::drop(self) },
-        }
+        // Safety: `repr()` selects this value's own representation.
+        unsafe { self.repr().drop(self) }
     }
 }
 
@@ -1145,20 +1318,10 @@ impl Hash for IValue {
 
 impl PartialEq for IValue {
     fn eq(&self, other: &Self) -> bool {
-        let t = self.type_();
-        if t != other.type_() {
-            return false;
-        }
-        // Safety: both values are of type `t`; only that type's op is called
-        unsafe {
-            match t {
-                // `null`, booleans and (canonical) strings compare by bits
-                ValueType::Null | ValueType::Bool | ValueType::String => self.raw_eq(other),
-                ValueType::Number => self.number_cmp(other) == Ordering::Equal,
-                ValueType::Array => array::eq(self, other),
-                ValueType::Object => object::eq(self, other),
-            }
-        }
+        // Different JSON types are never equal. Within a type, the representation
+        // handles any cross-representation comparison (e.g. inline vs heap number).
+        // Safety: both operands share a type.
+        self.type_() == other.type_() && unsafe { self.repr().eq(self, other) }
     }
 }
 
@@ -1167,18 +1330,10 @@ impl PartialOrd for IValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let (t1, t2) = (self.type_(), other.type_());
         if t1 == t2 {
-            // Safety: both values are of type `t1`; only that type's op is called
-            unsafe {
-                match t1 {
-                    ValueType::Null => Some(Ordering::Equal),
-                    ValueType::Bool => self.is_true().partial_cmp(&other.is_true()),
-                    ValueType::String => Some(self.string_cmp(other)),
-                    ValueType::Number => Some(self.number_cmp(other)),
-                    ValueType::Array => array::cmp(self, other),
-                    ValueType::Object => None,
-                }
-            }
+            // Safety: both operands share a type.
+            unsafe { self.repr().partial_cmp(self, other) }
         } else {
+            // Different types are ordered by the `ValueType` enum.
             t1.partial_cmp(&t2)
         }
     }
@@ -1299,21 +1454,8 @@ impl<I: ValueIndex> IndexMut<I> for IValue {
 
 impl Debug for IValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // Debug is a semantic (display) operation, so it dispatches on the JSON
-        // type; `type_()` delegates inline classification to the `inline` module.
-        // Debug is a semantic (display) operation, so it dispatches on the JSON
-        // type and delegates to the owning module.
-        // Safety: each arm only borrows the value as the type it just checked.
-        unsafe {
-            match self.type_() {
-                ValueType::Null => f.write_str("null"),
-                ValueType::Bool => Debug::fmt(&self.is_true(), f),
-                ValueType::Number => self.number_debug(f),
-                ValueType::String => self.string_debug(f),
-                ValueType::Array => array::debug(self, f),
-                ValueType::Object => object::debug(self, f),
-            }
-        }
+        // Safety: `repr()` selects this value's own representation.
+        unsafe { self.repr().debug(self, f) }
     }
 }
 
