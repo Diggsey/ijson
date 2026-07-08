@@ -37,7 +37,6 @@
 #![allow(clippy::float_cmp)]
 
 use std::convert::TryFrom;
-use std::hash::{Hash, Hasher};
 
 const EXP_SHIFT: u32 = 4;
 const MANTISSA_SHIFT: u32 = 8;
@@ -164,8 +163,9 @@ fn f64_scaled_integer(m: u64, e2: i32, neg: bool, k: u32) -> Option<i128> {
 /// Encodes a plain integer (no decimal point). Only exponent 0 is available to
 /// integers — positive inline exponents are reserved for floats — so a value too
 /// large for the mantissa does not fit inline and is stored on the heap instead.
-pub(crate) fn encode_int(value: i128) -> Option<usize> {
-    fits_mantissa(value).then(|| encode(value as i64, exp_code(0, false)))
+pub(crate) fn encode_int(value: i64) -> Option<usize> {
+    let limit = 1i64 << (MANTISSA_BITS - 1);
+    (value >= -limit && value < limit).then(|| encode(value, exp_code(0, false)))
 }
 
 /// Encodes an integer-valued *float* (`"N.0"`, or e-notation such as `1e18`),
@@ -214,19 +214,24 @@ pub(crate) fn encode_f64(value: f64) -> Option<usize> {
 
 // --- Decimal decoders -------------------------------------------------------
 
-/// The exact integer value of `mantissa * 10^exp`, if it is an integer.
-fn decimal_to_i128(m: i64, exp: i32) -> Option<i128> {
+/// The exact integer value of `mantissa * 10^exp` if it is an integer that fits
+/// `i64`; `None` if it is fractional or out of `i64` range.
+fn decimal_to_i64(m: i64, exp: i32) -> Option<i64> {
     if exp >= 0 {
-        i128::from(m).checked_mul(10i128.pow(exp as u32))
+        m.checked_mul(10i64.pow(exp as u32))
     } else {
-        let div = 10i128.pow((-exp) as u32);
-        let m = i128::from(m);
-        if m % div == 0 {
-            Some(m / div)
-        } else {
-            None
-        }
+        let div = 10i64.pow((-exp) as u32);
+        (m % div == 0).then_some(m / div)
     }
+}
+
+/// The exact integer value of `mantissa * 10^exp`, if it is an integer. Used for
+/// the f64-exactness check, where the value can exceed `i64` (a large
+/// integer-valued float, up to ~`3.6e23`).
+fn decimal_to_i128(m: i64, exp: i32) -> Option<i128> {
+    // `exp` is non-negative here (fractional values divide instead); the product
+    // can exceed `i64` but always fits `i128`.
+    i128::from(m).checked_mul(10i128.pow(exp as u32))
 }
 
 fn decimal_to_f64_lossy(m: i64, exp: i32) -> f64 {
@@ -240,13 +245,14 @@ fn decimal_to_f64_lossy(m: i64, exp: i32) -> f64 {
     }
 }
 
-/// `true` if `v` is exactly representable as an `f64`.
+/// `true` if the `i64` value `v` is exactly representable as an `f64`.
+fn i64_fits_f64(v: i64) -> bool {
+    v == 0 || 64 - v.unsigned_abs().leading_zeros() - v.unsigned_abs().trailing_zeros() <= 53
+}
+
+/// `true` if the (larger) `i128` value `v` is exactly representable as an `f64`.
 fn i128_fits_f64(v: i128) -> bool {
-    if v == 0 {
-        return true;
-    }
-    let a = v.unsigned_abs();
-    128 - a.leading_zeros() - a.trailing_zeros() <= 53
+    v == 0 || 128 - v.unsigned_abs().leading_zeros() - v.unsigned_abs().trailing_zeros() <= 53
 }
 
 /// The exact `f64` value of `mantissa * 10^exp`, if it is exactly representable.
@@ -255,20 +261,20 @@ fn decimal_to_f64_exact(m: i64, exp: i32) -> Option<f64> {
         return Some(0.0);
     }
     if exp >= 0 {
+        // The value can exceed `i64` here (a large integer-valued float).
         let v = decimal_to_i128(m, exp)?;
         i128_fits_f64(v).then_some(v as f64)
     } else {
+        // Fractional: `value == num / 2^k` after dividing out `5^k`. Everything
+        // fits `i64` (`m` is the mantissa, `5^k <= 5^7`), and dividing an exact
+        // integer by a power of two is itself exact.
         let k = (-exp) as u32;
-        let p5 = 5i128.pow(k);
-        let mi = i128::from(m);
-        if mi % p5 != 0 {
+        let p5 = 5i64.pow(k);
+        if m % p5 != 0 {
             return None;
         }
-        let num = mi / p5; // value == num / 2^k, a dyadic rational
-                           // Dividing an exactly-representable integer by a power of two is exact
-                           // (it only adjusts the exponent), and avoids the non-deterministic
-                           // `powi`.
-        i128_fits_f64(num).then_some(num as f64 / (1u64 << k) as f64)
+        let num = m / p5;
+        i64_fits_f64(num).then_some(num as f64 / (1u64 << k) as f64)
     }
 }
 
@@ -278,10 +284,13 @@ fn decode(bits: usize) -> (i64, i32) {
     (mantissa(bits), code_exp(code(bits)))
 }
 
-/// The exact integer value, if this inline number is an integer.
-pub(crate) fn value_i128(bits: usize) -> Option<i128> {
+/// The exact integer value if this inline number is an integer that fits `i64`.
+/// A larger inline value is an integer-valued float (exactly representable as an
+/// `f64`) and is handled through the float path instead, so this never needs to
+/// return more than an `i64`.
+pub(crate) fn value_i64(bits: usize) -> Option<i64> {
     let (m, exp) = decode(bits);
-    decimal_to_i128(m, exp)
+    decimal_to_i64(m, exp)
 }
 
 /// The exact `f64` value, if exactly representable.
@@ -299,19 +308,6 @@ pub(crate) fn to_f64_lossy(bits: usize) -> f64 {
 /// Whether the source of this inline number had a decimal point.
 pub(crate) fn has_decimal_point(bits: usize) -> bool {
     code_has_dot(code(bits))
-}
-
-/// Hashes an inline number by its numeric value (so `2` and `2.0` agree, and
-/// the scheme matches the heap number hash).
-pub(crate) fn hash<H: Hasher>(bits: usize, state: &mut H) {
-    match value_i128(bits) {
-        Some(v) if i64::try_from(v).is_ok() => (v as i64).hash(state),
-        Some(v) if u64::try_from(v).is_ok() => (v as u64).hash(state),
-        _ => {
-            let f = to_f64_lossy(bits);
-            (if f == 0.0 { 0 } else { f.to_bits() }).hash(state);
-        }
-    }
 }
 
 #[cfg(test)]

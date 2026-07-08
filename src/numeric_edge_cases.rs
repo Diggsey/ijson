@@ -451,6 +451,25 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_through_inumber_exactly() {
+        // Converting a number into an `INumber` and back out with the matching
+        // accessor must return exactly the original value.
+        for &x in &i64_cases() {
+            assert_eq!(crate::INumber::from(x).to_i64(), Some(x), "i64 {}", x);
+        }
+        for &x in &u64_cases() {
+            assert_eq!(crate::INumber::from(x).to_u64(), Some(x), "u64 {}", x);
+        }
+        for &x in &f64_cases() {
+            let n = crate::INumber::try_from(x).unwrap();
+            // The *exact* accessor round-trips (not merely the lossy one). `0.0 ==
+            // -0.0`, so the canonicalisation of -0.0 to +0.0 still satisfies this.
+            assert_eq!(n.to_f64(), Some(x), "f64 {} exact", x);
+            assert_eq!(n.to_f64_lossy(), x, "f64 {} lossy", x);
+        }
+    }
+
+    #[test]
     fn nonfinite_f64_inputs_are_rejected() {
         for &x in &f64_nonfinite_cases() {
             assert!(crate::INumber::try_from(x).is_err(), "{} accepted", x);

@@ -743,11 +743,14 @@ impl IValue {
     }
 }
 
-// A number reduced to a form suitable for exact numeric comparison. Integer
-// values (including integer-valued floats within range) become `Int`; genuinely
-// fractional values become `Float`.
+// A number reduced to a form suitable for exact numeric comparison. Values that
+// fit `i64` become `Int`; heap `u64`s above `i64::MAX` become `UInt`; everything
+// else — fractions and integer-valued floats too large for `i64`, all exactly
+// representable as `f64` — becomes `Float`. This spans the full numeric range
+// without needing `i128`.
 enum NumVal {
-    Int(i128),
+    Int(i64),
+    UInt(u64),
     Float(f64),
 }
 
@@ -755,36 +758,73 @@ fn can_represent_as_f64(x: u64) -> bool {
     x.leading_zeros() + x.trailing_zeros() >= 11
 }
 
-/// Compares an exact integer to a finite float exactly.
-fn cmp_int_f64(a: i128, b: f64) -> Ordering {
-    const LIMIT: f64 = 170_141_183_460_469_231_731_687_303_715_884_105_728.0; // 2^127
-    if b >= LIMIT {
-        return Ordering::Less;
+// `a == trunc(b)` already; the fractional part of `b` breaks the tie.
+fn cmp_by_fraction(b: f64, bt: f64) -> Ordering {
+    if b == bt {
+        Ordering::Equal
+    } else if b > bt {
+        Ordering::Less // b has a positive fractional part, so b > a
+    } else {
+        Ordering::Greater
     }
-    if b <= -LIMIT {
-        return Ordering::Greater;
+}
+
+/// Compares an `i64` to a finite float exactly.
+fn cmp_i64_f64(a: i64, b: f64) -> Ordering {
+    const I64_RANGE: f64 = 9_223_372_036_854_775_808.0; // 2^63
+    if b >= I64_RANGE {
+        return Ordering::Less; // b >= 2^63 > i64::MAX >= a
     }
-    let bt = b.trunc();
-    match a.cmp(&(bt as i128)) {
-        Ordering::Equal => {
-            if b == bt {
-                Ordering::Equal
-            } else if b > bt {
-                Ordering::Less // b has a positive fractional part, so b > a
-            } else {
-                Ordering::Greater
-            }
-        }
+    if b < -I64_RANGE {
+        return Ordering::Greater; // b < -2^63 == i64::MIN <= a
+    }
+    let bt = b.trunc(); // now in [-2^63, 2^63), so `bt as i64` is exact
+    match a.cmp(&(bt as i64)) {
+        Ordering::Equal => cmp_by_fraction(b, bt),
+        ord => ord,
+    }
+}
+
+/// Compares a `u64` to a finite float exactly.
+fn cmp_u64_f64(a: u64, b: f64) -> Ordering {
+    const U64_RANGE: f64 = 18_446_744_073_709_551_616.0; // 2^64
+    if b < 0.0 {
+        return Ordering::Greater; // a >= 0 > b
+    }
+    if b >= U64_RANGE {
+        return Ordering::Less; // b >= 2^64 > u64::MAX >= a
+    }
+    let bt = b.trunc(); // now in [0, 2^64), so `bt as u64` is exact
+    match a.cmp(&(bt as u64)) {
+        Ordering::Equal => cmp_by_fraction(b, bt),
         ord => ord,
     }
 }
 
 fn cmp_num(a: &NumVal, b: &NumVal) -> Ordering {
+    use NumVal::{Float, Int, UInt};
     match (a, b) {
-        (NumVal::Int(x), NumVal::Int(y)) => x.cmp(y),
-        (NumVal::Int(x), NumVal::Float(y)) => cmp_int_f64(*x, *y),
-        (NumVal::Float(x), NumVal::Int(y)) => cmp_int_f64(*y, *x).reverse(),
-        (NumVal::Float(x), NumVal::Float(y)) => x.partial_cmp(y).unwrap(),
+        (Int(x), Int(y)) => x.cmp(y),
+        (UInt(x), UInt(y)) => x.cmp(y),
+        (Int(x), UInt(y)) => {
+            if *x < 0 {
+                Ordering::Less
+            } else {
+                (*x as u64).cmp(y)
+            }
+        }
+        (UInt(x), Int(y)) => {
+            if *y < 0 {
+                Ordering::Greater
+            } else {
+                x.cmp(&(*y as u64))
+            }
+        }
+        (Int(x), Float(y)) => cmp_i64_f64(*x, *y),
+        (Float(x), Int(y)) => cmp_i64_f64(*y, *x).reverse(),
+        (UInt(x), Float(y)) => cmp_u64_f64(*x, *y),
+        (Float(x), UInt(y)) => cmp_u64_f64(*y, *x).reverse(),
+        (Float(x), Float(y)) => x.partial_cmp(y).unwrap(),
     }
 }
 
@@ -795,7 +835,7 @@ fn cmp_num(a: &NumVal, b: &NumVal) -> Ordering {
 // representation immediately.
 impl IValue {
     pub(crate) fn new_i64(value: i64) -> Self {
-        match inline::number::encode_int(i128::from(value)) {
+        match inline::number::encode_int(value) {
             // Safety: `encode_int` returns valid inline bits; the scalar
             // allocation is aligned and non-null.
             Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
@@ -804,14 +844,13 @@ impl IValue {
     }
 
     pub(crate) fn new_u64(value: u64) -> Self {
-        if let Ok(v) = i64::try_from(value) {
-            Self::new_i64(v)
-        } else {
-            // Too large for `i64`; still prefer inline if it factors, else heap `u64`.
-            match inline::number::encode_int(i128::from(value)) {
-                Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
-                None => unsafe { Self::new_ptr(scalar::alloc(value), TypeTag::NumberU64) },
-            }
+        match i64::try_from(value) {
+            // Fits `i64`: canonicalise through the signed path.
+            Ok(v) => Self::new_i64(v),
+            // Anything above `i64::MAX` far exceeds the inline mantissa, so it can
+            // only be stored as a heap `u64`.
+            // Safety: the scalar allocation is aligned and non-null.
+            Err(_) => unsafe { Self::new_ptr(scalar::alloc(value), TypeTag::NumberU64) },
         }
     }
 
@@ -830,16 +869,21 @@ impl IValue {
     fn number_num_val(&self) -> NumVal {
         if self.is_inline() {
             let bits = self.ptr_usize();
-            match inline::number::value_i128(bits) {
+            match inline::number::value_i64(bits) {
                 Some(i) => NumVal::Int(i),
-                None => NumVal::Float(inline::number::to_f64_lossy(bits)),
+                // Fractional, or an integer-valued float too large for `i64` —
+                // both are exactly representable as `f64`.
+                None => NumVal::Float(
+                    inline::number::to_f64_exact(bits)
+                        .expect("a non-i64 inline number is exactly representable as f64"),
+                ),
             }
         } else {
             // Safety: not inline, so it is a heap scalar number.
             unsafe {
                 match self.type_tag() {
-                    TypeTag::NumberI64 => NumVal::Int(i128::from(self.scalar_bits() as i64)),
-                    TypeTag::NumberU64 => NumVal::Int(i128::from(self.scalar_bits())),
+                    TypeTag::NumberI64 => NumVal::Int(self.scalar_bits() as i64),
+                    TypeTag::NumberU64 => NumVal::UInt(self.scalar_bits()),
                     _ => NumVal::Float(f64::from_bits(self.scalar_bits())),
                 }
             }
@@ -848,7 +892,8 @@ impl IValue {
 
     pub(crate) fn number_to_i64(&self) -> Option<i64> {
         match self.number_num_val() {
-            NumVal::Int(x) => i64::try_from(x).ok(),
+            NumVal::Int(x) => Some(x),
+            NumVal::UInt(x) => i64::try_from(x).ok(),
             NumVal::Float(x) => (x.fract() == 0.0 && x >= i64::MIN as f64 && x < i64::MAX as f64)
                 .then_some(x as i64),
         }
@@ -857,6 +902,7 @@ impl IValue {
     pub(crate) fn number_to_u64(&self) -> Option<u64> {
         match self.number_num_val() {
             NumVal::Int(x) => u64::try_from(x).ok(),
+            NumVal::UInt(x) => Some(x),
             NumVal::Float(x) => {
                 (x.fract() == 0.0 && x >= 0.0 && x < u64::MAX as f64).then_some(x as u64)
             }
@@ -1075,7 +1121,16 @@ impl Drop for IValue {
 impl Hash for IValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self.type_tag() {
-            TypeTag::Inline => inline::hash(self.ptr_usize(), state),
+            // Inline numbers hash by numeric value (via the same code path as heap
+            // numbers, so `2` and `2.0` agree); inline strings and the `null`/bool
+            // constants have a canonical bit pattern and hash by it.
+            TypeTag::Inline => {
+                if inline::is_number(self.ptr_usize()) {
+                    self.number_hash(state);
+                } else {
+                    self.ptr_usize().hash(state);
+                }
+            }
             TypeTag::NumberI64
             | TypeTag::NumberU64
             | TypeTag::NumberF64

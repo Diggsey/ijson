@@ -14,8 +14,6 @@
 pub(crate) mod number;
 pub(crate) mod string;
 
-use std::hash::{Hash, Hasher};
-
 use crate::value::ValueType;
 
 // Bit 3 of an inline value: set for the string/constant sub-family, clear for
@@ -53,15 +51,4 @@ pub(crate) fn is_number(bits: usize) -> bool {
 /// `true` if the inline value is a string (string sub-family, not a constant).
 pub(crate) fn is_string(bits: usize) -> bool {
     bits & STR_FAMILY != 0 && bits & CONST_FLAG == 0
-}
-
-/// Hashes an inline value. Numbers hash by numeric value (so `2` and `2.0`
-/// agree); strings, `null` and the booleans have a canonical bit pattern and
-/// hash by it.
-pub(crate) fn hash<H: Hasher>(bits: usize, state: &mut H) {
-    if is_number(bits) {
-        number::hash(bits, state);
-    } else {
-        bits.hash(state);
-    }
 }
