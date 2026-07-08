@@ -344,12 +344,35 @@ pub(crate) fn json_number_cases() -> Vec<&'static str> {
 mod tests {
     use super::*;
     use crate::IValue;
+    use std::collections::hash_map::DefaultHasher;
     use std::convert::TryFrom;
+    use std::hash::{Hash, Hasher};
 
     // An integer is exactly representable as an f64 iff it has at most 53
     // significant bits, i.e. `leading_zeros + trailing_zeros >= 11` over 64 bits.
     fn f64_exact_u64(a: u64) -> bool {
         a.leading_zeros() + a.trailing_zeros() >= 11
+    }
+
+    fn hash_of(v: &IValue) -> u64 {
+        let mut h = DefaultHasher::new();
+        v.hash(&mut h);
+        h.finish()
+    }
+
+    fn json(s: &str) -> IValue {
+        serde_json::from_str(s).unwrap_or_else(|e| panic!("parse {:?}: {}", s, e))
+    }
+
+    // Every number from the edge-case lists, as `IValue`s. Deliberately contains
+    // duplicates (the same value reached via different types/representations),
+    // which is exactly what the equality/hash/order invariants must tolerate.
+    fn number_pool() -> Vec<IValue> {
+        let mut pool = Vec::new();
+        pool.extend(i64_cases().into_iter().map(IValue::from));
+        pool.extend(u64_cases().into_iter().map(IValue::from));
+        pool.extend(f64_cases().into_iter().map(IValue::from));
+        pool
     }
 
     #[test]
@@ -476,27 +499,219 @@ mod tests {
         // A value written as an integer and as an e-notation float must compare
         // equal and hash equal, even though one is inline and the other heap and
         // they disagree on `has_decimal_point`.
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
         let pairs = [
             ("100", "1e2"),
             ("10000000", "1e7"),
             ("1000000000000000000", "1e18"),
         ];
         for (int_str, float_str) in pairs {
-            let int: IValue = serde_json::from_str(int_str).unwrap();
-            let float: IValue = serde_json::from_str(float_str).unwrap();
+            let int = json(int_str);
+            let float = json(float_str);
             assert_eq!(int, float, "{} == {}", int_str, float_str);
             assert!(!int.as_number().unwrap().has_decimal_point());
             assert!(float.as_number().unwrap().has_decimal_point());
+            assert_eq!(
+                hash_of(&int),
+                hash_of(&float),
+                "{} hash {}",
+                int_str,
+                float_str
+            );
+        }
+    }
 
-            let hash = |v: &IValue| {
-                let mut h = DefaultHasher::new();
-                v.hash(&mut h);
-                h.finish()
-            };
-            assert_eq!(hash(&int), hash(&float), "{} hash {}", int_str, float_str);
+    #[test]
+    fn normalisation_makes_equal_values_indistinguishable() {
+        // Each group is the SAME mathematical number reached through different
+        // types and representations. Within a group every value must compare
+        // equal and hash equal (the crux the caller called out: -0.0, +0.0 and
+        // integer 0 all normalise together, as do 1 and 1.0); representatives of
+        // different groups must differ.
+        let groups: Vec<Vec<IValue>> = vec![
+            // Zero: both signed zeros and integer zero.
+            vec![
+                IValue::from(0_i64),
+                IValue::from(0_u64),
+                IValue::from(0.0_f64),
+                IValue::from(-0.0_f64),
+                json("0"),
+                json("-0"),
+                json("0.0"),
+                json("-0.0"),
+                json("0e0"),
+            ],
+            // One.
+            vec![
+                IValue::from(1_i64),
+                IValue::from(1_u64),
+                IValue::from(1.0_f64),
+                json("1"),
+                json("1.0"),
+                json("1e0"),
+            ],
+            // Negative one.
+            vec![
+                IValue::from(-1_i64),
+                IValue::from(-1.0_f64),
+                json("-1"),
+                json("-1.0"),
+            ],
+            // A hundred, integer and float spellings.
+            vec![
+                IValue::from(100_i64),
+                IValue::from(1e2_f64),
+                json("100"),
+                json("1e2"),
+                json("100.0"),
+            ],
+            // 2^55: exactly representable as i64, u64 and f64.
+            vec![
+                IValue::from(1_i64 << 55),
+                IValue::from(1_u64 << 55),
+                IValue::from((1_u64 << 55) as f64),
+            ],
+            // 10^18: heap integer vs inline factored e-notation float.
+            vec![
+                IValue::from(1_000_000_000_000_000_000_i64),
+                IValue::from(1e18_f64),
+                json("1000000000000000000"),
+                json("1e18"),
+            ],
+            // 2^63: u64 vs float (both heap), straddling the i64/u64 seam.
+            vec![
+                IValue::from(1_u64 << 63),
+                IValue::from(9223372036854775808.0_f64),
+                json("9223372036854775808"),
+            ],
+            // A dyadic fraction.
+            vec![IValue::from(0.5_f64), json("0.5"), json("5e-1")],
+        ];
+
+        for g in &groups {
+            for a in g {
+                for b in g {
+                    assert_eq!(a, b, "same group not equal: {:?} vs {:?}", a, b);
+                    assert_eq!(
+                        hash_of(a),
+                        hash_of(b),
+                        "same group hashes differ: {:?} vs {:?}",
+                        a,
+                        b
+                    );
+                }
+            }
+        }
+        for (i, g1) in groups.iter().enumerate() {
+            for (j, g2) in groups.iter().enumerate() {
+                if i != j {
+                    assert_ne!(
+                        g1[0], g2[0],
+                        "different groups equal: {:?} vs {:?}",
+                        g1[0], g2[0]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sorting_matches_reference_order() {
+        // A strictly-increasing sequence spanning representations and the
+        // precision-trap adjacencies (a large integer just above the float it
+        // rounds to, and the i64/u64/float seams).
+        let ordered: Vec<IValue> = vec![
+            IValue::from(f64::MIN), // -f64::MAX
+            IValue::from(-1e300_f64),
+            IValue::from(i64::MIN),
+            IValue::from(-1e18_f64),
+            IValue::from(-(1_i64 << 55)),
+            IValue::from(-1_000_000_i64),
+            IValue::from(-2.5_f64),
+            IValue::from(-1_i64),
+            IValue::from(-0.5_f64),
+            IValue::from(-0.0078125_f64),
+            IValue::from(0_i64),
+            IValue::from(0.0078125_f64),
+            IValue::from(0.5_f64),
+            IValue::from(1_i64),
+            IValue::from(1.5_f64),
+            IValue::from(2_i64),
+            IValue::from(100_i64),
+            IValue::from(9007199254740992.0_f64), // 2^53 as a float
+            IValue::from(9007199254740993_i64),   // 2^53 + 1 (> the float above)
+            IValue::from(1e17_f64),
+            IValue::from(1e18_f64),
+            IValue::from(i64::MAX),    // 2^63 - 1
+            IValue::from(1_u64 << 63), // 2^63
+            IValue::from(u64::MAX),    // 2^64 - 1
+            IValue::from(1e20_f64),    // > u64::MAX
+            IValue::from(1e300_f64),
+            IValue::from(f64::MAX),
+        ];
+
+        // Strictly increasing, so `cmp` never conflates two distinct values.
+        for w in ordered.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "not strictly increasing: {:?} !< {:?}",
+                w[0],
+                w[1]
+            );
+        }
+
+        // Sorting a shuffled copy recovers exactly this order.
+        let mut shuffled = ordered.clone();
+        shuffled.reverse();
+        shuffled.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(shuffled, ordered);
+    }
+
+    // Exhaustive pairwise checks over the whole pool are O(n^2); skip them under
+    // Miri (which only needs to see the unsafe paths, covered by the tests above).
+    #[cfg(not(miri))]
+    #[test]
+    fn hash_respects_equality_across_the_pool() {
+        let pool = number_pool();
+        for a in &pool {
+            for b in &pool {
+                // The Hash/Eq contract: equal values must hash equal. This is the
+                // cross-check between `inline::number::hash` and `number_hash`.
+                if a == b {
+                    assert_eq!(
+                        hash_of(a),
+                        hash_of(b),
+                        "equal values hash differently: {:?} vs {:?}",
+                        a,
+                        b
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(not(miri))]
+    #[test]
+    fn comparison_is_a_consistent_total_order() {
+        use std::cmp::Ordering;
+        let pool = number_pool();
+        for a in &pool {
+            for b in &pool {
+                let ab = a
+                    .partial_cmp(b)
+                    .unwrap_or_else(|| panic!("no ordering: {:?} vs {:?}", a, b));
+                let ba = b
+                    .partial_cmp(a)
+                    .unwrap_or_else(|| panic!("no ordering: {:?} vs {:?}", b, a));
+                // Antisymmetry and agreement between `==` and `cmp == Equal`.
+                assert_eq!(ab, ba.reverse(), "antisymmetry: {:?} vs {:?}", a, b);
+                assert_eq!(
+                    a == b,
+                    ab == Ordering::Equal,
+                    "eq/cmp disagree: {:?} vs {:?}",
+                    a,
+                    b
+                );
+            }
         }
     }
 }
