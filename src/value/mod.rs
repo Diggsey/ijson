@@ -933,14 +933,14 @@ impl IValue {
         self.number_to_f64_lossy() as f32
     }
 
-    pub(crate) fn number_hash(&self, state: &mut dyn Hasher) {
+    pub(crate) fn number_hash<H: Hasher>(&self, state: &mut H) {
         if let Some(x) = self.number_to_i64() {
-            state.write_i64(x);
+            x.hash(state);
         } else if let Some(x) = self.number_to_u64() {
-            state.write_u64(x);
+            x.hash(state);
         } else {
             let f = self.number_to_f64_lossy();
-            state.write_u64(if f == 0.0 { 0 } else { f.to_bits() });
+            (if f == 0.0 { 0 } else { f.to_bits() }).hash(state);
         }
     }
 
@@ -1032,17 +1032,17 @@ impl IValue {
     }
 }
 
-/// The low-level operations each value *representation* provides. Every one is
+/// The operations each value *representation* provides, along with defaults so a
+/// representation only overrides what it supports. Every operation is
 /// fundamentally per-representation: cloning an inline value is a bit-copy, a
 /// scalar allocates, an interned string bumps a refcount, and so on. `IValue`'s
-/// `Clone`/`Drop`/`PartialEq`/`PartialOrd`/`Debug` impls therefore find the
-/// representation once, via [`IValue::repr`], and delegate to a trait method.
+/// public methods and its `Clone`/`Drop`/`PartialEq`/`PartialOrd`/`Debug` impls
+/// find the representation once, via [`IValue::repr`], and delegate to a trait
+/// method — the delegation only ever goes downward.
 ///
-/// `hash` takes `&mut dyn Hasher` rather than a generic `H`, because a
-/// trait-object method cannot be generic. The concrete hasher is erased once, at
-/// the top of [`IValue::hash_dyn`]; the writes still devirtualize wherever that
-/// entry point is inlined (the common case of a scalar/string key), and the
-/// recursion threads the *same* `&mut dyn Hasher` through, so it never nests.
+/// (`Hash` is intentionally not here: `Hash::hash` is generic over the hasher, so
+/// it cannot be a trait-object method, and it stays generic on `IValue` so that
+/// containers recurse through their elements' own `Hash` impls.)
 ///
 /// # Safety
 ///
@@ -1061,12 +1061,11 @@ trait ValueRepr {
     }
     /// Release the value's storage. Default: nothing (inline). Heap reps override.
     unsafe fn drop(&self, _v: &mut IValue) {}
-    /// Hash by value. Default: the canonical pointer word — correct for the inline
-    /// constants and both string representations (equal values share it). Numbers
-    /// and collections override with value-based hashing.
-    unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        state.write_usize(v.ptr_usize());
-    }
+    // NB: there is deliberately no `hash` here. `Hash::hash` is generic over the
+    // hasher, which a trait-object method cannot be; forcing it in via
+    // `&mut dyn Hasher` would make a representation delegate back *up* into
+    // `IValue` to recurse. Hashing stays generic on `IValue` itself so containers
+    // recurse through their elements' `Hash` impls, like `clone`/`eq` do.
     /// Equality within a type. Default: canonical bits — correct for the constants
     /// and strings. Numbers and collections override.
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
@@ -1116,9 +1115,6 @@ macro_rules! number_repr_ops {
     () => {
         fn value_type(&self) -> ValueType {
             ValueType::Number
-        }
-        unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-            v.number_hash(state);
         }
         unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
             a.number_cmp(b) == Ordering::Equal
@@ -1273,9 +1269,6 @@ impl ValueRepr for ArrayRepr {
     unsafe fn drop(&self, v: &mut IValue) {
         array::drop(v);
     }
-    unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        array::hash(v, state);
-    }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
         array::eq(a, b)
     }
@@ -1309,9 +1302,6 @@ impl ValueRepr for ObjectRepr {
     }
     unsafe fn drop(&self, v: &mut IValue) {
         object::drop(v);
-    }
-    unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        object::hash(v, state);
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
         object::eq(a, b)
@@ -1359,12 +1349,6 @@ impl IValue {
             TypeTag::Object => &ObjectRepr,
         }
     }
-
-    /// Hash through the representation, with the concrete hasher erased once here.
-    pub(crate) fn hash_dyn(&self, state: &mut dyn Hasher) {
-        // Safety: `repr()` selects this value's own representation.
-        unsafe { self.repr().hash(self, state) }
-    }
 }
 
 impl Clone for IValue {
@@ -1382,9 +1366,18 @@ impl Drop for IValue {
 }
 
 impl Hash for IValue {
+    // Hashing stays generic over the hasher (unlike the `ValueRepr` ops), so
+    // containers recurse into their elements through the elements' own `Hash`
+    // impls — never delegating back up into `IValue`.
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // `&mut H` coerces to `&mut dyn Hasher`, erasing `H` once.
-        self.hash_dyn(state);
+        match self.type_() {
+            ValueType::Number => self.number_hash(state),
+            // Safety: checked type.
+            ValueType::Array => unsafe { array::hash(self, state) },
+            ValueType::Object => unsafe { object::hash(self, state) },
+            // `null`, booleans and (canonical) strings hash by their bit pattern.
+            ValueType::Null | ValueType::Bool | ValueType::String => self.ptr_usize().hash(state),
+        }
     }
 }
 
