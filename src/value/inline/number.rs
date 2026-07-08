@@ -13,17 +13,24 @@
 //! point:
 //!
 //!   code  0..=6  -> exp -7..=-1  (fractional; always has a decimal point)
-//!   code  7      -> exp 0, no decimal point (plain integer)
-//!   code  8      -> exp 0, with decimal point ("N.0")
-//!   code  9..=15 -> exp 1..=7    (integer; no decimal point)
+//!   code  7      -> exp 0, with decimal point ("N.0")
+//!   code  8..=14 -> exp 1..=7    (integer; no decimal point)
+//!   code  15     -> exp 0, no decimal point (plain integer)
 //!
-//! Integers with a decimal point only ever occur at exponent 0: a larger such
-//! integer cannot fit the mantissa in fractional form, so it falls back to a
-//! heap `f64`. That is why a single pair of exponent-0 codes suffices to carry
-//! the decimal-point flag, leaving the layout within 4 exponent bits.
+//! Every code except the reserved `15` is simply `exp + 7` ([`EXP_BIAS`]), so a
+//! value can recover its exponent with a single subtraction. This is why the two
+//! encodings of exponent 0 are *not* adjacent: a decimal point only ever needs
+//! distinguishing at exponent 0 (a larger integer that had a decimal point
+//! cannot fit the mantissa in fractional form and falls back to a heap `f64`),
+//! so the plain integer at exp 0 is banished to a single reserved code rather
+//! than sitting next to `"N.0"`. A decimal point then corresponds exactly to
+//! `code <= 7` (all such values have `exp <= 0`).
 //!
-//! The all-zero value (mantissa 0, code 0) is a non-canonical zero and is never
-//! emitted, reserving it as the `NonNull` niche.
+//! The reserved code is the *maximum* (`15`), not `0`: the plain-integer path is
+//! the only one that emits a zero mantissa (integer zero), so placing it at code
+//! `0` would make integer zero the all-zero bit pattern. Keeping it at `15`
+//! leaves the all-zero value (mantissa 0, code 0) a non-canonical zero that is
+//! never emitted, reserving it as the `NonNull` niche.
 #![allow(clippy::float_cmp)]
 
 use std::convert::TryFrom;
@@ -34,6 +41,16 @@ const MANTISSA_SHIFT: u32 = 8;
 /// Bits available for the signed inline mantissa (56 on 64-bit, 24 on 32-bit).
 const MANTISSA_BITS: u32 = usize::BITS - MANTISSA_SHIFT;
 
+/// Every non-reserved code is `exp + EXP_BIAS`, so the exponent is a single
+/// subtraction. With `EXP_BIAS == 7`, codes `0..=14` cover exp `-7..=7`.
+const EXP_BIAS: i32 = 7;
+/// Reserved (maximum) code for a plain integer at exponent 0 with no decimal
+/// point. It is the max rather than `0` so that integer zero (mantissa 0) never
+/// becomes the all-zero niche pattern; see the module docs.
+const INT_EXP0_CODE: usize = 15;
+/// Codes `<= HAS_DOT_MAX` (== `EXP_BIAS`, exp `<= 0`) carry a decimal point.
+const HAS_DOT_MAX: usize = EXP_BIAS as usize;
+
 const POW5: [u128; 8] = [1, 5, 25, 125, 625, 3125, 15625, 78125];
 
 fn fits_mantissa(m: i128) -> bool {
@@ -43,22 +60,25 @@ fn fits_mantissa(m: i128) -> bool {
 
 /// Maps an exponent (and, at exp 0, a decimal-point flag) to its 4-bit code.
 fn exp_code(exp: i32, dot: bool) -> usize {
-    match exp {
-        -7..=-1 => (exp + 7) as usize,
-        0 => usize::from(dot) + 7,
-        1..=7 => (exp + 8) as usize,
-        _ => unreachable!("inline exponent out of range"),
+    if exp == 0 && !dot {
+        // The plain integer at exp 0 is the reserved code; every other value is
+        // linear in the exponent.
+        INT_EXP0_CODE
+    } else {
+        debug_assert!((-7..=7).contains(&exp), "inline exponent out of range");
+        (exp + EXP_BIAS) as usize
     }
 }
 fn code_exp(code: usize) -> i32 {
-    match code {
-        0..=6 => code as i32 - 7,
-        7 | 8 => 0,
-        _ => code as i32 - 8,
+    if code == INT_EXP0_CODE {
+        0
+    } else {
+        code as i32 - EXP_BIAS
     }
 }
 fn code_has_dot(code: usize) -> bool {
-    code <= 6 || code == 8
+    // The reserved code (15) is excluded automatically, as it exceeds HAS_DOT_MAX.
+    code <= HAS_DOT_MAX
 }
 
 // The inline bits for `mantissa * 10^exp` with the given exponent code. The
@@ -149,7 +169,7 @@ pub(crate) fn encode_int(value: i128) -> Option<usize> {
 /// only fit inline at exponent 0.
 fn encode_int_dot(value: i128) -> Option<usize> {
     if fits_mantissa(value) {
-        Some(encode(value as i64, 8))
+        Some(encode(value as i64, exp_code(0, true)))
     } else {
         None
     }
@@ -159,7 +179,7 @@ fn encode_int_dot(value: i128) -> Option<usize> {
 pub(crate) fn encode_f64(value: f64) -> Option<usize> {
     if value == 0.0 {
         // 0.0 / -0.0: integer zero that had a decimal point.
-        return Some(encode(0, 8));
+        return Some(encode(0, exp_code(0, true)));
     }
     let (m, e2, neg) = integer_decode(value);
     // Integer-valued float: store at exp 0 with the decimal-point flag.
@@ -279,5 +299,42 @@ pub(crate) fn hash<H: Hasher>(bits: usize, state: &mut H) {
             let f = to_f64_lossy(bits);
             (if f == 0.0 { 0 } else { f.to_bits() }).hash(state);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exponent_codes_are_linear_and_niche_safe() {
+        // Values that carry a decimal point (fractionals and "N.0") all have
+        // exp <= 0 and land on codes 0..=7, so the exponent is a plain
+        // `code - EXP_BIAS`.
+        for exp in -7..=0 {
+            let c = exp_code(exp, true);
+            assert!(c <= HAS_DOT_MAX, "dot value exp {} -> code {}", exp, c);
+            assert_eq!(code_exp(c), exp);
+            assert!(code_has_dot(c));
+        }
+        // Integers (no decimal point) occur at exp 0..=7. The exp-0 case is the
+        // reserved max code; the rest are linear.
+        for exp in 0..=7 {
+            let c = exp_code(exp, false);
+            assert_eq!(code_exp(c), exp);
+            assert!(!code_has_dot(c), "integer exp {} -> code {}", exp, c);
+        }
+
+        // The two exp-0 encodings are distinct and non-adjacent: the plain
+        // integer is the reserved max code, "N.0" keeps the linear code.
+        assert_eq!(exp_code(0, false), INT_EXP0_CODE);
+        assert_eq!(exp_code(0, true), EXP_BIAS as usize);
+        assert_ne!(exp_code(0, false), exp_code(0, true));
+
+        // Integer zero (and 0.0) must never be the all-zero bit pattern that is
+        // reserved as the `NonNull` niche.
+        assert_eq!(encode_int(0), Some(encode(0, INT_EXP0_CODE)));
+        assert_ne!(encode_int(0), Some(0));
+        assert_ne!(encode_f64(0.0), Some(0));
     }
 }
