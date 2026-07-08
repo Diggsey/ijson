@@ -1010,6 +1010,24 @@ impl IValue {
     }
 }
 
+#[cfg(test)]
+impl IValue {
+    /// Test-only key identifying the exact internal representation of a *number*:
+    /// its tag together with the inline bits (for inline values) or the 8-byte
+    /// heap scalar payload. Two numbers with equal keys are stored bit-for-bit
+    /// identically. Only meaningful when called on a number.
+    pub(crate) fn number_repr_key(&self) -> (u8, u64) {
+        let tag = self.type_tag() as u8;
+        if self.is_inline() {
+            (tag, self.ptr_usize() as u64)
+        } else {
+            // Safety: a heap number stores its payload as the 8-byte scalar at
+            // `ptr()`; only called on numbers.
+            (tag, unsafe { scalar::read(self.ptr()) })
+        }
+    }
+}
+
 impl Clone for IValue {
     fn clone(&self) -> Self {
         // Dispatch on the raw representation tag rather than the semantic

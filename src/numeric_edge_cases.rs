@@ -666,21 +666,131 @@ mod tests {
         assert_eq!(shuffled, ordered);
     }
 
+    #[test]
+    fn representation_is_canonical() {
+        // Canonicalisation: the same number, reached different ways, must have the
+        // identical internal representation. The *only* allowed difference is the
+        // decimal point — an integer and the float form of the same value differ
+        // (and larger values differ further in inline-vs-heap storage). Within one
+        // decimal-point class the representation must be unique.
+
+        // Integers reached via `i64`, `u64` and JSON all land on the same bits.
+        for &x in &i64_cases() {
+            let base = IValue::from(x).number_repr_key();
+            assert_eq!(
+                json(&x.to_string()).number_repr_key(),
+                base,
+                "int {} JSON",
+                x
+            );
+            if x >= 0 {
+                let via_u64 = IValue::from(x as u64).number_repr_key();
+                assert_eq!(via_u64, base, "int {} via u64", x);
+            }
+        }
+        for &x in &u64_cases() {
+            let base = IValue::from(x).number_repr_key();
+            assert_eq!(
+                json(&x.to_string()).number_repr_key(),
+                base,
+                "uint {} JSON",
+                x
+            );
+            if let Ok(i) = i64::try_from(x) {
+                assert_eq!(
+                    IValue::from(i).number_repr_key(),
+                    base,
+                    "uint {} via i64",
+                    x
+                );
+            }
+        }
+
+        // Grouped equal magnitudes: within a decimal-point class the bits match
+        // exactly. In particular -0.0, +0.0 and integer 0 collapse as expected
+        // (the two signed zeros are literally the same bits).
+        let groups: Vec<Vec<IValue>> = vec![
+            vec![
+                IValue::from(0_i64),
+                IValue::from(0_u64),
+                IValue::from(0.0_f64),
+                IValue::from(-0.0_f64),
+                json("0"),
+                json("-0"),
+                json("0.0"),
+                json("-0.0"),
+                json("0e0"),
+            ],
+            vec![
+                IValue::from(1_i64),
+                IValue::from(1.0_f64),
+                json("1"),
+                json("1.0"),
+                json("1e0"),
+            ],
+            vec![
+                IValue::from(100_i64),
+                IValue::from(1e2_f64),
+                json("100"),
+                json("1e2"),
+                json("100.0"),
+            ],
+            vec![
+                IValue::from(1_000_000_000_000_000_000_i64),
+                IValue::from(1e18_f64),
+                json("1000000000000000000"),
+                json("1e18"),
+            ],
+            vec![IValue::from(0.5_f64), json("0.5"), json("5e-1")],
+        ];
+        for g in &groups {
+            for a in g {
+                for b in g {
+                    if a.as_number().unwrap().has_decimal_point()
+                        == b.as_number().unwrap().has_decimal_point()
+                    {
+                        assert_eq!(
+                            a.number_repr_key(),
+                            b.number_repr_key(),
+                            "same value & decimal-point, different representation: {:?} vs {:?}",
+                            a,
+                            b
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // Exhaustive pairwise checks over the whole pool are O(n^2); skip them under
     // Miri (which only needs to see the unsafe paths, covered by the tests above).
     #[cfg(not(miri))]
     #[test]
-    fn hash_respects_equality_across_the_pool() {
+    fn equal_values_share_hash_and_representation() {
         let pool = number_pool();
         for a in &pool {
             for b in &pool {
+                if a != b {
+                    continue;
+                }
                 // The Hash/Eq contract: equal values must hash equal. This is the
                 // cross-check between `inline::number::hash` and `number_hash`.
-                if a == b {
+                assert_eq!(
+                    hash_of(a),
+                    hash_of(b),
+                    "equal values hash differently: {:?} vs {:?}",
+                    a,
+                    b
+                );
+                // Canonicalisation: equal values with the same decimal point must
+                // be bit-for-bit identical, no matter how they were constructed.
+                if a.as_number().unwrap().has_decimal_point()
+                    == b.as_number().unwrap().has_decimal_point()
+                {
                     assert_eq!(
-                        hash_of(a),
-                        hash_of(b),
-                        "equal values hash differently: {:?} vs {:?}",
+                        a.number_repr_key(),
+                        b.number_repr_key(),
+                        "equal values, same decimal-point, different representation: {:?} vs {:?}",
                         a,
                         b
                     );
