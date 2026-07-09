@@ -1,0 +1,43 @@
+[package]
+name = "ijson-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2018"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dependencies.ijson]
+path = ".."
+
+# Keep debug assertions on in the fuzzing profile so the invariant `assert!`s and
+# ijson's own internal checks actually fire.
+[profile.release]
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "number_str"
+path = "fuzz_targets/number_str.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "number_value"
+path = "fuzz_targets/number_value.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "number_ord"
+path = "fuzz_targets/number_ord.rs"
+test = false
+doc = false
+bench = false
