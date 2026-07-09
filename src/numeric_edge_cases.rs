@@ -340,6 +340,27 @@ pub(crate) fn json_number_cases() -> Vec<&'static str> {
     ]
 }
 
+/// Number strings for `INumber`'s own [`FromStr`](std::str::FromStr) parser,
+/// mirroring the other lists: the curated JSON strings above plus every `i64`,
+/// `u64` and `f64` boundary rendered as text. The parser must accept them all and
+/// agree with both direct construction and `serde_json`.
+pub(crate) fn string_number_cases() -> Vec<String> {
+    let mut v: Vec<String> = json_number_cases()
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    v.extend(i64_cases().iter().map(|x| x.to_string()));
+    v.extend(u64_cases().iter().map(|x| x.to_string()));
+    // Render floats via `serde_json` so each keeps float syntax (a decimal point
+    // or exponent), exactly as it would appear in JSON.
+    v.extend(
+        f64_cases()
+            .iter()
+            .map(|x| serde_json::to_string(x).expect("a finite f64 serialises")),
+    );
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,14 +385,24 @@ mod tests {
         serde_json::from_str(s).unwrap_or_else(|e| panic!("parse {:?}: {}", s, e))
     }
 
-    // Every number from the edge-case lists, as `IValue`s. Deliberately contains
-    // duplicates (the same value reached via different types/representations),
-    // which is exactly what the equality/hash/order invariants must tolerate.
+    // Parses a number string through `INumber`'s own `FromStr` parser.
+    fn inum(s: &str) -> IValue {
+        IValue::from(
+            s.parse::<crate::INumber>()
+                .unwrap_or_else(|e| panic!("parse {:?}: {}", s, e)),
+        )
+    }
+
+    // Every number from the edge-case lists, as `IValue`s — including the string
+    // list parsed through `INumber::from_str`. Deliberately contains duplicates
+    // (the same value reached via different types/representations/parsers), which
+    // is exactly what the equality/hash/order invariants must tolerate.
     fn number_pool() -> Vec<IValue> {
         let mut pool = Vec::new();
         pool.extend(i64_cases().into_iter().map(IValue::from));
         pool.extend(u64_cases().into_iter().map(IValue::from));
         pool.extend(f64_cases().into_iter().map(IValue::from));
+        pool.extend(string_number_cases().iter().map(|s| inum(s)));
         pool
     }
 
@@ -510,6 +541,69 @@ mod tests {
             let back: IValue = serde_json::from_str(&out).unwrap();
             let back_value: serde_json::Value = serde_json::from_str(&out).unwrap();
             assert_eq!(back, IValue::from(back_value), "{:?} reparse agreement", s);
+        }
+    }
+
+    #[test]
+    fn string_inputs_are_consistent() {
+        for s in &string_number_cases() {
+            let s = s.as_str();
+            let v = inum(s);
+            assert!(v.is_number(), "{:?} not a number", s);
+
+            // A number has a decimal point iff it is written as a float: with a
+            // fraction/exponent, or as a bare integer too large for `i64`/`u64`
+            // (stored as a float). Unlike serde_json — which parses "-0" as -0.0
+            // to keep the sign — the string parser treats the integer token "-0"
+            // as the integer `0`, faithfully to the JSON grammar (so no dot).
+            let syntactic_float = s.bytes().any(|b| matches!(b, b'.' | b'e' | b'E'));
+            let fits_int = s.parse::<i64>().is_ok() || s.parse::<u64>().is_ok();
+            let expect_dot = syntactic_float || !fits_int;
+            let dot = v.as_number().unwrap().has_decimal_point();
+            assert_eq!(dot, expect_dot, "{:?} decimal-point", s);
+
+            if !expect_dot {
+                // An exact integer: both parsers agree on the value.
+                let js = json(s);
+                assert_eq!(v, js, "{:?} vs serde_json", s);
+                // When serde also stored it as an integer they land on identical
+                // bits. (serde stores the token "-0" as the float -0.0 — a
+                // different decimal-point class — so that one is skipped.)
+                if !js.as_number().unwrap().has_decimal_point() {
+                    assert_eq!(v.number_repr_key(), js.number_repr_key(), "{:?} repr", s);
+                }
+            } else {
+                // Stored as a float. serde_json's default parser can round large
+                // magnitudes differently than `std`'s `f64::from_str` (its precise
+                // parser is behind the `float_roundtrip` feature), so the value is
+                // checked against a direct `std` `f64` parse rather than serde.
+                assert_eq!(v, IValue::from(s.parse::<f64>().unwrap()), "{:?} value", s);
+            }
+
+            // Serialising and reparsing (through the same parser) is consistent.
+            let out = serde_json::to_string(&v).unwrap();
+            assert_eq!(inum(&out), v, "{:?} round-trip ({})", s, out);
+        }
+    }
+
+    #[test]
+    fn string_parsing_matches_direct_construction() {
+        // Rendering each numeric edge case to text and parsing it back through
+        // `INumber::from_str` reproduces the directly-constructed number.
+        for &x in &i64_cases() {
+            let v = inum(&x.to_string());
+            assert_eq!(v, IValue::from(x), "i64 {}", x);
+            assert!(!v.as_number().unwrap().has_decimal_point(), "i64 {} dot", x);
+        }
+        for &x in &u64_cases() {
+            let v = inum(&x.to_string());
+            assert_eq!(v, IValue::from(x), "u64 {}", x);
+            assert!(!v.as_number().unwrap().has_decimal_point(), "u64 {} dot", x);
+        }
+        for &x in &f64_cases() {
+            let v = inum(&serde_json::to_string(&x).unwrap());
+            assert_eq!(v, IValue::from(x), "f64 {}", x);
+            assert!(v.as_number().unwrap().has_decimal_point(), "f64 {} dot", x);
         }
     }
 
