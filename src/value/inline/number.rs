@@ -321,15 +321,22 @@ pub(crate) fn has_decimal_point(bits: usize) -> bool {
 }
 
 /// This inline number reduced to a [`NumVal`] for the shared numeric utilities.
-/// An integer that fits `i64` becomes `Int`; everything else is an
-/// integer-valued float too large for `i64` or a fraction, both of which are
-/// exactly representable as `f64`.
+///
+/// An integer that fits `i64` becomes `Int`; any other inline number is a float.
+/// Every value today's constructors can produce is an exact `i64` or an exact
+/// `f64`, so the float decodes exactly. But the inline format can represent any
+/// `mantissa * 10^exp`, including exact decimals that are *not* exact `f64`s
+/// (e.g. `0.1 == 1 * 10^-1`); a future constructor (say the arbitrary-precision
+/// feature) could store one. `NumVal` cannot hold such a value exactly, so we
+/// reduce it to the nearest `f64` rather than assuming exactness and panicking —
+/// `num_val` must be total over the whole representable domain.
 pub(crate) fn num_val(bits: usize) -> NumVal {
-    match value_i64(bits) {
-        Some(i) => NumVal::Int(i),
-        None => NumVal::Float(
-            to_f64_exact(bits).expect("a non-i64 inline number is exactly representable as f64"),
-        ),
+    if let Some(i) = value_i64(bits) {
+        NumVal::Int(i)
+    } else if let Some(f) = to_f64_exact(bits) {
+        NumVal::Float(f)
+    } else {
+        NumVal::Float(to_f64_lossy(bits))
     }
 }
 
@@ -428,6 +435,26 @@ mod tests {
             if let Some(bits) = encode_f64(x) {
                 assert_eq!(to_f64_lossy(bits), x, "{:e} misencoded inline", x);
             }
+        }
+    }
+
+    #[test]
+    fn num_val_is_total_over_the_inline_domain() {
+        // The inline format can hold any `mantissa * 10^exp`, including exact
+        // decimals that are not exact `f64`s — e.g. `0.1 == 1 * 10^-1`. Today's
+        // constructors never produce one (they go through `encode_f64`), but
+        // `num_val` decodes the representation and must handle the whole domain
+        // without panicking, not just what current constructors emit.
+        let bits = encode(1, exp_code(-1, true)); // 1 * 10^-1 == 0.1
+        assert!(value_i64(bits).is_none(), "0.1 is not an integer");
+        assert!(
+            to_f64_exact(bits).is_none(),
+            "0.1 is not exactly representable as f64"
+        );
+        // Must not panic; reduces to the nearest f64.
+        match num_val(bits) {
+            NumVal::Float(f) => assert_eq!(f, 0.1),
+            _ => panic!("expected the nearest-f64 fallback"),
         }
     }
 }
