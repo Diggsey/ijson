@@ -58,7 +58,7 @@ pub(crate) unsafe fn num_val(v: &IValue) -> NumVal {
 /// The heap scalar-number representation of a JSON number.
 pub(crate) struct ScalarRepr;
 impl ValueRepr for ScalarRepr {
-    fn value_type(&self) -> ValueType {
+    fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::Number
     }
     fn has_decimal_point(&self, v: &IValue) -> bool {

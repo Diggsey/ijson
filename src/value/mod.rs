@@ -16,14 +16,17 @@ use std::ptr::NonNull;
 #[cfg(feature = "indexmap")]
 use indexmap::IndexMap;
 
-// The value module owns `IValue` and its representations. Each representation
-// implements the `ValueRepr` trait and lives in its own submodule: `array`,
-// `object`, `scalar` (heap number), `interned` (heap string), and — within
-// `inline` — `number`, `string` and `constant` (null/bool). `IValue` finds a
-// value's representation once, via `repr()`, and every operation delegates down
-// to it; the per-`NumVal`/`&str` logic that both number (or both string)
-// representations share is factored into the standalone `num_*`/`string_*`
-// utility functions below, never into a representation that reaches back up.
+// The value module owns `IValue` and its representations. Each heap
+// representation implements the `ValueRepr` trait in its own submodule: `array`,
+// `object`, `scalar` (heap number) and `interned` (heap string). The whole
+// inline family shares a single `ValueRepr` impl, `inline::InlineRepr`, which
+// decodes the family bits and dispatches to an inline sub-representation
+// (`inline::number`/`string`/`constant`) via the inline-only `InlineValue`
+// trait. `IValue` finds a value's representation once, via `repr()`, and every
+// operation delegates down to it; the per-`NumVal`/`&str` logic that both number
+// (or both string) representations share is factored into the standalone
+// `num_*`/`string_*` utility functions below, never into a representation that
+// reaches back up.
 //
 // A JSON *number* or *string* spans two representations, so `new_*` construction
 // picks one as early as possible, and the one place that has to resolve an
@@ -319,7 +322,7 @@ impl IValue {
     /// Returns the type of this value.
     #[must_use]
     pub fn type_(&self) -> ValueType {
-        self.repr().value_type()
+        self.repr().value_type(self)
     }
 
     /// Destructures this value into an enum which can be `match`ed on.
@@ -1001,8 +1004,10 @@ impl IValue {
 /// second is guaranteed by the caller to be the same JSON *type* (possibly a
 /// different representation of it — e.g. an inline vs heap number).
 pub(crate) trait ValueRepr {
-    /// The JSON type this representation stores.
-    fn value_type(&self) -> ValueType;
+    /// The JSON type this representation stores. Takes `v` because a single
+    /// representation may cover several types (the inline family), decoding `v`
+    /// to tell them apart; representations that cover one type ignore it.
+    fn value_type(&self, v: &IValue) -> ValueType;
 
     /// Clone the value. Default: copy the pointer word — correct for the inline
     /// representations, which own no heap storage. Heap reps override.
@@ -1081,14 +1086,9 @@ impl IValue {
     #[inline]
     fn repr(&self) -> &'static dyn ValueRepr {
         match self.type_tag() {
-            TypeTag::Inline => match inline::value_type(self.ptr_usize()) {
-                ValueType::Null => &inline::constant::NullRepr,
-                ValueType::Bool => &inline::constant::BoolRepr,
-                ValueType::Number => &inline::number::InlineNumberRepr,
-                ValueType::String => &inline::string::InlineStringRepr,
-                // Inline values are never arrays or objects.
-                ValueType::Array | ValueType::Object => unreachable!(),
-            },
+            // One representation covers the whole inline family; it decodes the
+            // family bits to dispatch further (see `inline::InlineRepr`).
+            TypeTag::Inline => &inline::InlineRepr,
             TypeTag::NumberI64
             | TypeTag::NumberU64
             | TypeTag::NumberF64

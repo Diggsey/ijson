@@ -14,11 +14,10 @@ use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
 use std::ptr::NonNull;
 
-use super::STR_FAMILY;
+use super::{InlineValue, STR_FAMILY};
 use crate::string::IString;
 use crate::value::{
-    string_cmp, string_debug, Destructured, DestructuredMut, DestructuredRef, IValue, ValueRepr,
-    ValueType,
+    string_cmp, string_debug, Destructured, DestructuredMut, DestructuredRef, IValue, ValueType,
 };
 
 /// The number of string bytes that fit inline in a pointer-sized value:
@@ -75,7 +74,7 @@ pub(crate) unsafe fn bytes<'a>(storage: NonNull<u8>, bits: usize) -> &'a [u8] {
 
 /// The inline short-string representation of a JSON string.
 pub(crate) struct InlineStringRepr;
-impl ValueRepr for InlineStringRepr {
+impl InlineValue for InlineStringRepr {
     fn value_type(&self) -> ValueType {
         ValueType::String
     }

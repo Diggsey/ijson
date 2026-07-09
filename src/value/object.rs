@@ -415,7 +415,7 @@ pub(crate) unsafe fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
 /// The object representation.
 pub(crate) struct ObjectRepr;
 impl ValueRepr for ObjectRepr {
-    fn value_type(&self) -> ValueType {
+    fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::Object
     }
     unsafe fn clone(&self, v: &IValue) -> IValue {

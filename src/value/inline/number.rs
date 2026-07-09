@@ -41,10 +41,11 @@ use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
 use std::hash::Hasher;
 
+use super::InlineValue;
 use crate::number::INumber;
 use crate::value::{
     num_debug, num_hash, num_to_i64, num_to_u64, number_cmp, Destructured, DestructuredMut,
-    DestructuredRef, IValue, NumVal, ValueRepr, ValueType,
+    DestructuredRef, IValue, NumVal, ValueType,
 };
 
 const EXP_SHIFT: u32 = 4;
@@ -334,7 +335,7 @@ pub(crate) fn num_val(bits: usize) -> NumVal {
 
 /// The inline decimal representation of a JSON number.
 pub(crate) struct InlineNumberRepr;
-impl ValueRepr for InlineNumberRepr {
+impl InlineValue for InlineNumberRepr {
     fn value_type(&self) -> ValueType {
         ValueType::Number
     }

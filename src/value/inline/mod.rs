@@ -15,7 +15,11 @@ pub(crate) mod constant;
 pub(crate) mod number;
 pub(crate) mod string;
 
-use crate::value::ValueType;
+use std::cmp::Ordering;
+use std::fmt::{self, Formatter};
+use std::hash::Hasher;
+
+use crate::value::{Destructured, DestructuredMut, DestructuredRef, IValue, ValueRepr, ValueType};
 
 // Bit 3 of an inline value: set for the string/constant sub-family, clear for
 // inline numbers.
@@ -52,4 +56,124 @@ fn is_number(bits: usize) -> bool {
 /// `true` if the inline value is a string (string sub-family, not a constant).
 fn is_string(bits: usize) -> bool {
     bits & STR_FAMILY != 0 && bits & CONST_FLAG == 0
+}
+
+/// The per-type behaviour of an inline value. A single [`InlineRepr`] implements
+/// [`ValueRepr`] for the whole inline family and decodes the family bits to pick
+/// the right one of these; each sub-representation only overrides what it needs.
+///
+/// This mirrors the value operations of [`ValueRepr`] but omits `clone`/`drop`
+/// (every inline value is a bit-copy with nothing to free) and `len` (an inline
+/// value is never a collection); [`InlineRepr`] supplies those uniformly.
+pub(crate) trait InlineValue {
+    /// The JSON type this inline sub-representation stores.
+    fn value_type(&self) -> ValueType;
+    /// Hash by value. Default: the canonical pointer word (correct for the
+    /// constants and inline strings). Inline numbers override to hash by value.
+    unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
+        state.write_usize(v.ptr_usize());
+    }
+    /// Equality within a type. Default: the canonical bits. Numbers override.
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
+        a.raw_eq(b)
+    }
+    /// Ordering within a type. Default: unordered; every inline type overrides.
+    unsafe fn partial_cmp(&self, _a: &IValue, _b: &IValue) -> Option<Ordering> {
+        None
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result;
+    fn destructure(&self, v: IValue) -> Destructured;
+    unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a>;
+    unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a>;
+    fn to_bool(&self, _v: &IValue) -> Option<bool> {
+        None
+    }
+    unsafe fn to_i64(&self, _v: &IValue) -> Option<i64> {
+        None
+    }
+    unsafe fn to_u64(&self, _v: &IValue) -> Option<u64> {
+        None
+    }
+    unsafe fn to_f64(&self, _v: &IValue) -> Option<f64> {
+        None
+    }
+    unsafe fn to_f64_lossy(&self, _v: &IValue) -> Option<f64> {
+        None
+    }
+    unsafe fn as_bytes<'a>(&self, _v: &'a IValue) -> Option<&'a [u8]> {
+        None
+    }
+    fn has_decimal_point(&self, _v: &IValue) -> bool {
+        false
+    }
+}
+
+/// The single representation for the whole inline family. Every operation decodes
+/// the family bits, selects the inline sub-representation, and delegates to it.
+pub(crate) struct InlineRepr;
+
+impl InlineRepr {
+    /// Selects the inline sub-representation for `v` from its family bits.
+    #[inline]
+    fn inner(v: &IValue) -> &'static dyn InlineValue {
+        match value_type(v.ptr_usize()) {
+            ValueType::Null => &constant::NullRepr,
+            ValueType::Bool => &constant::BoolRepr,
+            ValueType::Number => &number::InlineNumberRepr,
+            ValueType::String => &string::InlineStringRepr,
+            // An inline value is never an array or object.
+            ValueType::Array | ValueType::Object => unreachable!(),
+        }
+    }
+}
+
+impl ValueRepr for InlineRepr {
+    // clone/drop/len use the `ValueRepr` defaults: every inline value is a
+    // bit-copy to clone, has nothing to free, and is never a collection.
+    fn value_type(&self, v: &IValue) -> ValueType {
+        Self::inner(v).value_type()
+    }
+    unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
+        Self::inner(v).hash(v, state);
+    }
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
+        Self::inner(a).eq(a, b)
+    }
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
+        Self::inner(a).partial_cmp(a, b)
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        Self::inner(v).debug(v, f)
+    }
+    fn destructure(&self, v: IValue) -> Destructured {
+        Self::inner(&v).destructure(v)
+    }
+    unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
+        Self::inner(v).destructure_ref(v)
+    }
+    unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
+        let inner = Self::inner(v);
+        inner.destructure_mut(v)
+    }
+    fn to_bool(&self, v: &IValue) -> Option<bool> {
+        Self::inner(v).to_bool(v)
+    }
+    unsafe fn to_i64(&self, v: &IValue) -> Option<i64> {
+        Self::inner(v).to_i64(v)
+    }
+    unsafe fn to_u64(&self, v: &IValue) -> Option<u64> {
+        Self::inner(v).to_u64(v)
+    }
+    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
+        Self::inner(v).to_f64(v)
+    }
+    unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
+        Self::inner(v).to_f64_lossy(v)
+    }
+    unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> Option<&'a [u8]> {
+        Self::inner(v).as_bytes(v)
+    }
+    fn has_decimal_point(&self, v: &IValue) -> bool {
+        Self::inner(v).has_decimal_point(v)
+    }
 }

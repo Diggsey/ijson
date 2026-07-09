@@ -241,7 +241,7 @@ pub(crate) unsafe fn release(ptr: NonNull<u8>) {
 /// The heap interned-string representation of a JSON string.
 pub(crate) struct InternedRepr;
 impl ValueRepr for InternedRepr {
-    fn value_type(&self) -> ValueType {
+    fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::String
     }
     unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> Option<&'a [u8]> {

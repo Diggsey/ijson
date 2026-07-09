@@ -8,12 +8,11 @@
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Formatter};
 
-use crate::value::{
-    BoolMut, Destructured, DestructuredMut, DestructuredRef, IValue, ValueRepr, ValueType,
-};
+use super::InlineValue;
+use crate::value::{BoolMut, Destructured, DestructuredMut, DestructuredRef, IValue, ValueType};
 
 pub(crate) struct NullRepr;
-impl ValueRepr for NullRepr {
+impl InlineValue for NullRepr {
     fn value_type(&self) -> ValueType {
         ValueType::Null
     }
@@ -37,7 +36,7 @@ impl ValueRepr for NullRepr {
 }
 
 pub(crate) struct BoolRepr;
-impl ValueRepr for BoolRepr {
+impl InlineValue for BoolRepr {
     fn value_type(&self) -> ValueType {
         ValueType::Bool
     }

@@ -303,7 +303,7 @@ pub(crate) unsafe fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
 /// The array representation.
 pub(crate) struct ArrayRepr;
 impl ValueRepr for ArrayRepr {
-    fn value_type(&self) -> ValueType {
+    fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::Array
     }
     unsafe fn clone(&self, v: &IValue) -> IValue {
