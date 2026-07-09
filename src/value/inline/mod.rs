@@ -3,7 +3,8 @@
 //! A value with the `Inline` tag stores its whole contents in the pointer-sized
 //! [`IValue`] rather than behind a pointer. Bit 3 selects the sub-family:
 //!
-//!   - 0 => number: `mantissa * BASE^exp`, base 10 or 2 (see [`number`]).
+//!   - 0 => number: `mantissa * BASE^exp`, base 10 or 2 (see [`number_decimal`]
+//!     and [`number_binary`], one selected as [`InlineNumberRepr`]).
 //!   - 1 => string or constant, distinguished by bit 7 (`CONST_FLAG`):
 //!       - bit 7 = 0 => string (see [`string`]).
 //!       - bit 7 = 1 => constant: `null` / `false` / `true`.
@@ -19,12 +20,14 @@ pub(crate) mod string;
 // The two inline number representations — an exact base-10 decimal and a base-2
 // binary float — are fully independent modules (sharing no code, so their bit
 // layouts can diverge). Both are always compiled, so a single `cargo test`
-// unit-tests both regardless of features; this alias just selects which one
-// `IValue` construction and decoding actually use.
+// unit-tests both regardless of features; this alias selects the active
+// representation *type*, whose associated functions (`encode_int`/`encode_f64`/
+// `num_val`, and `encode_decimal` for base 10) are how `IValue` builds and decodes
+// inline numbers.
 #[cfg(not(feature = "arbitrary_precision"))]
-pub(crate) use number_binary as number;
+pub(crate) use number_binary::InlineNumberRepr;
 #[cfg(feature = "arbitrary_precision")]
-pub(crate) use number_decimal as number;
+pub(crate) use number_decimal::InlineNumberRepr;
 
 use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
@@ -130,7 +133,7 @@ impl InlineRepr {
         match value_type(v.ptr_usize()) {
             ValueType::Null => &constant::NullRepr,
             ValueType::Bool => &constant::BoolRepr,
-            ValueType::Number => &number::InlineNumberRepr,
+            ValueType::Number => &InlineNumberRepr,
             ValueType::String => &string::InlineStringRepr,
             // An inline value is never an array or object.
             ValueType::Array | ValueType::Object => unreachable!(),

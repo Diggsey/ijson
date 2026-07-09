@@ -822,7 +822,7 @@ pub(crate) fn num_debug(nv: NumVal, f: &mut Formatter<'_>) -> fmt::Result {
 // representation; this is the one place that dispatch remains.
 fn num_val_of(v: &IValue) -> NumVal {
     if v.is_inline() {
-        inline::number::num_val(v.ptr_usize())
+        inline::InlineNumberRepr::num_val(v.ptr_usize())
     } else {
         // Safety: a non-inline number is a heap scalar.
         unsafe { scalar::num_val(v) }
@@ -1230,7 +1230,7 @@ mod num_val_tests {
 // representation immediately.
 impl IValue {
     pub(crate) fn new_i64(value: i64) -> Self {
-        match inline::number::encode_int(value) {
+        match inline::InlineNumberRepr::encode_int(value) {
             // Safety: `encode_int` returns valid inline bits; the scalar
             // allocation is aligned and non-null.
             Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
@@ -1250,7 +1250,7 @@ impl IValue {
     }
 
     pub(crate) fn new_f64(value: f64) -> Self {
-        match inline::number::encode_f64(value) {
+        match inline::InlineNumberRepr::encode_f64(value) {
             Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
             None => unsafe { Self::new_ptr(scalar::alloc(value.to_bits()), TypeTag::NumberF64) },
         }
@@ -1264,7 +1264,7 @@ impl IValue {
     #[cfg(feature = "arbitrary_precision")]
     pub(crate) fn new_decimal(mantissa: i128, exp: i32) -> Option<Self> {
         // Safety: `encode_decimal` returns valid inline bits.
-        inline::number::encode_decimal(mantissa, exp)
+        inline::InlineNumberRepr::encode_decimal(mantissa, exp)
             .map(|bits| unsafe { Self::new_inline(TypeTag::Inline, bits) })
     }
 

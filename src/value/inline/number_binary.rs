@@ -121,15 +121,7 @@ fn i64_fits_f64(v: i64) -> bool {
     v == 0 || 64 - v.unsigned_abs().leading_zeros() - v.unsigned_abs().trailing_zeros() <= 53
 }
 
-// --- Encode / decode --------------------------------------------------------
-
-/// Encodes a plain integer (no decimal point). Only exponent 0 is available to
-/// integers — positive inline exponents are reserved for floats — so a value too
-/// large for the mantissa does not fit inline and is stored on the heap instead.
-pub(crate) fn encode_int(value: i64) -> Option<usize> {
-    let limit = 1i64 << (MANTISSA_BITS - 1);
-    (value >= -limit && value < limit).then(|| encode(value, exp_code(0, false)))
-}
+// --- Decode helpers ---------------------------------------------------------
 
 /// Scales `m` by `2^exp` by multiplying or dividing by an exact power of two built
 /// from an integer shift. This avoids `f64::powi`, which is *not* guaranteed to be
@@ -173,33 +165,6 @@ fn to_f64_lossy(bits: usize) -> f64 {
     scale_pow2(m as f64, exp)
 }
 
-/// This inline number reduced to a [`NumVal`]. A binary inline float is always an
-/// exact `f64`, so it is either an `Int` or a `Float`, never a `Decimal`.
-pub(crate) fn num_val(bits: usize) -> NumVal {
-    let (m, exp) = decode(bits);
-    match to_i64(m, exp) {
-        Some(i) => NumVal::Int(i),
-        None => NumVal::Float(scale_pow2(m as f64, exp)),
-    }
-}
-
-/// Encodes a finite `f64` inline as `mantissa * 2^exp`, if it fits: strip the
-/// trailing binary zeros from the `f64`'s mantissa into the exponent, then check
-/// that the mantissa and the exponent both fit the inline range.
-pub(crate) fn encode_f64(value: f64) -> Option<usize> {
-    if value == 0.0 {
-        // 0.0 / -0.0: an integer zero that carried a decimal point.
-        return Some(encode(0, exp_code(0, true)));
-    }
-    let (frac, e2, neg) = integer_decode(value);
-    let tz = frac.trailing_zeros();
-    let mag = i128::from(frac >> tz);
-    let exp = e2 + tz as i32;
-    let m = if neg { -mag } else { mag };
-    (fits_mantissa(m) && (-EXP_BIAS..=EXP_BIAS).contains(&exp))
-        .then(|| encode(m as i64, exp_code(exp, true)))
-}
-
 /// Whether the source of this inline number had a decimal point.
 fn has_decimal_point(bits: usize) -> bool {
     code_has_dot(code(bits))
@@ -207,6 +172,44 @@ fn has_decimal_point(bits: usize) -> bool {
 
 /// The base-2 inline representation of a JSON number.
 pub(crate) struct InlineNumberRepr;
+
+impl InlineNumberRepr {
+    /// Encodes a plain integer (no decimal point). Only exponent 0 is available to
+    /// integers — positive inline exponents are reserved for floats — so a value
+    /// too large for the mantissa does not fit inline and goes to the heap instead.
+    pub(crate) fn encode_int(value: i64) -> Option<usize> {
+        let limit = 1i64 << (MANTISSA_BITS - 1);
+        (value >= -limit && value < limit).then(|| encode(value, exp_code(0, false)))
+    }
+
+    /// Encodes a finite `f64` inline as `mantissa * 2^exp`, if it fits: strip the
+    /// trailing binary zeros from the `f64`'s mantissa into the exponent, then
+    /// check that the mantissa and the exponent both fit the inline range.
+    pub(crate) fn encode_f64(value: f64) -> Option<usize> {
+        if value == 0.0 {
+            // 0.0 / -0.0: an integer zero that carried a decimal point.
+            return Some(encode(0, exp_code(0, true)));
+        }
+        let (frac, e2, neg) = integer_decode(value);
+        let tz = frac.trailing_zeros();
+        let mag = i128::from(frac >> tz);
+        let exp = e2 + tz as i32;
+        let m = if neg { -mag } else { mag };
+        (fits_mantissa(m) && (-EXP_BIAS..=EXP_BIAS).contains(&exp))
+            .then(|| encode(m as i64, exp_code(exp, true)))
+    }
+
+    /// This inline number reduced to a [`NumVal`]. A binary inline float is always
+    /// an exact `f64`, so it is either an `Int` or a `Float`, never a `Decimal`.
+    pub(crate) fn num_val(bits: usize) -> NumVal {
+        let (m, exp) = decode(bits);
+        match to_i64(m, exp) {
+            Some(i) => NumVal::Int(i),
+            None => NumVal::Float(scale_pow2(m as f64, exp)),
+        }
+    }
+}
+
 impl InlineValue for InlineNumberRepr {
     fn value_type(&self) -> ValueType {
         ValueType::Number
@@ -215,7 +218,7 @@ impl InlineValue for InlineNumberRepr {
         has_decimal_point(v.ptr_usize())
     }
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        num_hash(num_val(v.ptr_usize()), state);
+        num_hash(Self::num_val(v.ptr_usize()), state);
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
         number_cmp(a, b) == Ordering::Equal
@@ -224,7 +227,7 @@ impl InlineValue for InlineNumberRepr {
         Some(number_cmp(a, b))
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        num_debug(num_val(v.ptr_usize()), f)
+        num_debug(Self::num_val(v.ptr_usize()), f)
     }
     fn destructure(&self, v: IValue) -> Destructured {
         Destructured::Number(INumber(v))
@@ -236,10 +239,10 @@ impl InlineValue for InlineNumberRepr {
         DestructuredMut::Number(v.as_number_unchecked_mut())
     }
     unsafe fn to_i64(&self, v: &IValue) -> Option<i64> {
-        num_to_i64(num_val(v.ptr_usize()))
+        num_to_i64(Self::num_val(v.ptr_usize()))
     }
     unsafe fn to_u64(&self, v: &IValue) -> Option<u64> {
-        num_to_u64(num_val(v.ptr_usize()))
+        num_to_u64(Self::num_val(v.ptr_usize()))
     }
     unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
         // A binary inline float decodes exactly.
@@ -271,9 +274,12 @@ mod tests {
         assert_ne!(exp_code(0, false), exp_code(0, true));
 
         // Integer zero (and 0.0) must never be the all-zero niche pattern.
-        assert_eq!(encode_int(0), Some(encode(0, INT_EXP0_CODE)));
-        assert_ne!(encode_int(0), Some(0));
-        assert_ne!(encode_f64(0.0), Some(0));
+        assert_eq!(
+            InlineNumberRepr::encode_int(0),
+            Some(encode(0, INT_EXP0_CODE))
+        );
+        assert_ne!(InlineNumberRepr::encode_int(0), Some(0));
+        assert_ne!(InlineNumberRepr::encode_f64(0.0), Some(0));
     }
 
     #[test]
@@ -294,7 +300,7 @@ mod tests {
             9.223372036854776e18,
             f64::MIN_POSITIVE,
         ] {
-            if let Some(bits) = encode_f64(x) {
+            if let Some(bits) = InlineNumberRepr::encode_f64(x) {
                 assert_eq!(to_f64_lossy(bits), x, "{:e} misencoded inline", x);
             }
         }
@@ -307,7 +313,7 @@ mod tests {
         // `Decimal`. `1 * 2^-1 == 0.5`.
         let bits = encode(1, exp_code(-1, true));
         assert_eq!(to_f64_exact(bits), Some(0.5));
-        match num_val(bits) {
+        match InlineNumberRepr::num_val(bits) {
             NumVal::Float(f) => assert_eq!(f, 0.5),
             _ => panic!("expected Float(0.5)"),
         }
