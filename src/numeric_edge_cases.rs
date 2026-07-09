@@ -194,6 +194,13 @@ pub(crate) fn f64_cases() -> Vec<f64> {
         0.0078125,  // 2^-7, the deepest inline fraction
         -0.0078125, // 2^-7, negative
         0.00390625, // 2^-8, just too deep -> heap
+        // Fractions that are exact f64s but whose inline *scaled* mantissa exceeds
+        // 2^53, so a naive `mantissa as f64 * 10^exp` decode rounds (found by
+        // fuzzing `to_f64_lossy`). `949288156749637.5 == 9492881567496375 * 10^-1`.
+        949288156749637.5,
+        -949288156749637.5,
+        3000000000000000.5, // 30000000000000005 * 10^-1
+        123456789012345.75, // 12345678901234575 * 10^-2
         // "Short-looking" decimals that are not exactly representable (heap).
         0.1,
         0.2,

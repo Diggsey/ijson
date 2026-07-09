@@ -312,7 +312,12 @@ pub(crate) fn to_f64_exact(bits: usize) -> Option<f64> {
 /// The (possibly lossy) `f64` value.
 pub(crate) fn to_f64_lossy(bits: usize) -> f64 {
     let (m, exp) = decode(bits);
-    decimal_to_f64_lossy(m, exp)
+    // Every inline decimal that a constructor can produce is exactly an `f64`, so
+    // decode it exactly: `m as f64 * 10^exp` would round a mantissa above `2^53`
+    // *before* scaling (e.g. `9492881567496375 * 10^-1` came out as
+    // `949288156749637.6` instead of `.5`). Only a non-`f64` inline decimal — which
+    // no constructor produces today — falls back to the naive conversion.
+    decimal_to_f64_exact(m, exp).unwrap_or_else(|| decimal_to_f64_lossy(m, exp))
 }
 
 /// Whether the source of this inline number had a decimal point.
