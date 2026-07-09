@@ -910,14 +910,35 @@ fn decimal_int_value(mantissa: i64, exp: i32) -> Option<i128> {
     }
 }
 
-/// The nearest `f64` to `mantissa * 10^exp`, correctly rounded even for a mantissa
-/// above `2^53`: an integer via the `i128 -> f64` cast, a fraction via the
-/// correctly-rounded `f64` string parser (avoiding a double rounding).
-fn decimal_to_f64_lossy(mantissa: i64, exp: i32) -> f64 {
+/// The nearest `f64` to `mantissa * 10^exp`, correctly rounded — even for a
+/// mantissa above `2^53` (reachable via a non-`f64` `Decimal`) — and without
+/// allocating.
+pub(crate) fn decimal_to_f64_lossy(mantissa: i64, exp: i32) -> f64 {
     if exp >= 0 {
-        (i128::from(mantissa) * 10i128.pow(exp as u32)) as f64
+        // An exact integer; the `i128 -> f64` cast rounds correctly.
+        return (i128::from(mantissa) * 10i128.pow(exp as u32)) as f64;
+    }
+    let m_abs = mantissa.unsigned_abs();
+    let denom = 10u128.pow((-exp) as u32);
+    let v = if m_abs < (1 << 53) {
+        // `m_abs` and `10^k` are both exact `f64`s, so one division rounds
+        // correctly.
+        m_abs as f64 / denom as f64
     } else {
-        format!("{}e{}", mantissa, exp).parse().unwrap()
+        // `m_abs >= 2^53` means `|value| >= 2^29`, so scaling by `2^64` leaves
+        // ample guard bits: integer-divide, fold the remainder into a sticky bit,
+        // then let the correctly-rounded `u128 -> f64` cast finish the rounding.
+        let scaled = u128::from(m_abs) << 64;
+        let mut q = scaled / denom;
+        if scaled % denom != 0 {
+            q |= 1;
+        }
+        q as f64 / 18_446_744_073_709_551_616.0 // 2^64
+    };
+    if mantissa < 0 {
+        -v
+    } else {
+        v
     }
 }
 
@@ -1175,6 +1196,27 @@ mod num_val_tests {
         // are unequal — and hashing them differently is therefore allowed.
         assert_ne!(cmp_num(&a, &NumVal::Float(0.1)), Ordering::Equal);
         assert_eq!(cmp_num(&a, &NumVal::Float(0.1)), Ordering::Less);
+    }
+
+    #[test]
+    fn decimal_to_f64_lossy_is_correctly_rounded() {
+        // The result must match the correctly-rounded std parser, including for a
+        // mantissa above 2^53 (which a naive `m as f64 / 10^k` would double-round).
+        // The string parse here is only the test oracle, not the implementation.
+        for &(m, e) in &[
+            (1_i64, -1),              // 0.1
+            (3, -1),                  // 0.3
+            (9492881567496375, -1),   // 949288156749637.5 (exact f64)
+            (12345678901234567, -1),  // 1234567890123456.7 (> 2^53 mantissa)
+            (99999999999999999, -7),  // 9999999999.9999999
+            (-12345678901234567, -3), // negative
+            (36028797018963967, -1),  // (2^55 - 1) * 10^-1
+            (36028797018963967, 7),   // exp >= 0 path
+            (7, -7),                  // 7e-7 (tiny, small mantissa)
+        ] {
+            let oracle: f64 = format!("{}e{}", m, e).parse().unwrap();
+            assert_eq!(decimal_to_f64_lossy(m, e), oracle, "{} e {}", m, e);
+        }
     }
 }
 

@@ -44,8 +44,8 @@ use std::hash::Hasher;
 use super::InlineValue;
 use crate::number::INumber;
 use crate::value::{
-    num_debug, num_hash, num_to_i64, num_to_u64, number_cmp, Destructured, DestructuredMut,
-    DestructuredRef, IValue, NumVal, ValueType,
+    decimal_to_f64_lossy, num_debug, num_hash, num_to_i64, num_to_u64, number_cmp, Destructured,
+    DestructuredMut, DestructuredRef, IValue, NumVal, ValueType,
 };
 
 const EXP_SHIFT: u32 = 4;
@@ -271,19 +271,6 @@ fn decimal_to_i128(m: i64, exp: i32) -> Option<i128> {
     // `exp` is non-negative here (fractional values divide instead); the product
     // can exceed `i64` but always fits `i128`.
     i128::from(m).checked_mul(10i128.pow(exp as u32))
-}
-
-fn decimal_to_f64_lossy(m: i64, exp: i32) -> f64 {
-    // The nearest `f64`, correctly rounded even when the mantissa exceeds `2^53`
-    // (reachable for a `Decimal` that is not an exact `f64`). For `exp >= 0` the
-    // value is an integer whose `i128 -> f64` cast rounds correctly; a fraction is
-    // rounded through the (correctly-rounded) `f64` string parser to avoid
-    // double-rounding the mantissa before scaling.
-    if exp >= 0 {
-        (i128::from(m) * 10i128.pow(exp as u32)) as f64
-    } else {
-        format!("{}e{}", m, exp).parse().unwrap()
-    }
 }
 
 /// `true` if the `i64` value `v` is exactly representable as an `f64`.
