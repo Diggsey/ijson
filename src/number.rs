@@ -12,6 +12,7 @@ use std::cmp::Ordering;
 use std::convert::TryFrom;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
+use std::str::FromStr;
 
 use crate::value::IValue;
 
@@ -188,6 +189,157 @@ impl TryFrom<f32> for INumber {
         } else {
             Err(())
         }
+    }
+}
+
+/// The error returned when a string cannot be parsed as an [`INumber`]: either it
+/// is not a valid JSON number, or its magnitude is beyond the representable range
+/// (a float that would be infinite).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseNumberError(());
+
+impl fmt::Display for ParseNumberError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str("invalid JSON number")
+    }
+}
+
+impl std::error::Error for ParseNumberError {}
+
+/// Whether a valid JSON number is written as a plain integer or with a fraction
+/// or exponent (i.e. as a float).
+enum NumberShape {
+    Integer,
+    Float,
+}
+
+/// Validates `s` against the JSON number grammar (see <https://www.json.org/>),
+/// reporting whether it is integer- or float-shaped, or `None` if it is not a
+/// valid JSON number.
+///
+/// ```text
+/// number   = integer fraction exponent
+/// integer  = digit | onenine digits | '-' digit | '-' onenine digits
+/// fraction = "" | '.' digits
+/// exponent = "" | ('E' | 'e') sign digits
+/// sign     = "" | '+' | '-'
+/// digits   = digit | digit digits
+/// ```
+fn classify_json_number(s: &str) -> Option<NumberShape> {
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut i = 0;
+
+    // Optional minus sign (a leading '+' is not permitted).
+    if i < n && b[i] == b'-' {
+        i += 1;
+    }
+
+    // Integer part: a single '0', or a '1'..='9' followed by more digits. This
+    // rejects leading zeros such as "01".
+    match b.get(i) {
+        Some(b'0') => i += 1,
+        Some(&c) if c.is_ascii_digit() => {
+            i += 1;
+            while i < n && b[i].is_ascii_digit() {
+                i += 1;
+            }
+        }
+        _ => return None,
+    }
+
+    let mut is_float = false;
+
+    // Fraction: a '.' must be followed by at least one digit.
+    if i < n && b[i] == b'.' {
+        is_float = true;
+        i += 1;
+        if !matches!(b.get(i), Some(c) if c.is_ascii_digit()) {
+            return None;
+        }
+        while i < n && b[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+
+    // Exponent: 'e'/'E', an optional sign, then at least one digit.
+    if i < n && (b[i] == b'e' || b[i] == b'E') {
+        is_float = true;
+        i += 1;
+        if i < n && (b[i] == b'+' || b[i] == b'-') {
+            i += 1;
+        }
+        if !matches!(b.get(i), Some(c) if c.is_ascii_digit()) {
+            return None;
+        }
+        while i < n && b[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+
+    // Reject any trailing characters (and surrounding whitespace).
+    if i != n {
+        return None;
+    }
+
+    Some(if is_float {
+        NumberShape::Float
+    } else {
+        NumberShape::Integer
+    })
+}
+
+/// Parses a JSON number from its textual form, exactly as the JSON grammar
+/// defines it (see <https://www.json.org/>). A number written with a fraction or
+/// exponent — or a plain integer too large for `i64`/`u64` — is stored as a
+/// float; a plain in-range integer keeps its integer representation (and so
+/// reports no decimal point). This mirrors how `serde_json` deserializes numbers.
+///
+/// # Examples
+///
+/// ```
+/// # use ijson::INumber;
+/// let n: INumber = "1.5".parse().unwrap();
+/// assert_eq!(n.to_f64(), Some(1.5));
+/// assert!(n.has_decimal_point());
+///
+/// let n: INumber = "-42".parse().unwrap();
+/// assert_eq!(n.to_i64(), Some(-42));
+/// assert!(!n.has_decimal_point());
+///
+/// // Invalid JSON numbers are rejected (leading zero, bare '+', trailing '.').
+/// assert!("01".parse::<INumber>().is_err());
+/// assert!("+1".parse::<INumber>().is_err());
+/// assert!("1.".parse::<INumber>().is_err());
+/// ```
+impl FromStr for INumber {
+    type Err = ParseNumberError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let float_from = |s: &str| -> Result<IValue, ParseNumberError> {
+            // A valid JSON float is always accepted by `f64::from_str`; only its
+            // magnitude can be out of range (parsing to an infinity), which we
+            // reject so the `INumber` stays finite.
+            match s.parse::<f64>() {
+                Ok(v) if v.is_finite() => Ok(IValue::new_f64(v)),
+                _ => Err(ParseNumberError(())),
+            }
+        };
+
+        let value = match classify_json_number(s).ok_or(ParseNumberError(()))? {
+            NumberShape::Integer => {
+                if let Ok(v) = s.parse::<i64>() {
+                    IValue::new_i64(v)
+                } else if let Ok(v) = s.parse::<u64>() {
+                    IValue::new_u64(v)
+                } else {
+                    // An integer beyond `u64`'s range is stored as a float.
+                    float_from(s)?
+                }
+            }
+            NumberShape::Float => float_from(s)?,
+        };
+        Ok(INumber(value))
     }
 }
 
@@ -436,5 +588,117 @@ mod tests {
 
         // Regardless of representation they are numerically equal.
         assert_eq!(int, float);
+    }
+
+    #[test]
+    fn parses_valid_integers() {
+        for (s, v) in [
+            ("0", 0i64),
+            ("-0", 0),
+            ("42", 42),
+            ("-42", -42),
+            ("9223372036854775807", i64::MAX),
+            ("-9223372036854775808", i64::MIN),
+        ] {
+            let n: INumber = s.parse().unwrap();
+            assert_eq!(n.to_i64(), Some(v), "{}", s);
+            assert!(!n.has_decimal_point(), "{} should have no decimal point", s);
+        }
+
+        // Above `i64::MAX` but within `u64`.
+        let n: INumber = "18446744073709551615".parse().unwrap();
+        assert_eq!(n.to_u64(), Some(u64::MAX));
+        assert!(!n.has_decimal_point());
+    }
+
+    #[test]
+    fn parses_valid_floats() {
+        for (s, v) in [
+            ("0.0", 0.0f64),
+            ("-0.0", -0.0),
+            ("1.5", 1.5),
+            ("0.5", 0.5),
+            ("-3.25", -3.25),
+            ("1e3", 1000.0),
+            ("1E3", 1000.0),
+            ("1e+3", 1000.0),
+            ("1e-3", 0.001),
+            ("1.5e2", 150.0),
+        ] {
+            let n: INumber = s.parse().unwrap();
+            assert_eq!(n.to_f64_lossy(), v, "{}", s);
+            assert!(n.has_decimal_point(), "{} should have a decimal point", s);
+        }
+    }
+
+    #[test]
+    fn a_plain_integer_beyond_u64_becomes_a_float() {
+        // Not exactly representable, so it is stored as a float (like serde_json).
+        let n: INumber = "100000000000000000000".parse().unwrap(); // 1e20
+        assert_eq!(n.to_f64_lossy(), 1e20);
+        assert!(n.has_decimal_point());
+    }
+
+    #[test]
+    fn rejects_invalid_json_numbers() {
+        for s in [
+            "",
+            " ",
+            "1 ",
+            " 1",
+            "+1",
+            "01",
+            "-01",
+            "00",
+            "1.",
+            ".5",
+            "1.e2",
+            "1e",
+            "1e+",
+            "1e-",
+            "1..2",
+            "1.2.3",
+            "abc",
+            "NaN",
+            "Infinity",
+            "-Infinity",
+            "0x1f",
+            "1_000",
+            "1,000",
+            "--1",
+            "1-",
+            "e5",
+            ".",
+            "-",
+            "+",
+            "0.",
+            "1.0.",
+            "0xa",
+        ] {
+            assert!(s.parse::<INumber>().is_err(), "{:?} should be rejected", s);
+        }
+    }
+
+    #[test]
+    fn rejects_out_of_range_magnitude() {
+        // A finite JSON float whose magnitude overflows f64 is not representable.
+        assert!("1e400".parse::<INumber>().is_err());
+        assert!("-1e400".parse::<INumber>().is_err());
+    }
+
+    #[test]
+    fn round_trips_through_serialization() {
+        for s in ["0", "-42", "1.5", "1e3", "0.001", "18446744073709551615"] {
+            let n: INumber = s.parse().unwrap();
+            // Parsing the text and deserializing the same JSON agree.
+            let via_serde: INumber = serde_json::from_str(s).unwrap();
+            assert_eq!(n, via_serde, "{}", s);
+            assert_eq!(
+                n.has_decimal_point(),
+                via_serde.has_decimal_point(),
+                "{}",
+                s
+            );
+        }
     }
 }

@@ -31,7 +31,7 @@ mod thin;
 mod value;
 
 pub use array::IArray;
-pub use number::INumber;
+pub use number::{INumber, ParseNumberError};
 pub use object::IObject;
 pub use string::IString;
 pub use value::{
