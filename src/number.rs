@@ -53,59 +53,61 @@ impl INumber {
     /// Converts this number to an i64 if it can be represented exactly.
     #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
-        self.0.number_to_i64()
+        self.0.to_i64()
     }
     /// Converts this number to a u64 if it can be represented exactly.
     #[must_use]
     pub fn to_u64(&self) -> Option<u64> {
-        self.0.number_to_u64()
+        self.0.to_u64()
     }
     /// Converts this number to an f64 if it can be represented exactly.
     #[must_use]
     pub fn to_f64(&self) -> Option<f64> {
-        self.0.number_to_f64()
+        self.0.to_f64()
     }
     /// Converts this number to an f32 if it can be represented exactly.
     #[must_use]
     pub fn to_f32(&self) -> Option<f32> {
-        self.0.number_to_f32()
+        self.0.to_f32()
     }
     /// Converts this number to an i32 if it can be represented exactly.
     #[must_use]
     pub fn to_i32(&self) -> Option<i32> {
-        self.0.number_to_i32()
+        self.0.to_i32()
     }
     /// Converts this number to a u32 if it can be represented exactly.
     #[must_use]
     pub fn to_u32(&self) -> Option<u32> {
-        self.0.number_to_u32()
+        self.0.to_u32()
     }
     /// Converts this number to an isize if it can be represented exactly.
     #[must_use]
     pub fn to_isize(&self) -> Option<isize> {
-        self.0.number_to_isize()
+        self.0.to_isize()
     }
     /// Converts this number to a usize if it can be represented exactly.
     #[must_use]
     pub fn to_usize(&self) -> Option<usize> {
-        self.0.number_to_usize()
+        self.0.to_usize()
     }
     /// Converts this number to an f64, potentially losing precision in the process.
     #[must_use]
     pub fn to_f64_lossy(&self) -> f64 {
-        self.0.number_to_f64_lossy()
+        // Always a number, so the representation always yields a value.
+        self.0.to_f64_lossy().unwrap()
     }
     /// Converts this number to an f32, potentially losing precision in the process.
     #[must_use]
     pub fn to_f32_lossy(&self) -> f32 {
-        self.0.number_to_f32_lossy()
+        // Always a number, so the representation always yields a value.
+        self.0.to_f32_lossy().unwrap()
     }
 
     /// This allows distinguishing between `1.0` and `1` in the original JSON.
     /// Numeric operations will otherwise treat these two values as equivalent.
     #[must_use]
     pub fn has_decimal_point(&self) -> bool {
-        self.0.number_has_decimal_point()
+        self.0.has_decimal_point()
     }
 }
 
@@ -244,7 +246,8 @@ impl PartialEq for INumber {
 impl Eq for INumber {}
 impl Ord for INumber {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.0.number_cmp(&other.0)
+        // Two numbers always compare (via the representation's `partial_cmp`).
+        self.0.partial_cmp(&other.0).unwrap()
     }
 }
 impl PartialOrd for INumber {
@@ -255,7 +258,7 @@ impl PartialOrd for INumber {
 
 impl Debug for INumber {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.0.number_debug(f)
+        Debug::fmt(&self.0, f)
     }
 }
 

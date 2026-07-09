@@ -20,9 +20,12 @@ use std::hash::Hasher;
 use std::ptr::NonNull;
 
 use crate::alloc::{alloc_infallible, dealloc_infallible, realloc_infallible};
+use crate::array::IArray;
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
-use super::{IValue, TypeTag};
+use super::{
+    Destructured, DestructuredMut, DestructuredRef, IValue, TypeTag, ValueRepr, ValueType,
+};
 
 #[repr(C)]
 #[repr(align(8))]
@@ -295,4 +298,42 @@ pub(crate) unsafe fn cmp(a: &IValue, b: &IValue) -> Option<Ordering> {
 
 pub(crate) unsafe fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
     Debug::fmt(as_slice(v), f)
+}
+
+/// The array representation.
+pub(crate) struct ArrayRepr;
+impl ValueRepr for ArrayRepr {
+    fn value_type(&self) -> ValueType {
+        ValueType::Array
+    }
+    unsafe fn clone(&self, v: &IValue) -> IValue {
+        clone(v)
+    }
+    unsafe fn drop(&self, v: &mut IValue) {
+        self::drop(v);
+    }
+    unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
+        hash(v, state);
+    }
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
+        eq(a, b)
+    }
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
+        cmp(a, b)
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        debug(v, f)
+    }
+    fn destructure(&self, v: IValue) -> Destructured {
+        Destructured::Array(IArray(v))
+    }
+    unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
+        DestructuredRef::Array(v.as_array_unchecked())
+    }
+    unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
+        DestructuredMut::Array(v.as_array_unchecked_mut())
+    }
+    unsafe fn len(&self, v: &IValue) -> Option<usize> {
+        Some(v.as_array_unchecked().len())
+    }
 }

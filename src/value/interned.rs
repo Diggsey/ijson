@@ -8,6 +8,8 @@
 
 use std::alloc::{Layout, LayoutError};
 use std::borrow::Borrow;
+use std::cmp::Ordering;
+use std::fmt::{self, Formatter};
 use std::hash::Hash;
 use std::ops::Deref;
 use std::ptr::{copy_nonoverlapping, NonNull};
@@ -17,7 +19,12 @@ use dashmap::{DashSet, SharedValue};
 use lazy_static::lazy_static;
 
 use crate::alloc::{alloc_infallible, dealloc_infallible};
+use crate::string::IString;
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
+use crate::value::{
+    string_cmp, string_debug, Destructured, DestructuredMut, DestructuredRef, IValue, ValueRepr,
+    ValueType,
+};
 
 #[repr(C)]
 #[repr(align(8))]
@@ -179,11 +186,6 @@ unsafe fn as_header<'a>(ptr: NonNull<u8>) -> ThinRef<'a, Header> {
     ThinRef::new(ptr.cast())
 }
 
-/// The byte length of an interned string.
-pub(crate) unsafe fn len(ptr: NonNull<u8>) -> usize {
-    as_header(ptr).len()
-}
-
 /// The UTF-8 bytes of an interned string.
 pub(crate) unsafe fn bytes<'a>(ptr: NonNull<u8>) -> &'a [u8] {
     as_header(ptr).bytes()
@@ -234,4 +236,39 @@ pub(crate) unsafe fn release(ptr: NonNull<u8>) {
 
         dealloc(ptr.cast());
     }
+}
+
+/// The heap interned-string representation of a JSON string.
+pub(crate) struct InternedRepr;
+impl ValueRepr for InternedRepr {
+    fn value_type(&self) -> ValueType {
+        ValueType::String
+    }
+    unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> Option<&'a [u8]> {
+        Some(bytes(v.ptr()))
+    }
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
+        Some(string_cmp(a, b))
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        string_debug(v, f)
+    }
+    fn destructure(&self, v: IValue) -> Destructured {
+        Destructured::String(IString(v))
+    }
+    unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
+        DestructuredRef::String(v.as_string_unchecked())
+    }
+    unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
+        DestructuredMut::String(v.as_string_unchecked_mut())
+    }
+    unsafe fn clone(&self, v: &IValue) -> IValue {
+        bump_rc(v.ptr());
+        v.raw_copy()
+    }
+    unsafe fn drop(&self, v: &mut IValue) {
+        release(v.ptr());
+    }
+    // hash/eq use the defaults (pointer word / `raw_eq`): interning deduplicates,
+    // so equal interned strings share one allocation and compare by pointer.
 }

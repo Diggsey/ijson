@@ -6,12 +6,20 @@
 //! the length (bits 4-6), with bit 7 clear (set only for the `null`/`false`/
 //! `true` constants). The remaining bytes hold the UTF-8 data.
 //!
-//! These operate on the raw inline bits (and, for the borrowed bytes, a pointer
-//! to the value's own storage); they do not know about `IValue`.
+//! The encode/decode helpers operate on the raw inline bits (and, for the
+//! borrowed bytes, a pointer to the value's own storage); only the [`ValueRepr`]
+//! impl at the bottom knows about `IValue`.
 
+use std::cmp::Ordering;
+use std::fmt::{self, Formatter};
 use std::ptr::NonNull;
 
 use super::STR_FAMILY;
+use crate::string::IString;
+use crate::value::{
+    string_cmp, string_debug, Destructured, DestructuredMut, DestructuredRef, IValue, ValueRepr,
+    ValueType,
+};
 
 /// The number of string bytes that fit inline in a pointer-sized value:
 /// 7 on 64-bit platforms and 3 on 32-bit (one byte is the control byte).
@@ -63,4 +71,33 @@ pub(crate) fn len(bits: usize) -> usize {
 /// for `'a`.
 pub(crate) unsafe fn bytes<'a>(storage: NonNull<u8>, bits: usize) -> &'a [u8] {
     std::slice::from_raw_parts(storage.as_ptr().add(CHAR_OFFSET), len(bits))
+}
+
+/// The inline short-string representation of a JSON string.
+pub(crate) struct InlineStringRepr;
+impl ValueRepr for InlineStringRepr {
+    fn value_type(&self) -> ValueType {
+        ValueType::String
+    }
+    unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> Option<&'a [u8]> {
+        // Safety: an inline string keeps its bytes within `v`'s own storage.
+        Some(bytes(NonNull::from(v).cast(), v.ptr_usize()))
+    }
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
+        Some(string_cmp(a, b))
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        string_debug(v, f)
+    }
+    fn destructure(&self, v: IValue) -> Destructured {
+        Destructured::String(IString(v))
+    }
+    unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
+        DestructuredRef::String(v.as_string_unchecked())
+    }
+    unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
+        DestructuredMut::String(v.as_string_unchecked_mut())
+    }
+    // clone/drop/hash/eq use the defaults (bit-copy / nothing / pointer word /
+    // `raw_eq`), all correct for an inline string.
 }

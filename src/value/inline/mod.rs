@@ -11,6 +11,7 @@
 //! The all-zero value is never produced (the number exponent is biased so
 //! integer zero is non-zero), reserving it as the `NonNull` niche.
 
+pub(crate) mod constant;
 pub(crate) mod number;
 pub(crate) mod string;
 

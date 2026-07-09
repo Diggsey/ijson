@@ -16,15 +16,21 @@ use std::ptr::NonNull;
 #[cfg(feature = "indexmap")]
 use indexmap::IndexMap;
 
-// The value module owns `IValue` and its representations. Each representation is
-// a submodule: the two array/object representations plus the `inline`, `scalar`
-// and `interned` storage forms. `number` and `string` are *not* representations
-// — each is a JSON type that spans two of those representations (inline decimal
-// vs heap scalar; inline short string vs interned string). That per-type
-// dispatch therefore lives on `IValue` itself, as the `new_*`/`number_*`/
-// `string_*` methods below, which pick a representation as early as possible and
-// then defer to it. The public wrapper types (`IArray`, `INumber`, `IObject`,
-// `IString`) live in the top-level modules and delegate down to those methods.
+// The value module owns `IValue` and its representations. Each representation
+// implements the `ValueRepr` trait and lives in its own submodule: `array`,
+// `object`, `scalar` (heap number), `interned` (heap string), and — within
+// `inline` — `number`, `string` and `constant` (null/bool). `IValue` finds a
+// value's representation once, via `repr()`, and every operation delegates down
+// to it; the per-`NumVal`/`&str` logic that both number (or both string)
+// representations share is factored into the standalone `num_*`/`string_*`
+// utility functions below, never into a representation that reaches back up.
+//
+// A JSON *number* or *string* spans two representations, so `new_*` construction
+// picks one as early as possible, and the one place that has to resolve an
+// operand of unknown representation — comparing two numbers or two strings — does
+// so through `num_val_of`/`string_as_str`. The public wrapper types (`IArray`,
+// `INumber`, `IObject`, `IString`) live in the top-level modules and delegate
+// down through `IValue`.
 pub(crate) mod array;
 pub(crate) mod inline;
 pub(crate) mod interned;
@@ -706,14 +712,119 @@ impl IValue {
 // else — fractions and integer-valued floats too large for `i64`, all exactly
 // representable as `f64` — becomes `Float`. This spans the full numeric range
 // without needing `i128`.
-enum NumVal {
+//
+// Each number *representation* reduces its own storage to a `NumVal` (see
+// `inline::number::num_val` and `scalar::num_val`); the standalone `num_*`
+// functions below then implement every value operation once, shared by both.
+#[derive(Clone, Copy)]
+pub(crate) enum NumVal {
     Int(i64),
     UInt(u64),
     Float(f64),
 }
 
-fn can_represent_as_f64(x: u64) -> bool {
+pub(crate) fn can_represent_as_f64(x: u64) -> bool {
     x.leading_zeros() + x.trailing_zeros() >= 11
+}
+
+/// The exact `i64` value, if it is an integer in range.
+pub(crate) fn num_to_i64(nv: NumVal) -> Option<i64> {
+    match nv {
+        NumVal::Int(x) => Some(x),
+        NumVal::UInt(x) => i64::try_from(x).ok(),
+        NumVal::Float(x) => {
+            (x.fract() == 0.0 && x >= i64::MIN as f64 && x < i64::MAX as f64).then_some(x as i64)
+        }
+    }
+}
+
+/// The exact `u64` value, if it is a non-negative integer in range.
+pub(crate) fn num_to_u64(nv: NumVal) -> Option<u64> {
+    match nv {
+        NumVal::Int(x) => u64::try_from(x).ok(),
+        NumVal::UInt(x) => Some(x),
+        NumVal::Float(x) => {
+            (x.fract() == 0.0 && x >= 0.0 && x < u64::MAX as f64).then_some(x as u64)
+        }
+    }
+}
+
+/// The exact `f64` value, if it is exactly representable. (The inline
+/// representation has its own decimal-exact path; this covers the heap scalar.)
+pub(crate) fn num_to_f64(nv: NumVal) -> Option<f64> {
+    match nv {
+        NumVal::Int(x) => can_represent_as_f64(x.unsigned_abs()).then_some(x as f64),
+        NumVal::UInt(x) => can_represent_as_f64(x).then_some(x as f64),
+        NumVal::Float(x) => Some(x),
+    }
+}
+
+/// The (possibly lossy) `f64` value.
+pub(crate) fn num_to_f64_lossy(nv: NumVal) -> f64 {
+    match nv {
+        NumVal::Int(x) => x as f64,
+        NumVal::UInt(x) => x as f64,
+        NumVal::Float(x) => x,
+    }
+}
+
+/// Hashes a number by its numeric value, so the inline and heap forms of a value
+/// (e.g. the float `1e18` and the integer `10^18`, which compare equal) agree.
+pub(crate) fn num_hash(nv: NumVal, state: &mut dyn Hasher) {
+    if let Some(x) = num_to_i64(nv) {
+        state.write_i64(x);
+    } else if let Some(x) = num_to_u64(nv) {
+        state.write_u64(x);
+    } else {
+        let f = num_to_f64_lossy(nv);
+        state.write_u64(if f == 0.0 { 0 } else { f.to_bits() });
+    }
+}
+
+/// Formats a number the way `serde_json` would (integer if it is one).
+pub(crate) fn num_debug(nv: NumVal, f: &mut Formatter<'_>) -> fmt::Result {
+    if let Some(x) = num_to_i64(nv) {
+        Debug::fmt(&x, f)
+    } else if let Some(x) = num_to_u64(nv) {
+        Debug::fmt(&x, f)
+    } else {
+        Debug::fmt(&num_to_f64_lossy(nv), f)
+    }
+}
+
+// Reduces a number of *either* representation to a `NumVal`. Numbers span two
+// representations, so the binary comparison below has to resolve each operand's
+// representation; this is the one place that dispatch remains.
+fn num_val_of(v: &IValue) -> NumVal {
+    if v.is_inline() {
+        inline::number::num_val(v.ptr_usize())
+    } else {
+        // Safety: a non-inline number is a heap scalar.
+        unsafe { scalar::num_val(v) }
+    }
+}
+
+/// Compares two numbers exactly, regardless of how each is represented.
+pub(crate) fn number_cmp(a: &IValue, b: &IValue) -> Ordering {
+    if a.raw_eq(b) {
+        Ordering::Equal
+    } else {
+        cmp_num(&num_val_of(a), &num_val_of(b))
+    }
+}
+
+/// Compares two strings, regardless of how each is represented.
+pub(crate) fn string_cmp(a: &IValue, b: &IValue) -> Ordering {
+    if a.raw_eq(b) {
+        Ordering::Equal
+    } else {
+        a.string_as_str().cmp(b.string_as_str())
+    }
+}
+
+/// Formats a string of either representation.
+pub(crate) fn string_debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+    Debug::fmt(v.string_as_str(), f)
 }
 
 // `a == trunc(b)` already; the fractional part of `b` breaks the tie.
@@ -819,136 +930,10 @@ impl IValue {
         }
     }
 
-    // Safety: reads the heap scalar payload; only valid for heap number tags.
-    unsafe fn scalar_bits(&self) -> u64 {
-        scalar::read(self.ptr())
-    }
-
-    fn number_num_val(&self) -> NumVal {
-        if self.is_inline() {
-            let bits = self.ptr_usize();
-            match inline::number::value_i64(bits) {
-                Some(i) => NumVal::Int(i),
-                // Fractional, or an integer-valued float too large for `i64` —
-                // both are exactly representable as `f64`.
-                None => NumVal::Float(
-                    inline::number::to_f64_exact(bits)
-                        .expect("a non-i64 inline number is exactly representable as f64"),
-                ),
-            }
-        } else {
-            // Safety: not inline, so it is a heap scalar number.
-            unsafe {
-                match self.type_tag() {
-                    TypeTag::NumberI64 => NumVal::Int(self.scalar_bits() as i64),
-                    TypeTag::NumberU64 => NumVal::UInt(self.scalar_bits()),
-                    _ => NumVal::Float(f64::from_bits(self.scalar_bits())),
-                }
-            }
-        }
-    }
-
-    pub(crate) fn number_to_i64(&self) -> Option<i64> {
-        match self.number_num_val() {
-            NumVal::Int(x) => Some(x),
-            NumVal::UInt(x) => i64::try_from(x).ok(),
-            NumVal::Float(x) => (x.fract() == 0.0 && x >= i64::MIN as f64 && x < i64::MAX as f64)
-                .then_some(x as i64),
-        }
-    }
-
-    pub(crate) fn number_to_u64(&self) -> Option<u64> {
-        match self.number_num_val() {
-            NumVal::Int(x) => u64::try_from(x).ok(),
-            NumVal::UInt(x) => Some(x),
-            NumVal::Float(x) => {
-                (x.fract() == 0.0 && x >= 0.0 && x < u64::MAX as f64).then_some(x as u64)
-            }
-        }
-    }
-
-    pub(crate) fn number_to_f64(&self) -> Option<f64> {
-        if self.is_inline() {
-            inline::number::to_f64_exact(self.ptr_usize())
-        } else {
-            // Safety: not inline, so it is a heap scalar number.
-            unsafe {
-                match self.type_tag() {
-                    TypeTag::NumberI64 => {
-                        let x = self.scalar_bits() as i64;
-                        can_represent_as_f64(x.unsigned_abs()).then_some(x as f64)
-                    }
-                    TypeTag::NumberU64 => {
-                        let x = self.scalar_bits();
-                        can_represent_as_f64(x).then_some(x as f64)
-                    }
-                    _ => Some(f64::from_bits(self.scalar_bits())),
-                }
-            }
-        }
-    }
-
-    pub(crate) fn number_to_f64_lossy(&self) -> f64 {
-        if self.is_inline() {
-            inline::number::to_f64_lossy(self.ptr_usize())
-        } else {
-            // Safety: not inline, so it is a heap scalar number.
-            unsafe {
-                match self.type_tag() {
-                    TypeTag::NumberI64 => self.scalar_bits() as i64 as f64,
-                    TypeTag::NumberU64 => self.scalar_bits() as f64,
-                    _ => f64::from_bits(self.scalar_bits()),
-                }
-            }
-        }
-    }
-
-    pub(crate) fn number_has_decimal_point(&self) -> bool {
-        if self.is_inline() {
-            inline::number::has_decimal_point(self.ptr_usize())
-        } else {
-            self.type_tag() == TypeTag::NumberF64
-        }
-    }
-
-    pub(crate) fn number_to_i32(&self) -> Option<i32> {
-        self.number_to_i64().and_then(|x| x.try_into().ok())
-    }
-    pub(crate) fn number_to_u32(&self) -> Option<u32> {
-        self.number_to_u64().and_then(|x| x.try_into().ok())
-    }
-    pub(crate) fn number_to_isize(&self) -> Option<isize> {
-        self.number_to_i64().and_then(|x| x.try_into().ok())
-    }
-    pub(crate) fn number_to_usize(&self) -> Option<usize> {
-        self.number_to_u64().and_then(|x| x.try_into().ok())
-    }
-    pub(crate) fn number_to_f32(&self) -> Option<f32> {
-        // A value is exactly an f32 only if it is exactly an f64.
-        let x = self.number_to_f64()?;
-        let u = x as f32;
-        (f64::from(u) == x).then_some(u)
-    }
-    pub(crate) fn number_to_f32_lossy(&self) -> f32 {
-        self.number_to_f64_lossy() as f32
-    }
-
-    pub(crate) fn number_cmp(&self, other: &Self) -> Ordering {
-        if self.raw_eq(other) {
-            Ordering::Equal
-        } else {
-            cmp_num(&self.number_num_val(), &other.number_num_val())
-        }
-    }
-
-    pub(crate) fn number_debug(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        if let Some(x) = self.number_to_i64() {
-            Debug::fmt(&x, f)
-        } else if let Some(x) = self.number_to_u64() {
-            Debug::fmt(&x, f)
-        } else {
-            Debug::fmt(&self.number_to_f64_lossy(), f)
-        }
+    /// Whether this number was written with a decimal point (`1.0` vs `1`).
+    /// Delegates down to the representation; `false` for non-numbers.
+    pub(crate) fn has_decimal_point(&self) -> bool {
+        self.repr().has_decimal_point(self)
     }
 }
 
@@ -966,23 +951,11 @@ impl IValue {
         }
     }
 
-    pub(crate) fn string_len(&self) -> usize {
-        if self.is_inline() {
-            inline::string::len(self.ptr_usize())
-        } else {
-            // Safety: not an inline string, so it is interned.
-            unsafe { interned::len(self.ptr()) }
-        }
-    }
-
     pub(crate) fn string_bytes(&self) -> &[u8] {
-        if self.is_inline() {
-            // Safety: an inline string keeps its bytes within `self`'s storage.
-            unsafe { inline::string::bytes(NonNull::from(self).cast(), self.ptr_usize()) }
-        } else {
-            // Safety: not an inline string, so it is interned.
-            unsafe { interned::bytes(self.ptr()) }
-        }
+        // Safety: `repr()` selects this value's own representation; `as_bytes` is
+        // `Some` for both string representations (and this is only called on a
+        // string).
+        unsafe { self.repr().as_bytes(self).expect("not a string") }
     }
 
     pub(crate) fn string_as_str(&self) -> &str {
@@ -990,16 +963,8 @@ impl IValue {
         unsafe { std::str::from_utf8_unchecked(self.string_bytes()) }
     }
 
-    pub(crate) fn string_cmp(&self, other: &Self) -> Ordering {
-        if self.raw_eq(other) {
-            Ordering::Equal
-        } else {
-            self.string_as_str().cmp(other.string_as_str())
-        }
-    }
-
-    pub(crate) fn string_debug(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        Debug::fmt(self.string_as_str(), f)
+    pub(crate) fn string_len(&self) -> usize {
+        self.string_bytes().len()
     }
 }
 
@@ -1035,7 +1000,7 @@ impl IValue {
 /// binary `eq`/`partial_cmp`, the first argument is this representation and the
 /// second is guaranteed by the caller to be the same JSON *type* (possibly a
 /// different representation of it — e.g. an inline vs heap number).
-trait ValueRepr {
+pub(crate) trait ValueRepr {
     /// The JSON type this representation stores.
     fn value_type(&self) -> ValueType;
 
@@ -1095,241 +1060,16 @@ trait ValueRepr {
     unsafe fn len(&self, _v: &IValue) -> Option<usize> {
         None
     }
-}
-
-// A number's inline-decimal and heap-scalar representations, and a string's
-// inline and interned representations, are distinct (they clone/drop
-// differently) but share all their *value* operations. These macros supply the
-// shared operations; the individual reps then override only clone/drop.
-macro_rules! number_repr_ops {
-    () => {
-        fn value_type(&self) -> ValueType {
-            ValueType::Number
-        }
-        // Hash by numeric value (not raw bits), so a value reached inline and a
-        // value reached on the heap — e.g. the float `1e18` and the integer
-        // `10^18`, which compare equal — hash the same.
-        unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-            if let Some(x) = v.number_to_i64() {
-                state.write_i64(x);
-            } else if let Some(x) = v.number_to_u64() {
-                state.write_u64(x);
-            } else {
-                let f = v.number_to_f64_lossy();
-                state.write_u64(if f == 0.0 { 0 } else { f.to_bits() });
-            }
-        }
-        unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
-            a.number_cmp(b) == Ordering::Equal
-        }
-        unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
-            Some(a.number_cmp(b))
-        }
-        unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-            v.number_debug(f)
-        }
-        fn destructure(&self, v: IValue) -> Destructured {
-            Destructured::Number(INumber(v))
-        }
-        unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
-            DestructuredRef::Number(v.as_number_unchecked())
-        }
-        unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
-            DestructuredMut::Number(v.as_number_unchecked_mut())
-        }
-        unsafe fn to_i64(&self, v: &IValue) -> Option<i64> {
-            v.number_to_i64()
-        }
-        unsafe fn to_u64(&self, v: &IValue) -> Option<u64> {
-            v.number_to_u64()
-        }
-        unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
-            v.number_to_f64()
-        }
-        unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
-            Some(v.number_to_f64_lossy())
-        }
-    };
-}
-
-macro_rules! string_repr_ops {
-    () => {
-        fn value_type(&self) -> ValueType {
-            ValueType::String
-        }
-        // `hash` and `eq` use the trait defaults (the canonical pointer word and
-        // `raw_eq`), which are exactly right for strings.
-        unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
-            Some(a.string_cmp(b))
-        }
-        unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-            v.string_debug(f)
-        }
-        fn destructure(&self, v: IValue) -> Destructured {
-            Destructured::String(IString(v))
-        }
-        unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
-            DestructuredRef::String(v.as_string_unchecked())
-        }
-        unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
-            DestructuredMut::String(v.as_string_unchecked_mut())
-        }
-    };
-}
-
-struct NullRepr;
-impl ValueRepr for NullRepr {
-    fn value_type(&self) -> ValueType {
-        ValueType::Null
+    /// The UTF-8 bytes of a string; `None` for every non-string representation.
+    /// The two string representations override this with their own byte access.
+    unsafe fn as_bytes<'a>(&self, _v: &'a IValue) -> Option<&'a [u8]> {
+        None
     }
-    // clone/drop/hash/eq use the defaults (bit-copy / nothing / pointer word /
-    // `raw_eq`), all correct for the single `null` value.
-    unsafe fn partial_cmp(&self, _a: &IValue, _b: &IValue) -> Option<Ordering> {
-        Some(Ordering::Equal)
-    }
-    unsafe fn debug(&self, _v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str("null")
-    }
-    fn destructure(&self, _v: IValue) -> Destructured {
-        Destructured::Null
-    }
-    unsafe fn destructure_ref<'a>(&self, _v: &'a IValue) -> DestructuredRef<'a> {
-        DestructuredRef::Null
-    }
-    unsafe fn destructure_mut<'a>(&self, _v: &'a mut IValue) -> DestructuredMut<'a> {
-        DestructuredMut::Null
-    }
-}
-
-struct BoolRepr;
-impl ValueRepr for BoolRepr {
-    fn value_type(&self) -> ValueType {
-        ValueType::Bool
-    }
-    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
-        a.is_true().partial_cmp(&b.is_true())
-    }
-    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        Debug::fmt(&v.is_true(), f)
-    }
-    fn destructure(&self, v: IValue) -> Destructured {
-        Destructured::Bool(v.is_true())
-    }
-    unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
-        DestructuredRef::Bool(v.is_true())
-    }
-    unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
-        DestructuredMut::Bool(BoolMut(v))
-    }
-    fn to_bool(&self, v: &IValue) -> Option<bool> {
-        Some(v.is_true())
-    }
-}
-
-struct InlineNumberRepr;
-impl ValueRepr for InlineNumberRepr {
-    number_repr_ops!();
-    // clone/drop use the inline defaults.
-}
-
-struct ScalarRepr;
-impl ValueRepr for ScalarRepr {
-    number_repr_ops!();
-    unsafe fn clone(&self, v: &IValue) -> IValue {
-        IValue::new_ptr(scalar::alloc(scalar::read(v.ptr())), v.type_tag())
-    }
-    unsafe fn drop(&self, v: &mut IValue) {
-        scalar::free(v.ptr());
-    }
-}
-
-struct InlineStringRepr;
-impl ValueRepr for InlineStringRepr {
-    string_repr_ops!();
-    // clone/drop use the inline defaults.
-}
-
-struct InternedRepr;
-impl ValueRepr for InternedRepr {
-    string_repr_ops!();
-    unsafe fn clone(&self, v: &IValue) -> IValue {
-        interned::bump_rc(v.ptr());
-        v.raw_copy()
-    }
-    unsafe fn drop(&self, v: &mut IValue) {
-        interned::release(v.ptr());
-    }
-}
-
-struct ArrayRepr;
-impl ValueRepr for ArrayRepr {
-    fn value_type(&self) -> ValueType {
-        ValueType::Array
-    }
-    unsafe fn clone(&self, v: &IValue) -> IValue {
-        array::clone(v)
-    }
-    unsafe fn drop(&self, v: &mut IValue) {
-        array::drop(v);
-    }
-    unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        array::hash(v, state);
-    }
-    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
-        array::eq(a, b)
-    }
-    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
-        array::cmp(a, b)
-    }
-    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        array::debug(v, f)
-    }
-    fn destructure(&self, v: IValue) -> Destructured {
-        Destructured::Array(IArray(v))
-    }
-    unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
-        DestructuredRef::Array(v.as_array_unchecked())
-    }
-    unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
-        DestructuredMut::Array(v.as_array_unchecked_mut())
-    }
-    unsafe fn len(&self, v: &IValue) -> Option<usize> {
-        Some(v.as_array_unchecked().len())
-    }
-}
-
-struct ObjectRepr;
-impl ValueRepr for ObjectRepr {
-    fn value_type(&self) -> ValueType {
-        ValueType::Object
-    }
-    unsafe fn clone(&self, v: &IValue) -> IValue {
-        object::clone(v)
-    }
-    unsafe fn drop(&self, v: &mut IValue) {
-        object::drop(v);
-    }
-    unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        object::hash(v, state);
-    }
-    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
-        object::eq(a, b)
-    }
-    // partial_cmp uses the default (`None`) — objects are unordered.
-    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        object::debug(v, f)
-    }
-    fn destructure(&self, v: IValue) -> Destructured {
-        Destructured::Object(IObject(v))
-    }
-    unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
-        DestructuredRef::Object(v.as_object_unchecked())
-    }
-    unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
-        DestructuredMut::Object(v.as_object_unchecked_mut())
-    }
-    unsafe fn len(&self, v: &IValue) -> Option<usize> {
-        Some(v.as_object_unchecked().len())
+    /// Whether a number was written with a decimal point (`1.0` vs `1`); `false`
+    /// for every non-number representation. The two number representations
+    /// override this.
+    fn has_decimal_point(&self, _v: &IValue) -> bool {
+        false
     }
 }
 
@@ -1342,20 +1082,20 @@ impl IValue {
     fn repr(&self) -> &'static dyn ValueRepr {
         match self.type_tag() {
             TypeTag::Inline => match inline::value_type(self.ptr_usize()) {
-                ValueType::Null => &NullRepr,
-                ValueType::Bool => &BoolRepr,
-                ValueType::Number => &InlineNumberRepr,
-                ValueType::String => &InlineStringRepr,
+                ValueType::Null => &inline::constant::NullRepr,
+                ValueType::Bool => &inline::constant::BoolRepr,
+                ValueType::Number => &inline::number::InlineNumberRepr,
+                ValueType::String => &inline::string::InlineStringRepr,
                 // Inline values are never arrays or objects.
                 ValueType::Array | ValueType::Object => unreachable!(),
             },
             TypeTag::NumberI64
             | TypeTag::NumberU64
             | TypeTag::NumberF64
-            | TypeTag::NumberReserved => &ScalarRepr,
-            TypeTag::String => &InternedRepr,
-            TypeTag::Array => &ArrayRepr,
-            TypeTag::Object => &ObjectRepr,
+            | TypeTag::NumberReserved => &scalar::ScalarRepr,
+            TypeTag::String => &interned::InternedRepr,
+            TypeTag::Array => &array::ArrayRepr,
+            TypeTag::Object => &object::ObjectRepr,
         }
     }
 }

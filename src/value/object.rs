@@ -25,7 +25,10 @@ use crate::alloc::{alloc_infallible, dealloc_infallible};
 use crate::string::IString;
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
-use super::{IValue, TypeTag};
+use super::{
+    Destructured, DestructuredMut, DestructuredRef, IValue, TypeTag, ValueRepr, ValueType,
+};
+use crate::object::IObject;
 
 #[repr(C)]
 #[repr(align(8))]
@@ -407,4 +410,40 @@ pub(crate) unsafe fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
     f.debug_map()
         .entries(split.items.iter().map(|kvp| (&kvp.key, &kvp.value)))
         .finish()
+}
+
+/// The object representation.
+pub(crate) struct ObjectRepr;
+impl ValueRepr for ObjectRepr {
+    fn value_type(&self) -> ValueType {
+        ValueType::Object
+    }
+    unsafe fn clone(&self, v: &IValue) -> IValue {
+        clone(v)
+    }
+    unsafe fn drop(&self, v: &mut IValue) {
+        self::drop(v);
+    }
+    unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
+        hash(v, state);
+    }
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
+        eq(a, b)
+    }
+    // partial_cmp uses the default (`None`) — objects are unordered.
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        debug(v, f)
+    }
+    fn destructure(&self, v: IValue) -> Destructured {
+        Destructured::Object(IObject(v))
+    }
+    unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
+        DestructuredRef::Object(v.as_object_unchecked())
+    }
+    unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
+        DestructuredMut::Object(v.as_object_unchecked_mut())
+    }
+    unsafe fn len(&self, v: &IValue) -> Option<usize> {
+        Some(v.as_object_unchecked().len())
+    }
 }

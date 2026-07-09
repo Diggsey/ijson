@@ -36,7 +36,16 @@
 //! never emitted, reserving it as the `NonNull` niche.
 #![allow(clippy::float_cmp)]
 
+use std::cmp::Ordering;
 use std::convert::TryFrom;
+use std::fmt::{self, Formatter};
+use std::hash::Hasher;
+
+use crate::number::INumber;
+use crate::value::{
+    num_debug, num_hash, num_to_i64, num_to_u64, number_cmp, Destructured, DestructuredMut,
+    DestructuredRef, IValue, NumVal, ValueRepr, ValueType,
+};
 
 const EXP_SHIFT: u32 = 4;
 const MANTISSA_SHIFT: u32 = 8;
@@ -308,6 +317,65 @@ pub(crate) fn to_f64_lossy(bits: usize) -> f64 {
 /// Whether the source of this inline number had a decimal point.
 pub(crate) fn has_decimal_point(bits: usize) -> bool {
     code_has_dot(code(bits))
+}
+
+/// This inline number reduced to a [`NumVal`] for the shared numeric utilities.
+/// An integer that fits `i64` becomes `Int`; everything else is an
+/// integer-valued float too large for `i64` or a fraction, both of which are
+/// exactly representable as `f64`.
+pub(crate) fn num_val(bits: usize) -> NumVal {
+    match value_i64(bits) {
+        Some(i) => NumVal::Int(i),
+        None => NumVal::Float(
+            to_f64_exact(bits).expect("a non-i64 inline number is exactly representable as f64"),
+        ),
+    }
+}
+
+/// The inline decimal representation of a JSON number.
+pub(crate) struct InlineNumberRepr;
+impl ValueRepr for InlineNumberRepr {
+    fn value_type(&self) -> ValueType {
+        ValueType::Number
+    }
+    fn has_decimal_point(&self, v: &IValue) -> bool {
+        has_decimal_point(v.ptr_usize())
+    }
+    unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
+        num_hash(num_val(v.ptr_usize()), state);
+    }
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
+        number_cmp(a, b) == Ordering::Equal
+    }
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
+        Some(number_cmp(a, b))
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        num_debug(num_val(v.ptr_usize()), f)
+    }
+    fn destructure(&self, v: IValue) -> Destructured {
+        Destructured::Number(INumber(v))
+    }
+    unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
+        DestructuredRef::Number(v.as_number_unchecked())
+    }
+    unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
+        DestructuredMut::Number(v.as_number_unchecked_mut())
+    }
+    unsafe fn to_i64(&self, v: &IValue) -> Option<i64> {
+        num_to_i64(num_val(v.ptr_usize()))
+    }
+    unsafe fn to_u64(&self, v: &IValue) -> Option<u64> {
+        num_to_u64(num_val(v.ptr_usize()))
+    }
+    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
+        // The inline representation decodes its decimal exactly itself.
+        to_f64_exact(v.ptr_usize())
+    }
+    unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
+        Some(to_f64_lossy(v.ptr_usize()))
+    }
+    // clone/drop use the inline defaults (bit-copy / nothing).
 }
 
 #[cfg(test)]
