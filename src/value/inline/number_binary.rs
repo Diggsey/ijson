@@ -1,27 +1,132 @@
 //! The base-2 inline number representation (used *without* `arbitrary_precision`).
 //!
-//! An inline number is a binary float `mantissa * 2^exp` with `exp` in `-7..=7`,
-//! so every inline number is exactly an `f64`. There is no non-`f64` value to
-//! represent, so an inline number never reduces to a `NumVal::Decimal`. A float
-//! whose (trailing-zero-stripped) binary exponent falls outside the inline range
-//! spills to a heap `f64` instead.
+//! A small number is packed directly into a pointer-sized [`IValue`] with the
+//! `Inline` tag and the number sub-family (bit 3 clear):
 //!
-//! This is a complete `InlineValue` implementor over the shared bit layout in the
-//! parent module; the base-10 counterpart is [`super::number_decimal`].
+//!   bits 0-2 : tag (Inline == 0)
+//!   bit 3    : 0 (number sub-family)
+//!   bits 4-7 : exponent code (see below)
+//!   bits 8.. : signed mantissa
+//!
+//! The value is a binary float `mantissa * 2^exp` with `exp` in `-7..=7`, so every
+//! inline number is exactly an `f64`; there is no non-`f64` value to represent, so
+//! an inline number never reduces to a `NumVal::Decimal`. A float whose
+//! (trailing-zero-stripped) binary exponent falls outside the inline range spills
+//! to a heap `f64` instead.
+//!
+//! The 4-bit exponent code encodes both the exponent and whether the number has a
+//! decimal point:
+//!
+//!   code  0..=6  -> exp -7..=-1  (fraction; decimal point)
+//!   code  7      -> exp 0        (float "N.0"; decimal point)
+//!   code  8..=14 -> exp 1..=7    (float with trailing zeros factored out;
+//!                                 decimal point)
+//!   code  15     -> exp 0        (plain integer; no decimal point)
+//!
+//! Every code except the reserved `15` is `exp + 7` ([`EXP_BIAS`]), so the exponent
+//! is a single subtraction and every such value has a decimal point. The reserved
+//! code is the *maximum* so that integer zero (mantissa 0) is never the all-zero
+//! bit pattern, which is reserved as the `NonNull` niche.
+//!
+//! This module is a complete, independent inline number representation, selected by
+//! `arbitrary_precision` being off; the base-10 counterpart is `number_decimal.rs`.
+//! They deliberately share no code, so their bit layouts can diverge.
 #![allow(clippy::float_cmp)]
 
 use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
 use std::hash::Hasher;
 
-use super::super::InlineValue;
-use super::{decode, encode, exp_code, fits_mantissa, has_decimal_point, i64_fits_f64};
-use super::{integer_decode, EXP_BIAS};
+use super::InlineValue;
 use crate::number::INumber;
 use crate::value::{
     num_debug, num_hash, num_to_i64, num_to_u64, number_cmp, Destructured, DestructuredMut,
     DestructuredRef, IValue, NumVal, ValueType,
 };
+
+// --- Bit layout -------------------------------------------------------------
+
+const EXP_SHIFT: u32 = 4;
+const MANTISSA_SHIFT: u32 = 8;
+/// Bits available for the signed inline mantissa (56 on 64-bit, 24 on 32-bit).
+const MANTISSA_BITS: u32 = usize::BITS - MANTISSA_SHIFT;
+
+/// Every non-reserved code is `exp + EXP_BIAS`, so the exponent is a single
+/// subtraction. With `EXP_BIAS == 7`, codes `0..=14` cover exp `-7..=7`.
+const EXP_BIAS: i32 = 7;
+/// Reserved (maximum) code for a plain integer at exponent 0 with no decimal
+/// point. It is the max rather than `0` so that integer zero (mantissa 0) never
+/// becomes the all-zero niche pattern. It is also the *only* code without a
+/// decimal point.
+const INT_EXP0_CODE: usize = 15;
+
+fn fits_mantissa(m: i128) -> bool {
+    let limit = 1i128 << (MANTISSA_BITS - 1);
+    m >= -limit && m < limit
+}
+
+/// Maps an exponent (and, at exp 0, a decimal-point flag) to its 4-bit code.
+fn exp_code(exp: i32, dot: bool) -> usize {
+    if exp == 0 && !dot {
+        INT_EXP0_CODE
+    } else {
+        debug_assert!((-7..=7).contains(&exp), "inline exponent out of range");
+        (exp + EXP_BIAS) as usize
+    }
+}
+fn code_exp(code: usize) -> i32 {
+    if code == INT_EXP0_CODE {
+        0
+    } else {
+        code as i32 - EXP_BIAS
+    }
+}
+fn code_has_dot(code: usize) -> bool {
+    code != INT_EXP0_CODE
+}
+
+fn encode(mantissa: i64, code: usize) -> usize {
+    ((mantissa as usize) << MANTISSA_SHIFT) | (code << EXP_SHIFT)
+}
+fn mantissa(bits: usize) -> i64 {
+    // Arithmetic shift sign-extends the mantissa from the top bits.
+    ((bits as isize) >> MANTISSA_SHIFT) as i64
+}
+fn code(bits: usize) -> usize {
+    (bits >> EXP_SHIFT) & 0xf
+}
+fn decode(bits: usize) -> (i64, i32) {
+    (mantissa(bits), code_exp(code(bits)))
+}
+
+/// Decomposes a finite, non-zero `f64` into `(mantissa, exp2, negative)` such that
+/// `value == (-1)^negative * mantissa * 2^exp2`.
+fn integer_decode(value: f64) -> (u64, i32, bool) {
+    let bits = value.to_bits();
+    let negative = bits >> 63 != 0;
+    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & 0x000f_ffff_ffff_ffff;
+    if raw_exp == 0 {
+        (frac, -1074, negative)
+    } else {
+        (frac | 0x0010_0000_0000_0000, raw_exp - 1075, negative)
+    }
+}
+
+/// `true` if the `i64` value `v` is exactly representable as an `f64`.
+fn i64_fits_f64(v: i64) -> bool {
+    v == 0 || 64 - v.unsigned_abs().leading_zeros() - v.unsigned_abs().trailing_zeros() <= 53
+}
+
+// --- Encode / decode --------------------------------------------------------
+
+/// Encodes a plain integer (no decimal point). Only exponent 0 is available to
+/// integers — positive inline exponents are reserved for floats — so a value too
+/// large for the mantissa does not fit inline and is stored on the heap instead.
+pub(crate) fn encode_int(value: i64) -> Option<usize> {
+    let limit = 1i64 << (MANTISSA_BITS - 1);
+    (value >= -limit && value < limit).then(|| encode(value, exp_code(0, false)))
+}
 
 /// Scales `m` by `2^exp` by multiplying or dividing by an exact power of two built
 /// from an integer shift. This avoids `f64::powi`, which is *not* guaranteed to be
@@ -92,6 +197,11 @@ pub(crate) fn encode_f64(value: f64) -> Option<usize> {
         .then(|| encode(m as i64, exp_code(exp, true)))
 }
 
+/// Whether the source of this inline number had a decimal point.
+fn has_decimal_point(bits: usize) -> bool {
+    code_has_dot(code(bits))
+}
+
 /// The base-2 inline representation of a JSON number.
 pub(crate) struct InlineNumberRepr;
 impl InlineValue for InlineNumberRepr {
@@ -141,6 +251,27 @@ impl InlineValue for InlineNumberRepr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exponent_codes_are_linear_and_niche_safe() {
+        // Every value with a decimal point spans exp -7..=7 and is linear in the
+        // exponent: `exp = code - EXP_BIAS`. None of them is the reserved code.
+        for exp in -7..=7 {
+            let c = exp_code(exp, true);
+            assert_ne!(c, INT_EXP0_CODE);
+            assert_eq!(code_exp(c), exp);
+            assert!(code_has_dot(c), "dot value exp {} -> code {}", exp, c);
+        }
+        assert_eq!(exp_code(0, false), INT_EXP0_CODE);
+        assert_eq!(code_exp(INT_EXP0_CODE), 0);
+        assert!(!code_has_dot(INT_EXP0_CODE));
+        assert_ne!(exp_code(0, false), exp_code(0, true));
+
+        // Integer zero (and 0.0) must never be the all-zero niche pattern.
+        assert_eq!(encode_int(0), Some(encode(0, INT_EXP0_CODE)));
+        assert_ne!(encode_int(0), Some(0));
+        assert_ne!(encode_f64(0.0), Some(0));
+    }
 
     #[test]
     fn large_magnitudes_never_misencode() {

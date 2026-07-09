@@ -3,7 +3,7 @@
 //! A value with the `Inline` tag stores its whole contents in the pointer-sized
 //! [`IValue`] rather than behind a pointer. Bit 3 selects the sub-family:
 //!
-//!   - 0 => number: a decimal `mantissa * 10^exp` (see [`number`]).
+//!   - 0 => number: `mantissa * BASE^exp`, base 10 or 2 (see [`number`]).
 //!   - 1 => string or constant, distinguished by bit 7 (`CONST_FLAG`):
 //!       - bit 7 = 0 => string (see [`string`]).
 //!       - bit 7 = 1 => constant: `null` / `false` / `true`.
@@ -12,8 +12,18 @@
 //! integer zero is non-zero), reserving it as the `NonNull` niche.
 
 pub(crate) mod constant;
-pub(crate) mod number;
 pub(crate) mod string;
+
+// The inline number representation is chosen by the `arbitrary_precision` feature:
+// an exact base-10 decimal, or a base-2 binary float. Each is a fully independent
+// module (they share no code, so their bit layouts can diverge), compiled as
+// `number`.
+#[cfg(feature = "arbitrary_precision")]
+#[path = "number_decimal.rs"]
+pub(crate) mod number;
+#[cfg(not(feature = "arbitrary_precision"))]
+#[path = "number_binary.rs"]
+pub(crate) mod number;
 
 use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
