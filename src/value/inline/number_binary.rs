@@ -40,7 +40,7 @@ use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
 use std::hash::Hasher;
 
-use super::InlineValue;
+use super::{InlineNumber, InlineValue};
 use crate::number::INumber;
 use crate::value::{
     num_debug, num_hash, num_to_i64, num_to_u64, number_cmp, Destructured, DestructuredMut,
@@ -173,19 +173,19 @@ fn has_decimal_point(bits: usize) -> bool {
 /// The base-2 inline representation of a JSON number.
 pub(crate) struct InlineNumberRepr;
 
-impl InlineNumberRepr {
-    /// Encodes a plain integer (no decimal point). Only exponent 0 is available to
-    /// integers — positive inline exponents are reserved for floats — so a value
-    /// too large for the mantissa does not fit inline and goes to the heap instead.
-    pub(crate) fn encode_int(value: i64) -> Option<usize> {
+impl InlineNumber for InlineNumberRepr {
+    /// Only exponent 0 is available to integers — positive inline exponents are
+    /// reserved for floats — so a value too large for the mantissa does not fit
+    /// inline and goes to the heap instead.
+    fn encode_int(value: i64) -> Option<usize> {
         let limit = 1i64 << (MANTISSA_BITS - 1);
         (value >= -limit && value < limit).then(|| encode(value, exp_code(0, false)))
     }
 
-    /// Encodes a finite `f64` inline as `mantissa * 2^exp`, if it fits: strip the
-    /// trailing binary zeros from the `f64`'s mantissa into the exponent, then
-    /// check that the mantissa and the exponent both fit the inline range.
-    pub(crate) fn encode_f64(value: f64) -> Option<usize> {
+    /// Encodes `mantissa * 2^exp`: strip the trailing binary zeros from the `f64`'s
+    /// mantissa into the exponent, then check that the mantissa and the exponent
+    /// both fit the inline range.
+    fn encode_f64(value: f64) -> Option<usize> {
         if value == 0.0 {
             // 0.0 / -0.0: an integer zero that carried a decimal point.
             return Some(encode(0, exp_code(0, true)));
@@ -199,9 +199,9 @@ impl InlineNumberRepr {
             .then(|| encode(m as i64, exp_code(exp, true)))
     }
 
-    /// This inline number reduced to a [`NumVal`]. A binary inline float is always
-    /// an exact `f64`, so it is either an `Int` or a `Float`, never a `Decimal`.
-    pub(crate) fn num_val(bits: usize) -> NumVal {
+    /// A binary inline float is always an exact `f64`, so it is either an `Int` or
+    /// a `Float`, never a `Decimal`.
+    fn num_val(bits: usize) -> NumVal {
         let (m, exp) = decode(bits);
         match to_i64(m, exp) {
             Some(i) => NumVal::Int(i),

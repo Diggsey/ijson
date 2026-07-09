@@ -44,7 +44,7 @@ use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
 use std::hash::Hasher;
 
-use super::InlineValue;
+use super::{InlineNumber, InlineValue};
 use crate::number::INumber;
 use crate::value::{
     decimal_to_f64_lossy, num_debug, num_hash, num_to_i64, num_to_u64, number_cmp, Destructured,
@@ -263,17 +263,17 @@ fn has_decimal_point(bits: usize) -> bool {
 /// The base-10 inline representation of a JSON number.
 pub(crate) struct InlineNumberRepr;
 
-impl InlineNumberRepr {
-    /// Encodes a plain integer (no decimal point). Only exponent 0 is available to
-    /// integers — positive inline exponents are reserved for floats — so a value
-    /// too large for the mantissa does not fit inline and goes to the heap instead.
-    pub(crate) fn encode_int(value: i64) -> Option<usize> {
+impl InlineNumber for InlineNumberRepr {
+    /// Only exponent 0 is available to integers — positive inline exponents are
+    /// reserved for floats — so a value too large for the mantissa does not fit
+    /// inline and goes to the heap instead.
+    fn encode_int(value: i64) -> Option<usize> {
         let limit = 1i64 << (MANTISSA_BITS - 1);
         (value >= -limit && value < limit).then(|| encode(value, exp_code(0, false)))
     }
 
     /// Encodes a finite `f64` inline as an exact decimal, if it fits.
-    pub(crate) fn encode_f64(value: f64) -> Option<usize> {
+    fn encode_f64(value: f64) -> Option<usize> {
         if value == 0.0 {
             // 0.0 / -0.0: integer zero that had a decimal point.
             return Some(encode(0, exp_code(0, true)));
@@ -305,7 +305,7 @@ impl InlineNumberRepr {
     ///
     /// The result is canonical: bit-for-bit identical to [`encode_f64`] for a value
     /// that is an exact `f64`, so the two constructors never disagree.
-    pub(crate) fn encode_decimal(mantissa: i128, exp: i32) -> Option<usize> {
+    fn encode_decimal(mantissa: i128, exp: i32) -> Option<usize> {
         if mantissa == 0 {
             // 0.0 / -0.0 with a decimal point.
             return Some(encode(0, exp_code(0, true)));
@@ -332,7 +332,7 @@ impl InlineNumberRepr {
     /// else — an exact `mantissa * 10^exp` that is neither (e.g. `0.1`) — becomes
     /// the exact `Decimal`. `num_val` covers the whole representable domain, not
     /// just what today's constructors produce.
-    pub(crate) fn num_val(bits: usize) -> NumVal {
+    fn num_val(bits: usize) -> NumVal {
         let (m, exp) = decode(bits);
         if let Some(i) = decimal_to_i64(m, exp) {
             NumVal::Int(i)

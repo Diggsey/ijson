@@ -33,7 +33,9 @@ use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
 use std::hash::Hasher;
 
-use crate::value::{Destructured, DestructuredMut, DestructuredRef, IValue, ValueRepr, ValueType};
+use crate::value::{
+    Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, ValueRepr, ValueType,
+};
 
 // Bit 3 of an inline value: set for the string/constant sub-family, clear for
 // inline numbers.
@@ -119,6 +121,33 @@ pub(crate) trait InlineValue {
     }
     fn has_decimal_point(&self, _v: &IValue) -> bool {
         false
+    }
+}
+
+/// The static interface of an inline number representation: how it encodes a value
+/// into inline bits and decodes bits back to a [`NumVal`]. Both representations
+/// (`number_binary` and `number_decimal`) implement it, and one is selected as
+/// [`InlineNumberRepr`]. Its methods are associated functions (no `self`) because
+/// they operate on raw values and bits, not on a representation instance.
+///
+/// This is distinct from [`InlineValue`]: `InlineValue` is the dynamically
+/// dispatched per-type behaviour [`InlineRepr`] delegates to, whereas this is the
+/// statically resolved construction/decoding of the active number representation.
+pub(crate) trait InlineNumber {
+    /// Encodes a plain integer (no decimal point) inline, or `None` if it does not
+    /// fit.
+    fn encode_int(value: i64) -> Option<usize>;
+    /// Encodes a finite `f64` inline, or `None` if it does not fit.
+    fn encode_f64(value: f64) -> Option<usize>;
+    /// Decodes inline bits to a [`NumVal`] for the shared numeric utilities.
+    fn num_val(bits: usize) -> NumVal;
+    /// Encodes an exact decimal `mantissa * 10^exp` inline, or `None` if this
+    /// representation cannot store it exactly. Only the base-10 representation can;
+    /// the default is `None`. Reached only through `IValue::new_decimal`, which is
+    /// itself only built with `arbitrary_precision`.
+    #[cfg_attr(not(feature = "arbitrary_precision"), allow(dead_code))]
+    fn encode_decimal(_mantissa: i128, _exp: i32) -> Option<usize> {
+        None
     }
 }
 

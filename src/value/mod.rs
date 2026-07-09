@@ -40,6 +40,10 @@ pub(crate) mod interned;
 pub(crate) mod object;
 pub(crate) mod scalar;
 
+// The active inline number representation's static interface (`encode_int`,
+// `encode_f64`, `num_val`, `encode_decimal`), used through `inline::InlineNumberRepr`.
+use inline::InlineNumber;
+
 use crate::array::IArray;
 use crate::number::INumber;
 use crate::object::IObject;
