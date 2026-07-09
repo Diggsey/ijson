@@ -714,13 +714,13 @@ impl IValue {
 // fit `i64` become `Int`; `u64`s above `i64::MAX` become `UInt`; a value that is
 // exactly an `f64` (a fraction or a large integer-valued float) becomes `Float`.
 //
-// With `arbitrary_precision`, `Decimal` is the residual: an exact
-// `mantissa * 10^exp` that is *not* an `i64` and *not* exactly an `f64` — for
-// example the fraction `0.1`, which the base-10 inline format and the string
-// parser can both produce. `NumVal` must hold it exactly rather than rounding to
-// the nearest `f64`. `exp` is always in the inline range `-7..=7`. Without the
-// feature the inline format is a binary float, every number is exactly an `f64`,
-// and there is no `Decimal`.
+// `Decimal` is the residual: an exact `mantissa * 10^exp` that is *not* an `i64`
+// and *not* exactly an `f64` — for example the fraction `0.1`. Only the base-10
+// inline representation (`arbitrary_precision`) produces one; the base-2 binary
+// float is always an exact `f64`, so with that representation active a `Decimal`
+// never occurs at runtime. `NumVal` and the `num_*` utilities always handle it,
+// though, so the base-10 representation compiles and is unit-tested in either
+// configuration. `exp` is always in the inline range `-7..=7`.
 //
 // Each number *representation* reduces its own storage to a `NumVal` (see
 // `inline::number::num_val` and `scalar::num_val`); the standalone `num_*`
@@ -730,11 +730,7 @@ pub(crate) enum NumVal {
     Int(i64),
     UInt(u64),
     Float(f64),
-    #[cfg(feature = "arbitrary_precision")]
-    Decimal {
-        mantissa: i64,
-        exp: i32,
-    },
+    Decimal { mantissa: i64, exp: i32 },
 }
 
 pub(crate) fn can_represent_as_f64(x: u64) -> bool {
@@ -749,7 +745,6 @@ pub(crate) fn num_to_i64(nv: NumVal) -> Option<i64> {
         NumVal::Float(x) => {
             (x.fract() == 0.0 && x >= i64::MIN as f64 && x < i64::MAX as f64).then_some(x as i64)
         }
-        #[cfg(feature = "arbitrary_precision")]
         NumVal::Decimal { mantissa, exp } => {
             decimal_int_value(mantissa, exp).and_then(|v| i64::try_from(v).ok())
         }
@@ -764,7 +759,6 @@ pub(crate) fn num_to_u64(nv: NumVal) -> Option<u64> {
         NumVal::Float(x) => {
             (x.fract() == 0.0 && x >= 0.0 && x < u64::MAX as f64).then_some(x as u64)
         }
-        #[cfg(feature = "arbitrary_precision")]
         NumVal::Decimal { mantissa, exp } => {
             decimal_int_value(mantissa, exp).and_then(|v| u64::try_from(v).ok())
         }
@@ -779,7 +773,6 @@ pub(crate) fn num_to_f64(nv: NumVal) -> Option<f64> {
         NumVal::UInt(x) => can_represent_as_f64(x).then_some(x as f64),
         NumVal::Float(x) => Some(x),
         // A `Decimal` is, by construction, not exactly an `f64`.
-        #[cfg(feature = "arbitrary_precision")]
         NumVal::Decimal { .. } => None,
     }
 }
@@ -790,7 +783,6 @@ pub(crate) fn num_to_f64_lossy(nv: NumVal) -> f64 {
         NumVal::Int(x) => x as f64,
         NumVal::UInt(x) => x as f64,
         NumVal::Float(x) => x,
-        #[cfg(feature = "arbitrary_precision")]
         NumVal::Decimal { mantissa, exp } => decimal_to_f64_lossy(mantissa, exp),
     }
 }
@@ -802,17 +794,13 @@ pub(crate) fn num_hash(nv: NumVal, state: &mut dyn Hasher) {
         state.write_i64(x);
     } else if let Some(x) = num_to_u64(nv) {
         state.write_u64(x);
+    } else if let NumVal::Decimal { mantissa, exp } = nv {
+        // A non-integer decimal is never equal to an integer or an `f64`, so its
+        // hash only has to agree with equal decimals: hash the canonical form.
+        let (m, e) = canonical_decimal(mantissa, exp);
+        state.write_i64(m);
+        state.write_i32(e);
     } else {
-        #[cfg(feature = "arbitrary_precision")]
-        if let NumVal::Decimal { mantissa, exp } = nv {
-            // A non-integer decimal is never equal to an integer or an `f64`, so
-            // its hash only has to agree with equal decimals: hash the canonical
-            // form.
-            let (m, e) = canonical_decimal(mantissa, exp);
-            state.write_i64(m);
-            state.write_i32(e);
-            return;
-        }
         let f = num_to_f64_lossy(nv);
         state.write_u64(if f == 0.0 { 0 } else { f.to_bits() });
     }
@@ -910,11 +898,9 @@ fn cmp_u64_f64(a: u64, b: f64) -> Ordering {
 // --- Exact `Decimal` arithmetic ---------------------------------------------
 // A `Decimal { mantissa, exp }` is the exact value `mantissa * 10^exp` with
 // `exp` in the inline range `-7..=7`, so `10^|exp|` fits an `i64` and the scaled
-// products below fit an `i128`. The whole section exists only with
-// `arbitrary_precision`, the only configuration that has a `Decimal`.
+// products below fit an `i128`.
 
 /// The exact integer value of `mantissa * 10^exp`, if it is an integer.
-#[cfg(feature = "arbitrary_precision")]
 fn decimal_int_value(mantissa: i64, exp: i32) -> Option<i128> {
     if exp >= 0 {
         Some(i128::from(mantissa) * 10i128.pow(exp as u32))
@@ -927,7 +913,6 @@ fn decimal_int_value(mantissa: i64, exp: i32) -> Option<i128> {
 /// The nearest `f64` to `mantissa * 10^exp`, correctly rounded — even for a
 /// mantissa above `2^53` (reachable via a non-`f64` `Decimal`) — and without
 /// allocating.
-#[cfg(feature = "arbitrary_precision")]
 pub(crate) fn decimal_to_f64_lossy(mantissa: i64, exp: i32) -> f64 {
     if exp >= 0 {
         // An exact integer; the `i128 -> f64` cast rounds correctly.
@@ -958,7 +943,6 @@ pub(crate) fn decimal_to_f64_lossy(mantissa: i64, exp: i32) -> f64 {
 }
 
 /// Compares `mantissa * 10^exp` to the integer `n`, exactly.
-#[cfg(feature = "arbitrary_precision")]
 fn cmp_decimal_int(mantissa: i64, exp: i32, n: i128) -> Ordering {
     if exp >= 0 {
         (i128::from(mantissa) * 10i128.pow(exp as u32)).cmp(&n)
@@ -969,7 +953,6 @@ fn cmp_decimal_int(mantissa: i64, exp: i32, n: i128) -> Ordering {
 }
 
 /// Compares two exact decimals.
-#[cfg(feature = "arbitrary_precision")]
 fn cmp_decimal_decimal(m1: i64, e1: i32, m2: i64, e2: i32) -> Ordering {
     let de = e1 - e2;
     if de >= 0 {
@@ -981,7 +964,6 @@ fn cmp_decimal_decimal(m1: i64, e1: i32, m2: i64, e2: i32) -> Ordering {
 
 /// `mantissa * 10^exp` with trailing decimal zeros removed, so equal decimals
 /// share one form (used for hashing).
-#[cfg(feature = "arbitrary_precision")]
 fn canonical_decimal(mut mantissa: i64, mut exp: i32) -> (i64, i32) {
     if mantissa == 0 {
         return (0, 0);
@@ -994,7 +976,6 @@ fn canonical_decimal(mut mantissa: i64, mut exp: i32) -> (i64, i32) {
 }
 
 /// `x << n`, or `None` when the value (not just the shift amount) would overflow.
-#[cfg(feature = "arbitrary_precision")]
 fn shl_u128(x: u128, n: u32) -> Option<u128> {
     if x == 0 {
         Some(0)
@@ -1006,7 +987,6 @@ fn shl_u128(x: u128, n: u32) -> Option<u128> {
 }
 
 /// Decomposes a finite, positive `f64` into `(frac, exp2)` with `v == frac * 2^exp2`.
-#[cfg(feature = "arbitrary_precision")]
 fn f64_frac_exp(v: f64) -> (u64, i32) {
     let bits = v.to_bits();
     let raw_exp = ((bits >> 52) & 0x7ff) as i32;
@@ -1019,7 +999,6 @@ fn f64_frac_exp(v: f64) -> (u64, i32) {
 }
 
 /// Compares a `u128` to a finite, non-negative float exactly.
-#[cfg(feature = "arbitrary_precision")]
 fn cmp_u128_f64(a: u128, b: f64) -> Ordering {
     const U128_RANGE: f64 = 340_282_366_920_938_463_463_374_607_431_768_211_456.0; // 2^128
     if b >= U128_RANGE {
@@ -1033,7 +1012,6 @@ fn cmp_u128_f64(a: u128, b: f64) -> Ordering {
 }
 
 /// Compares `m_abs * 10^exp` to a finite, positive float `v`, exactly.
-#[cfg(feature = "arbitrary_precision")]
 fn cmp_decimal_magnitude(m_abs: u64, exp: i32, v: f64) -> Ordering {
     if exp >= 0 {
         // `m_abs * 10^exp` is an integer (it fits `u128` for the inline range).
@@ -1061,7 +1039,6 @@ fn cmp_decimal_magnitude(m_abs: u64, exp: i32, v: f64) -> Ordering {
 
 /// Compares `mantissa * 10^exp` to a finite float exactly. A `Decimal` is, by
 /// construction, never exactly an `f64`, so this never returns `Equal`.
-#[cfg(feature = "arbitrary_precision")]
 fn cmp_decimal_f64(mantissa: i64, exp: i32, v: f64) -> Ordering {
     let d_neg = mantissa < 0;
     if v == 0.0 {
@@ -1087,9 +1064,7 @@ fn cmp_decimal_f64(mantissa: i64, exp: i32, v: f64) -> Ordering {
 }
 
 fn cmp_num(a: &NumVal, b: &NumVal) -> Ordering {
-    #[cfg(feature = "arbitrary_precision")]
-    use NumVal::Decimal;
-    use NumVal::{Float, Int, UInt};
+    use NumVal::{Decimal, Float, Int, UInt};
     match (a, b) {
         (Int(x), Int(y)) => x.cmp(y),
         (UInt(x), UInt(y)) => x.cmp(y),
@@ -1112,7 +1087,6 @@ fn cmp_num(a: &NumVal, b: &NumVal) -> Ordering {
         (UInt(x), Float(y)) => cmp_u64_f64(*x, *y),
         (Float(x), UInt(y)) => cmp_u64_f64(*y, *x).reverse(),
         (Float(x), Float(y)) => x.partial_cmp(y).unwrap(),
-        #[cfg(feature = "arbitrary_precision")]
         (
             Decimal { mantissa, exp },
             Decimal {
@@ -1120,30 +1094,25 @@ fn cmp_num(a: &NumVal, b: &NumVal) -> Ordering {
                 exp: e2,
             },
         ) => cmp_decimal_decimal(*mantissa, *exp, *m2, *e2),
-        #[cfg(feature = "arbitrary_precision")]
         (Decimal { mantissa, exp }, Int(y)) => cmp_decimal_int(*mantissa, *exp, i128::from(*y)),
-        #[cfg(feature = "arbitrary_precision")]
         (Int(x), Decimal { mantissa, exp }) => {
             cmp_decimal_int(*mantissa, *exp, i128::from(*x)).reverse()
         }
-        #[cfg(feature = "arbitrary_precision")]
         (Decimal { mantissa, exp }, UInt(y)) => cmp_decimal_int(*mantissa, *exp, i128::from(*y)),
-        #[cfg(feature = "arbitrary_precision")]
         (UInt(x), Decimal { mantissa, exp }) => {
             cmp_decimal_int(*mantissa, *exp, i128::from(*x)).reverse()
         }
         // A `Decimal` (an exact non-`f64` value) and a `Float` are compared
         // exactly: `0.1` (decimal) and `0.1_f64` are different numbers.
-        #[cfg(feature = "arbitrary_precision")]
         (Decimal { mantissa, exp }, Float(y)) => cmp_decimal_f64(*mantissa, *exp, *y),
-        #[cfg(feature = "arbitrary_precision")]
         (Float(x), Decimal { mantissa, exp }) => cmp_decimal_f64(*mantissa, *exp, *x).reverse(),
     }
 }
 
-// Every test here exercises the `Decimal` variant, which exists only with
-// `arbitrary_precision`.
-#[cfg(all(test, feature = "arbitrary_precision"))]
+// These exercise the `Decimal` variant and its arithmetic, which are always
+// compiled (though only the base-10 inline representation produces one), so they
+// run in either configuration.
+#[cfg(test)]
 mod num_val_tests {
     use super::*;
     use std::collections::hash_map::DefaultHasher;

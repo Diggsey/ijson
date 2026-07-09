@@ -35,6 +35,9 @@
 //! `arbitrary_precision` being on; the base-2 counterpart is `number_binary.rs`.
 //! They deliberately share no code, so their bit layouts can diverge.
 #![allow(clippy::float_cmp)]
+// Always compiled so its tests run, but unused as the active representation when
+// `arbitrary_precision` is off.
+#![cfg_attr(not(feature = "arbitrary_precision"), allow(dead_code))]
 
 use std::cmp::Ordering;
 use std::convert::TryFrom;

@@ -12,18 +12,19 @@
 //! integer zero is non-zero), reserving it as the `NonNull` niche.
 
 pub(crate) mod constant;
+pub(crate) mod number_binary;
+pub(crate) mod number_decimal;
 pub(crate) mod string;
 
-// The inline number representation is chosen by the `arbitrary_precision` feature:
-// an exact base-10 decimal, or a base-2 binary float. Each is a fully independent
-// module (they share no code, so their bit layouts can diverge), compiled as
-// `number`.
-#[cfg(feature = "arbitrary_precision")]
-#[path = "number_decimal.rs"]
-pub(crate) mod number;
+// The two inline number representations — an exact base-10 decimal and a base-2
+// binary float — are fully independent modules (sharing no code, so their bit
+// layouts can diverge). Both are always compiled, so a single `cargo test`
+// unit-tests both regardless of features; this alias just selects which one
+// `IValue` construction and decoding actually use.
 #[cfg(not(feature = "arbitrary_precision"))]
-#[path = "number_binary.rs"]
-pub(crate) mod number;
+pub(crate) use number_binary as number;
+#[cfg(feature = "arbitrary_precision")]
+pub(crate) use number_decimal as number;
 
 use std::cmp::Ordering;
 use std::fmt::{self, Formatter};

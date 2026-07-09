@@ -32,6 +32,9 @@
 //! `arbitrary_precision` being off; the base-10 counterpart is `number_decimal.rs`.
 //! They deliberately share no code, so their bit layouts can diverge.
 #![allow(clippy::float_cmp)]
+// Always compiled so its tests run, but unused as the active representation when
+// `arbitrary_precision` is on.
+#![cfg_attr(feature = "arbitrary_precision", allow(dead_code))]
 
 use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
