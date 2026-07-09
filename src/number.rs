@@ -290,15 +290,22 @@ fn classify_json_number(s: &str) -> Option<NumberShape> {
 }
 
 /// Parses a JSON number from its textual form, exactly as the JSON grammar
-/// defines it (see <https://www.json.org/>). A number written with a fraction or
-/// exponent — or a plain integer too large for `i64`/`u64` — is stored as a
-/// float; a plain in-range integer keeps its integer representation (and so
-/// reports no decimal point). This mirrors how `serde_json` deserializes numbers.
+/// defines it (see <https://www.json.org/>).
+///
+/// Unlike deserializing through `serde_json` (which rounds to the nearest `f64`),
+/// this preserves the *exact* decimal value: a number written with a fraction or
+/// exponent is stored as the exact decimal it denotes when that fits inline, so
+/// `"0.1"` is the exact `1 * 10^-1` rather than the `f64` approximation — and thus
+/// a *different* value from the `f64` `0.1`. A plain in-range integer keeps its
+/// integer representation (no decimal point); anything too large or too precise to
+/// hold exactly falls back to the nearest `f64`.
 ///
 /// # Examples
 ///
 /// ```
 /// # use ijson::INumber;
+/// use std::convert::TryFrom;
+///
 /// let n: INumber = "1.5".parse().unwrap();
 /// assert_eq!(n.to_f64(), Some(1.5));
 /// assert!(n.has_decimal_point());
@@ -306,6 +313,11 @@ fn classify_json_number(s: &str) -> Option<NumberShape> {
 /// let n: INumber = "-42".parse().unwrap();
 /// assert_eq!(n.to_i64(), Some(-42));
 /// assert!(!n.has_decimal_point());
+///
+/// // The exact decimal `0.1` is kept, so it differs from the f64 `0.1`.
+/// let d: INumber = "0.1".parse().unwrap();
+/// assert_ne!(d, INumber::try_from(0.1_f64).unwrap());
+/// assert_eq!(d.to_f64(), None); // not exactly an f64
 ///
 /// // Invalid JSON numbers are rejected (leading zero, bare '+', trailing '.').
 /// assert!("01".parse::<INumber>().is_err());
@@ -337,10 +349,68 @@ impl FromStr for INumber {
                     float_from(s)?
                 }
             }
-            NumberShape::Float => float_from(s)?,
+            // Store the exact decimal inline when it fits; otherwise (too many
+            // digits, or the exponent out of the inline range) fall back to f64.
+            NumberShape::Float => {
+                match parse_decimal(s).and_then(|(m, e)| IValue::new_decimal(m, e)) {
+                    Some(v) => v,
+                    None => float_from(s)?,
+                }
+            }
         };
         Ok(INumber(value))
     }
+}
+
+/// Extracts the exact decimal value `mantissa * 10^exp` from a validated JSON
+/// *float*-shaped string. Returns `None` if the significant digits or exponent
+/// overflow (too many to hold exactly), so the caller falls back to `f64`.
+fn parse_decimal(s: &str) -> Option<(i128, i32)> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let neg = b[0] == b'-';
+    if neg {
+        i += 1;
+    }
+    let mut mantissa: i128 = 0;
+    let mut frac_digits: i32 = 0;
+    let mut seen_point = false;
+    let mut explicit_exp: i32 = 0;
+    while i < b.len() {
+        match b[i] {
+            c @ b'0'..=b'9' => {
+                mantissa = mantissa
+                    .checked_mul(10)?
+                    .checked_add(i128::from(c - b'0'))?;
+                if seen_point {
+                    frac_digits += 1;
+                }
+                i += 1;
+            }
+            b'.' => {
+                seen_point = true;
+                i += 1;
+            }
+            b'e' | b'E' => {
+                i += 1;
+                let exp_neg = b[i] == b'-';
+                if b[i] == b'+' || b[i] == b'-' {
+                    i += 1;
+                }
+                let mut e: i32 = 0;
+                while i < b.len() {
+                    e = e.checked_mul(10)?.checked_add(i32::from(b[i] - b'0'))?;
+                    i += 1;
+                }
+                explicit_exp = if exp_neg { -e } else { e };
+                break;
+            }
+            // A validated float contains no other bytes.
+            _ => return None,
+        }
+    }
+    let exp = explicit_exp.checked_sub(frac_digits)?;
+    Some((if neg { -mantissa } else { mantissa }, exp))
 }
 
 /// Converts a [`serde_json::Number`] into an [`INumber`].
@@ -688,9 +758,9 @@ mod tests {
 
     #[test]
     fn round_trips_through_serialization() {
-        for s in ["0", "-42", "1.5", "1e3", "0.001", "18446744073709551615"] {
+        // For integers and exact-f64 floats, from_str and serde_json agree.
+        for s in ["0", "-42", "1.5", "1e3", "18446744073709551615"] {
             let n: INumber = s.parse().unwrap();
-            // Parsing the text and deserializing the same JSON agree.
             let via_serde: INumber = serde_json::from_str(s).unwrap();
             assert_eq!(n, via_serde, "{}", s);
             assert_eq!(
@@ -700,5 +770,42 @@ mod tests {
                 s
             );
         }
+        // Every parse survives its own serialize+reparse, including exact decimals
+        // (like 0.001) that serde_json would instead round to an f64.
+        for s in ["0", "-42", "1.5", "1e3", "0.001", "0.1", "3.5e-4"] {
+            let n: INumber = s.parse().unwrap();
+            let out = serde_json::to_string(&n).unwrap();
+            let back: INumber = out.parse().unwrap();
+            assert_eq!(n, back, "{} -> {}", s, out);
+        }
+    }
+
+    #[test]
+    fn from_str_preserves_exact_decimals() {
+        // "0.1" is stored as the exact decimal 1 * 10^-1, a *different* value from
+        // the f64 0.1 (which is 0.1000000000000000055...).
+        let d: INumber = "0.1".parse().unwrap();
+        let f = INumber::try_from(0.1_f64).unwrap();
+        assert!(d.has_decimal_point());
+        assert_ne!(d, f, "exact 0.1 must differ from the f64 0.1");
+        assert!(d < f, "0.1 (exact) < 0.1_f64");
+        assert_eq!(d.to_f64(), None, "0.1 is not exactly an f64");
+        assert_eq!(d.to_f64_lossy(), 0.1_f64, "nearest f64");
+        assert_eq!(serde_json::to_string(&d).unwrap(), "0.1");
+
+        // "0.10", "1e-1" etc. are the same value and compare equal to "0.1".
+        for s in ["0.10", "1e-1", "0.100000"] {
+            assert_eq!(s.parse::<INumber>().unwrap(), d, "{}", s);
+        }
+
+        // An exact-f64 decimal, by contrast, equals its f64.
+        let half: INumber = "0.5".parse().unwrap();
+        assert_eq!(half, INumber::try_from(0.5_f64).unwrap());
+        assert_eq!(half.to_f64(), Some(0.5));
+
+        // Too many fractional digits to hold exactly -> nearest f64 (matches the
+        // f64 constructor).
+        let pi: INumber = "3.141592653589793".parse().unwrap();
+        assert_eq!(pi, INumber::try_from(std::f64::consts::PI).unwrap());
     }
 }

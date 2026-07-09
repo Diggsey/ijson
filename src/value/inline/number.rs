@@ -222,6 +222,35 @@ pub(crate) fn encode_f64(value: f64) -> Option<usize> {
     None
 }
 
+/// Encodes an exact decimal `mantissa * 10^exp` (written with a decimal point)
+/// inline, or `None` if it does not fit the inline representation. Unlike
+/// [`encode_f64`], the value need not be an exact `f64` — this is how e.g. `0.1`
+/// (parsed from a string) is stored as the exact `1 * 10^-1`.
+///
+/// The result is canonical: bit-for-bit identical to [`encode_f64`] for a value
+/// that is an exact `f64`, so the two constructors never disagree.
+pub(crate) fn encode_decimal(mantissa: i128, exp: i32) -> Option<usize> {
+    if mantissa == 0 {
+        // 0.0 / -0.0 with a decimal point.
+        return Some(encode(0, exp_code(0, true)));
+    }
+    // Strip trailing zeros to reach the canonical (minimal-mantissa) form.
+    let mut m = mantissa;
+    let mut e = exp;
+    while m % 10 == 0 {
+        m /= 10;
+        e += 1;
+    }
+    if e >= 0 {
+        // An integer written as a float: the integer-float encoder keeps the
+        // largest mantissa that fits (minimal exponent), matching `encode_f64`.
+        encode_int_float(m.checked_mul(10i128.checked_pow(e as u32)?)?)
+    } else {
+        // A fraction; `m * 10^e` with `m` free of trailing zeros is canonical.
+        (fits_mantissa(m) && e >= -EXP_BIAS).then(|| encode(m as i64, exp_code(e, true)))
+    }
+}
+
 // --- Decimal decoders -------------------------------------------------------
 
 /// The exact integer value of `mantissa * 10^exp` if it is an integer that fits
@@ -245,13 +274,15 @@ fn decimal_to_i128(m: i64, exp: i32) -> Option<i128> {
 }
 
 fn decimal_to_f64_lossy(m: i64, exp: i32) -> f64 {
-    // The inline exponent range is small, so `10^|exp|` is an exact integer and
-    // an exact `f64`; using it (rather than the non-deterministic `powi`) keeps
-    // the result deterministic and exact whenever the value is representable.
+    // The nearest `f64`, correctly rounded even when the mantissa exceeds `2^53`
+    // (reachable for a `Decimal` that is not an exact `f64`). For `exp >= 0` the
+    // value is an integer whose `i128 -> f64` cast rounds correctly; a fraction is
+    // rounded through the (correctly-rounded) `f64` string parser to avoid
+    // double-rounding the mantissa before scaling.
     if exp >= 0 {
-        m as f64 * 10i64.pow(exp as u32) as f64
+        (i128::from(m) * 10i128.pow(exp as u32)) as f64
     } else {
-        m as f64 / 10i64.pow((-exp) as u32) as f64
+        format!("{}e{}", m, exp).parse().unwrap()
     }
 }
 

@@ -580,16 +580,30 @@ mod tests {
                     assert_eq!(v.number_repr_key(), js.number_repr_key(), "{:?} repr", s);
                 }
             } else {
-                // Stored as a float. serde_json's default parser can round large
-                // magnitudes differently than `std`'s `f64::from_str` (its precise
-                // parser is behind the `float_roundtrip` feature), so the value is
-                // checked against a direct `std` `f64` parse rather than serde.
-                assert_eq!(v, IValue::from(s.parse::<f64>().unwrap()), "{:?} value", s);
+                // Stored as a float — possibly an *exact decimal* that is more
+                // precise than any f64 (from_str keeps e.g. 0.1 as 1*10^-1, unlike
+                // serde_json), so it is not equal to the f64 and is not compared as
+                // such. Its nearest f64 still matches a direct `std` parse.
+                assert_eq!(
+                    v.to_f64_lossy(),
+                    Some(s.parse::<f64>().unwrap()),
+                    "{:?} nearest f64",
+                    s
+                );
             }
 
-            // Serialising and reparsing (through the same parser) is consistent.
+            // Serialising and reparsing preserves the value up to f64 precision.
+            // (It is not exact for a heap f64 whose shortest decimal `serde_json`
+            // emits then parses back as an exact decimal — e.g. 2^64 renders as
+            // "1.8446744073709552e19", which denotes a slightly different integer.)
             let out = serde_json::to_string(&v).unwrap();
-            assert_eq!(inum(&out), v, "{:?} round-trip ({})", s, out);
+            assert_eq!(
+                inum(&out).to_f64_lossy(),
+                v.to_f64_lossy(),
+                "{:?} round-trip ({})",
+                s,
+                out
+            );
         }
     }
 
@@ -609,7 +623,9 @@ mod tests {
         }
         for &x in &f64_cases() {
             let v = inum(&serde_json::to_string(&x).unwrap());
-            assert_eq!(v, IValue::from(x), "f64 {}", x);
+            // from_str may store the shortest decimal exactly rather than the f64
+            // (e.g. "0.1"), so compare via the nearest f64 rather than the value.
+            assert_eq!(v.to_f64_lossy(), Some(x), "f64 {}", x);
             assert!(v.as_number().unwrap().has_decimal_point(), "f64 {} dot", x);
         }
     }

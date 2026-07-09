@@ -794,10 +794,13 @@ pub(crate) fn num_hash(nv: NumVal, state: &mut dyn Hasher) {
         state.write_i64(x);
     } else if let Some(x) = num_to_u64(nv) {
         state.write_u64(x);
+    } else if let NumVal::Decimal { mantissa, exp } = nv {
+        // A non-integer decimal is never equal to an integer or an `f64`, so its
+        // hash only has to agree with equal decimals: hash the canonical form.
+        let (m, e) = canonical_decimal(mantissa, exp);
+        state.write_i64(m);
+        state.write_i32(e);
     } else {
-        // A non-integer `Float` or `Decimal`: hash its `f64` value. A `Decimal`
-        // and the `Float` it orders equal to (via the same nearest `f64`) then
-        // hash alike, so `Hash`/`Eq` stays consistent.
         let f = num_to_f64_lossy(nv);
         state.write_u64(if f == 0.0 { 0 } else { f.to_bits() });
     }
@@ -907,12 +910,14 @@ fn decimal_int_value(mantissa: i64, exp: i32) -> Option<i128> {
     }
 }
 
-/// The nearest `f64` to `mantissa * 10^exp`.
+/// The nearest `f64` to `mantissa * 10^exp`, correctly rounded even for a mantissa
+/// above `2^53`: an integer via the `i128 -> f64` cast, a fraction via the
+/// correctly-rounded `f64` string parser (avoiding a double rounding).
 fn decimal_to_f64_lossy(mantissa: i64, exp: i32) -> f64 {
     if exp >= 0 {
-        mantissa as f64 * 10i64.pow(exp as u32) as f64
+        (i128::from(mantissa) * 10i128.pow(exp as u32)) as f64
     } else {
-        mantissa as f64 / 10i64.pow((-exp) as u32) as f64
+        format!("{}e{}", mantissa, exp).parse().unwrap()
     }
 }
 
@@ -933,6 +938,107 @@ fn cmp_decimal_decimal(m1: i64, e1: i32, m2: i64, e2: i32) -> Ordering {
         (i128::from(m1) * 10i128.pow(de as u32)).cmp(&i128::from(m2))
     } else {
         i128::from(m1).cmp(&(i128::from(m2) * 10i128.pow((-de) as u32)))
+    }
+}
+
+/// `mantissa * 10^exp` with trailing decimal zeros removed, so equal decimals
+/// share one form (used for hashing).
+fn canonical_decimal(mut mantissa: i64, mut exp: i32) -> (i64, i32) {
+    if mantissa == 0 {
+        return (0, 0);
+    }
+    while mantissa % 10 == 0 {
+        mantissa /= 10;
+        exp += 1;
+    }
+    (mantissa, exp)
+}
+
+/// `x << n`, or `None` when the value (not just the shift amount) would overflow.
+fn shl_u128(x: u128, n: u32) -> Option<u128> {
+    if x == 0 {
+        Some(0)
+    } else if n <= x.leading_zeros() {
+        Some(x << n)
+    } else {
+        None
+    }
+}
+
+/// Decomposes a finite, positive `f64` into `(frac, exp2)` with `v == frac * 2^exp2`.
+fn f64_frac_exp(v: f64) -> (u64, i32) {
+    let bits = v.to_bits();
+    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & 0x000f_ffff_ffff_ffff;
+    if raw_exp == 0 {
+        (frac, -1074) // subnormal
+    } else {
+        (frac | 0x0010_0000_0000_0000, raw_exp - 1075)
+    }
+}
+
+/// Compares a `u128` to a finite, non-negative float exactly.
+fn cmp_u128_f64(a: u128, b: f64) -> Ordering {
+    const U128_RANGE: f64 = 340_282_366_920_938_463_463_374_607_431_768_211_456.0; // 2^128
+    if b >= U128_RANGE {
+        return Ordering::Less; // b >= 2^128 > a
+    }
+    let bt = b.trunc(); // now in [0, 2^128), so `bt as u128` is exact
+    match a.cmp(&(bt as u128)) {
+        Ordering::Equal => cmp_by_fraction(b, bt),
+        ord => ord,
+    }
+}
+
+/// Compares `m_abs * 10^exp` to a finite, positive float `v`, exactly.
+fn cmp_decimal_magnitude(m_abs: u64, exp: i32, v: f64) -> Ordering {
+    if exp >= 0 {
+        // `m_abs * 10^exp` is an integer (it fits `u128` for the inline range).
+        cmp_u128_f64(u128::from(m_abs) * 10u128.pow(exp as u32), v)
+    } else {
+        // `|d| = m_abs / 10^k` vs `v = frac * 2^fe`. Clearing `10^k = 2^k * 5^k`:
+        // compare `m_abs` to `frac * 5^k * 2^(fe + k)`.
+        let k = (-exp) as u32;
+        let (frac, fe) = f64_frac_exp(v);
+        let p = u128::from(frac) * 5u128.pow(k); // < 2^70
+        let s = fe + k as i32;
+        if s >= 0 {
+            match shl_u128(p, s as u32) {
+                Some(rhs) => u128::from(m_abs).cmp(&rhs),
+                None => Ordering::Less, // rhs overflows u128 -> |d| < v
+            }
+        } else {
+            match shl_u128(u128::from(m_abs), (-s) as u32) {
+                Some(lhs) => lhs.cmp(&p),
+                None => Ordering::Greater, // lhs overflows u128 -> |d| > v
+            }
+        }
+    }
+}
+
+/// Compares `mantissa * 10^exp` to a finite float exactly. A `Decimal` is, by
+/// construction, never exactly an `f64`, so this never returns `Equal`.
+fn cmp_decimal_f64(mantissa: i64, exp: i32, v: f64) -> Ordering {
+    let d_neg = mantissa < 0;
+    if v == 0.0 {
+        return if d_neg {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+    if d_neg != (v < 0.0) {
+        return if d_neg {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        };
+    }
+    let ord = cmp_decimal_magnitude(mantissa.unsigned_abs(), exp, v.abs());
+    if d_neg {
+        ord.reverse()
+    } else {
+        ord
     }
 }
 
@@ -975,16 +1081,10 @@ fn cmp_num(a: &NumVal, b: &NumVal) -> Ordering {
         (UInt(x), Decimal { mantissa, exp }) => {
             cmp_decimal_int(*mantissa, *exp, i128::from(*x)).reverse()
         }
-        // A `Decimal` (an exact non-`f64` value) and a `Float` (an exact `f64`)
-        // are never the same number — normalisation keeps each number in a single
-        // representation — so this comparison only orders distinct values and can
-        // go through the decimal's nearest `f64` without an exact tie-break.
-        (Decimal { mantissa, exp }, Float(y)) => decimal_to_f64_lossy(*mantissa, *exp)
-            .partial_cmp(y)
-            .unwrap(),
-        (Float(x), Decimal { mantissa, exp }) => x
-            .partial_cmp(&decimal_to_f64_lossy(*mantissa, *exp))
-            .unwrap(),
+        // A `Decimal` (an exact non-`f64` value) and a `Float` are compared
+        // exactly: `0.1` (decimal) and `0.1_f64` are different numbers.
+        (Decimal { mantissa, exp }, Float(y)) => cmp_decimal_f64(*mantissa, *exp, *y),
+        (Float(x), Decimal { mantissa, exp }) => cmp_decimal_f64(*mantissa, *exp, *x).reverse(),
     }
 }
 
@@ -1059,8 +1159,8 @@ mod num_val_tests {
         assert_eq!(hash_of(two_dec), hash_of(NumVal::Int(2)));
         assert_eq!(hash_of(two_dec), hash_of(NumVal::UInt(2)));
 
-        // Equal fractions hash alike (through their shared nearest f64), and a
-        // fraction ordered equal to a float hashes like that float.
+        // Equal fractions hash alike (canonical form), regardless of how the
+        // mantissa/exponent are written.
         let a = NumVal::Decimal {
             mantissa: 1,
             exp: -1,
@@ -1070,8 +1170,11 @@ mod num_val_tests {
             exp: -2,
         };
         assert_eq!(hash_of(a), hash_of(b));
-        assert_eq!(cmp_num(&a, &NumVal::Float(0.1)), Ordering::Equal);
-        assert_eq!(hash_of(a), hash_of(NumVal::Float(0.1)));
+
+        // The exact decimal 0.1 and the f64 0.1 are *different* numbers, so they
+        // are unequal — and hashing them differently is therefore allowed.
+        assert_ne!(cmp_num(&a, &NumVal::Float(0.1)), Ordering::Equal);
+        assert_eq!(cmp_num(&a, &NumVal::Float(0.1)), Ordering::Less);
     }
 }
 
@@ -1106,6 +1209,16 @@ impl IValue {
             Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
             None => unsafe { Self::new_ptr(scalar::alloc(value.to_bits()), TypeTag::NumberF64) },
         }
+    }
+
+    /// Constructs the exact decimal `mantissa * 10^exp` (as written, with a
+    /// decimal point) if it fits the inline representation; `None` otherwise, so
+    /// the caller can fall back to an `f64`. This is how a decimal that is *not*
+    /// an exact `f64` (e.g. `0.1`) is stored without losing precision.
+    pub(crate) fn new_decimal(mantissa: i128, exp: i32) -> Option<Self> {
+        // Safety: `encode_decimal` returns valid inline bits.
+        inline::number::encode_decimal(mantissa, exp)
+            .map(|bits| unsafe { Self::new_inline(TypeTag::Inline, bits) })
     }
 
     /// Whether this number was written with a decimal point (`1.0` vs `1`).

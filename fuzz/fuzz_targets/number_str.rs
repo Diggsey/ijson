@@ -26,10 +26,18 @@ fuzz_target!(|data: &str| {
             assert!(via_serde.is_number(), "{:?} is not a serde number", data);
         }
 
-        // Serializing and reparsing through the same parser reproduces the value.
+        // Serializing and reparsing preserves the value up to f64 precision.
+        // (It is not exact for a heap f64 whose shortest decimal serde emits is
+        // then read back as an exact decimal — from_str preserves exact decimals.)
         let out = serde_json::to_string(&v).expect("serialize");
         let re: INumber = out.parse().expect("reparse");
-        assert_eq!(IValue::from(re), v, "{:?} round-trip via {}", data, out);
+        assert_eq!(
+            IValue::from(re).to_f64_lossy(),
+            v.to_f64_lossy(),
+            "{:?} round-trip via {}",
+            data,
+            out
+        );
 
         // An in-range integer parses to exactly that integer.
         if let Ok(i) = data.parse::<i64>() {
