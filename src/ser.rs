@@ -34,7 +34,10 @@ impl Serialize for INumber {
         S: Serializer,
     {
         if self.has_decimal_point() {
-            serializer.serialize_f64(self.to_f64().unwrap())
+            // A number written with a decimal point serializes as a float. It is
+            // usually an exact `f64`; an exact decimal that is not (e.g. `0.1`)
+            // falls back to its nearest `f64`, since `serde` takes an `f64`.
+            serializer.serialize_f64(self.to_f64().unwrap_or_else(|| self.to_f64_lossy()))
         } else if let Some(v) = self.to_i64() {
             serializer.serialize_i64(v)
         } else {

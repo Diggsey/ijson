@@ -711,10 +711,16 @@ impl IValue {
 }
 
 // A number reduced to a form suitable for exact numeric comparison. Values that
-// fit `i64` become `Int`; heap `u64`s above `i64::MAX` become `UInt`; everything
-// else — fractions and integer-valued floats too large for `i64`, all exactly
-// representable as `f64` — becomes `Float`. This spans the full numeric range
-// without needing `i128`.
+// fit `i64` become `Int`; `u64`s above `i64::MAX` become `UInt`; a value that is
+// exactly an `f64` (a fraction or a large integer-valued float) becomes `Float`.
+//
+// `Decimal` is the residual: an exact `mantissa * 10^exp` that is *not* an `i64`
+// and *not* exactly an `f64` — for example the fraction `0.1`. The inline decimal
+// format can represent such values, so `NumVal` must be able to hold them exactly
+// rather than rounding to the nearest `f64`. (No constructor produces one today —
+// they all go through `encode_f64`/`encode_int` — but the type spans the whole
+// representable domain, not the current constructor set.) `exp` is always in the
+// inline range `-7..=7`.
 //
 // Each number *representation* reduces its own storage to a `NumVal` (see
 // `inline::number::num_val` and `scalar::num_val`); the standalone `num_*`
@@ -724,6 +730,7 @@ pub(crate) enum NumVal {
     Int(i64),
     UInt(u64),
     Float(f64),
+    Decimal { mantissa: i64, exp: i32 },
 }
 
 pub(crate) fn can_represent_as_f64(x: u64) -> bool {
@@ -738,6 +745,9 @@ pub(crate) fn num_to_i64(nv: NumVal) -> Option<i64> {
         NumVal::Float(x) => {
             (x.fract() == 0.0 && x >= i64::MIN as f64 && x < i64::MAX as f64).then_some(x as i64)
         }
+        NumVal::Decimal { mantissa, exp } => {
+            decimal_int_value(mantissa, exp).and_then(|v| i64::try_from(v).ok())
+        }
     }
 }
 
@@ -749,6 +759,9 @@ pub(crate) fn num_to_u64(nv: NumVal) -> Option<u64> {
         NumVal::Float(x) => {
             (x.fract() == 0.0 && x >= 0.0 && x < u64::MAX as f64).then_some(x as u64)
         }
+        NumVal::Decimal { mantissa, exp } => {
+            decimal_int_value(mantissa, exp).and_then(|v| u64::try_from(v).ok())
+        }
     }
 }
 
@@ -759,6 +772,8 @@ pub(crate) fn num_to_f64(nv: NumVal) -> Option<f64> {
         NumVal::Int(x) => can_represent_as_f64(x.unsigned_abs()).then_some(x as f64),
         NumVal::UInt(x) => can_represent_as_f64(x).then_some(x as f64),
         NumVal::Float(x) => Some(x),
+        // A `Decimal` is, by construction, not exactly an `f64`.
+        NumVal::Decimal { .. } => None,
     }
 }
 
@@ -768,6 +783,7 @@ pub(crate) fn num_to_f64_lossy(nv: NumVal) -> f64 {
         NumVal::Int(x) => x as f64,
         NumVal::UInt(x) => x as f64,
         NumVal::Float(x) => x,
+        NumVal::Decimal { mantissa, exp } => decimal_to_f64_lossy(mantissa, exp),
     }
 }
 
@@ -779,6 +795,9 @@ pub(crate) fn num_hash(nv: NumVal, state: &mut dyn Hasher) {
     } else if let Some(x) = num_to_u64(nv) {
         state.write_u64(x);
     } else {
+        // A non-integer `Float` or `Decimal`: hash its `f64` value. A `Decimal`
+        // and the `Float` it orders equal to (via the same nearest `f64`) then
+        // hash alike, so `Hash`/`Eq` stays consistent.
         let f = num_to_f64_lossy(nv);
         state.write_u64(if f == 0.0 { 0 } else { f.to_bits() });
     }
@@ -873,8 +892,52 @@ fn cmp_u64_f64(a: u64, b: f64) -> Ordering {
     }
 }
 
+// --- Exact `Decimal` arithmetic ---------------------------------------------
+// A `Decimal { mantissa, exp }` is the exact value `mantissa * 10^exp` with
+// `exp` in the inline range `-7..=7`, so `10^|exp|` fits an `i64` and the scaled
+// products below fit an `i128`.
+
+/// The exact integer value of `mantissa * 10^exp`, if it is an integer.
+fn decimal_int_value(mantissa: i64, exp: i32) -> Option<i128> {
+    if exp >= 0 {
+        Some(i128::from(mantissa) * 10i128.pow(exp as u32))
+    } else {
+        let div = 10i128.pow((-exp) as u32);
+        (i128::from(mantissa) % div == 0).then_some(i128::from(mantissa) / div)
+    }
+}
+
+/// The nearest `f64` to `mantissa * 10^exp`.
+fn decimal_to_f64_lossy(mantissa: i64, exp: i32) -> f64 {
+    if exp >= 0 {
+        mantissa as f64 * 10i64.pow(exp as u32) as f64
+    } else {
+        mantissa as f64 / 10i64.pow((-exp) as u32) as f64
+    }
+}
+
+/// Compares `mantissa * 10^exp` to the integer `n`, exactly.
+fn cmp_decimal_int(mantissa: i64, exp: i32, n: i128) -> Ordering {
+    if exp >= 0 {
+        (i128::from(mantissa) * 10i128.pow(exp as u32)).cmp(&n)
+    } else {
+        // `mantissa / 10^k` vs `n` ⟺ `mantissa` vs `n * 10^k`.
+        i128::from(mantissa).cmp(&(n * 10i128.pow((-exp) as u32)))
+    }
+}
+
+/// Compares two exact decimals.
+fn cmp_decimal_decimal(m1: i64, e1: i32, m2: i64, e2: i32) -> Ordering {
+    let de = e1 - e2;
+    if de >= 0 {
+        (i128::from(m1) * 10i128.pow(de as u32)).cmp(&i128::from(m2))
+    } else {
+        i128::from(m1).cmp(&(i128::from(m2) * 10i128.pow((-de) as u32)))
+    }
+}
+
 fn cmp_num(a: &NumVal, b: &NumVal) -> Ordering {
-    use NumVal::{Float, Int, UInt};
+    use NumVal::{Decimal, Float, Int, UInt};
     match (a, b) {
         (Int(x), Int(y)) => x.cmp(y),
         (UInt(x), UInt(y)) => x.cmp(y),
@@ -897,6 +960,118 @@ fn cmp_num(a: &NumVal, b: &NumVal) -> Ordering {
         (UInt(x), Float(y)) => cmp_u64_f64(*x, *y),
         (Float(x), UInt(y)) => cmp_u64_f64(*y, *x).reverse(),
         (Float(x), Float(y)) => x.partial_cmp(y).unwrap(),
+        (
+            Decimal { mantissa, exp },
+            Decimal {
+                mantissa: m2,
+                exp: e2,
+            },
+        ) => cmp_decimal_decimal(*mantissa, *exp, *m2, *e2),
+        (Decimal { mantissa, exp }, Int(y)) => cmp_decimal_int(*mantissa, *exp, i128::from(*y)),
+        (Int(x), Decimal { mantissa, exp }) => {
+            cmp_decimal_int(*mantissa, *exp, i128::from(*x)).reverse()
+        }
+        (Decimal { mantissa, exp }, UInt(y)) => cmp_decimal_int(*mantissa, *exp, i128::from(*y)),
+        (UInt(x), Decimal { mantissa, exp }) => {
+            cmp_decimal_int(*mantissa, *exp, i128::from(*x)).reverse()
+        }
+        // A `Decimal` (an exact non-`f64` value) and a `Float` (an exact `f64`)
+        // are never the same number — normalisation keeps each number in a single
+        // representation — so this comparison only orders distinct values and can
+        // go through the decimal's nearest `f64` without an exact tie-break.
+        (Decimal { mantissa, exp }, Float(y)) => decimal_to_f64_lossy(*mantissa, *exp)
+            .partial_cmp(y)
+            .unwrap(),
+        (Float(x), Decimal { mantissa, exp }) => x
+            .partial_cmp(&decimal_to_f64_lossy(*mantissa, *exp))
+            .unwrap(),
+    }
+}
+
+#[cfg(test)]
+mod num_val_tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+
+    fn hash_of(nv: NumVal) -> u64 {
+        let mut h = DefaultHasher::new();
+        num_hash(nv, &mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn decimal_extracts_integers_but_not_fractions() {
+        // 0.1 is a fraction: not an integer, not an exact f64.
+        let tenth = NumVal::Decimal {
+            mantissa: 1,
+            exp: -1,
+        };
+        assert_eq!(num_to_i64(tenth), None);
+        assert_eq!(num_to_u64(tenth), None);
+        assert_eq!(num_to_f64(tenth), None);
+        assert_eq!(num_to_f64_lossy(tenth), 0.1);
+
+        // 20 * 10^-1 == 2 is an integer-valued decimal.
+        let two = NumVal::Decimal {
+            mantissa: 20,
+            exp: -1,
+        };
+        assert_eq!(num_to_i64(two), Some(2));
+        assert_eq!(num_to_u64(two), Some(2));
+    }
+
+    #[test]
+    fn decimal_compares_exactly_against_decimals_and_integers() {
+        let tenth = NumVal::Decimal {
+            mantissa: 1,
+            exp: -1,
+        }; // 0.1
+        let three_tenths = NumVal::Decimal {
+            mantissa: 3,
+            exp: -1,
+        }; // 0.3
+        let tenth_scaled = NumVal::Decimal {
+            mantissa: 10,
+            exp: -2,
+        }; // 0.10 == 0.1
+        assert_eq!(cmp_num(&tenth, &three_tenths), Ordering::Less);
+        assert_eq!(cmp_num(&tenth, &tenth_scaled), Ordering::Equal);
+        assert_eq!(cmp_num(&tenth, &NumVal::Int(0)), Ordering::Greater);
+        assert_eq!(cmp_num(&tenth, &NumVal::Int(1)), Ordering::Less);
+
+        // An integer-valued decimal orders exactly with the equal integer.
+        let two = NumVal::Decimal {
+            mantissa: 20,
+            exp: -1,
+        };
+        assert_eq!(cmp_num(&two, &NumVal::Int(2)), Ordering::Equal);
+        assert_eq!(cmp_num(&two, &NumVal::UInt(2)), Ordering::Equal);
+        assert_eq!(cmp_num(&NumVal::Int(2), &two), Ordering::Equal);
+    }
+
+    #[test]
+    fn decimal_hash_stays_consistent_with_equality() {
+        // An integer-valued decimal hashes like the equal integer.
+        let two_dec = NumVal::Decimal {
+            mantissa: 20,
+            exp: -1,
+        };
+        assert_eq!(hash_of(two_dec), hash_of(NumVal::Int(2)));
+        assert_eq!(hash_of(two_dec), hash_of(NumVal::UInt(2)));
+
+        // Equal fractions hash alike (through their shared nearest f64), and a
+        // fraction ordered equal to a float hashes like that float.
+        let a = NumVal::Decimal {
+            mantissa: 1,
+            exp: -1,
+        };
+        let b = NumVal::Decimal {
+            mantissa: 10,
+            exp: -2,
+        };
+        assert_eq!(hash_of(a), hash_of(b));
+        assert_eq!(cmp_num(&a, &NumVal::Float(0.1)), Ordering::Equal);
+        assert_eq!(hash_of(a), hash_of(NumVal::Float(0.1)));
     }
 }
 
