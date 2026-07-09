@@ -1,16 +1,28 @@
-//! The base-10 inline number encoding (used *with* `arbitrary_precision`).
+//! The base-10 inline number representation (used *with* `arbitrary_precision`).
 //!
 //! An inline number is an exact decimal `mantissa * 10^exp` with `exp` in
 //! `-7..=7`. Unlike the binary encoding it can represent values that are not
 //! exact `f64`s — e.g. the fraction `0.1 == 1 * 10^-1` — which reduce to a
 //! `NumVal::Decimal` holding the exact value. Larger or more precise decimals
 //! spill to the heap arbitrary-precision representation.
+//!
+//! This is a complete `InlineValue` implementor over the shared bit layout in the
+//! parent module; the base-2 counterpart is [`super::number_binary`].
 #![allow(clippy::float_cmp)]
 
+use std::cmp::Ordering;
 use std::convert::TryFrom;
+use std::fmt::{self, Formatter};
+use std::hash::Hasher;
 
-use super::{encode, exp_code, fits_mantissa, i64_fits_f64, integer_decode, EXP_BIAS};
-use crate::value::{decimal_to_f64_lossy, NumVal};
+use super::super::InlineValue;
+use super::{decode, encode, exp_code, fits_mantissa, has_decimal_point, i64_fits_f64};
+use super::{integer_decode, EXP_BIAS};
+use crate::number::INumber;
+use crate::value::{
+    decimal_to_f64_lossy, num_debug, num_hash, num_to_i64, num_to_u64, number_cmp, Destructured,
+    DestructuredMut, DestructuredRef, IValue, NumVal, ValueType,
+};
 
 const POW5: [u128; 8] = [1, 5, 25, 125, 625, 3125, 15625, 78125];
 
@@ -124,25 +136,13 @@ fn decimal_to_f64_exact(m: i64, exp: i32) -> Option<f64> {
     }
 }
 
-// --- Base interface (used by the shared inline-number module) ----------------
-
-/// The exact `f64` value, if exactly representable.
-pub(super) fn to_f64_exact(m: i64, exp: i32) -> Option<f64> {
-    decimal_to_f64_exact(m, exp)
-}
-
-/// The (possibly lossy) `f64` value. Every inline decimal a constructor can
-/// produce is exactly an `f64`, so decode it exactly; only a non-`f64` inline
-/// decimal falls back to the correctly-rounded conversion.
-pub(super) fn to_f64_lossy(m: i64, exp: i32) -> f64 {
-    decimal_to_f64_exact(m, exp).unwrap_or_else(|| decimal_to_f64_lossy(m, exp))
-}
-
-/// This inline decimal reduced to a [`NumVal`]. An integer that fits `i64`
-/// becomes `Int`; a value that is exactly an `f64` becomes `Float`; anything else
-/// — an exact `mantissa * 10^exp` that is neither (e.g. `0.1`) — becomes the exact
-/// `Decimal`.
-pub(super) fn num_val(m: i64, exp: i32) -> NumVal {
+/// This inline decimal reduced to a [`NumVal`]. An integer that fits `i64` becomes
+/// `Int`; a value that is exactly an `f64` becomes `Float`; anything else — an
+/// exact `mantissa * 10^exp` that is neither (e.g. `0.1`) — becomes the exact
+/// `Decimal`. `num_val` covers the whole representable domain, not just what
+/// today's constructors produce.
+pub(crate) fn num_val(bits: usize) -> NumVal {
+    let (m, exp) = decode(bits);
     if let Some(i) = decimal_to_i64(m, exp) {
         NumVal::Int(i)
     } else if let Some(f) = decimal_to_f64_exact(m, exp) {
@@ -152,8 +152,22 @@ pub(super) fn num_val(m: i64, exp: i32) -> NumVal {
     }
 }
 
+/// The exact `f64` value, if exactly representable.
+fn to_f64_exact(bits: usize) -> Option<f64> {
+    let (m, exp) = decode(bits);
+    decimal_to_f64_exact(m, exp)
+}
+
+/// The (possibly lossy) `f64` value. Every inline decimal a constructor can
+/// produce is exactly an `f64`, so decode it exactly; only a non-`f64` inline
+/// decimal falls back to the correctly-rounded conversion.
+fn to_f64_lossy(bits: usize) -> f64 {
+    let (m, exp) = decode(bits);
+    decimal_to_f64_exact(m, exp).unwrap_or_else(|| decimal_to_f64_lossy(m, exp))
+}
+
 /// Encodes a finite `f64` inline as an exact decimal, if it fits.
-pub(super) fn encode_f64(value: f64) -> Option<usize> {
+pub(crate) fn encode_f64(value: f64) -> Option<usize> {
     if value == 0.0 {
         // 0.0 / -0.0: integer zero that had a decimal point.
         return Some(encode(0, exp_code(0, true)));
@@ -185,7 +199,7 @@ pub(super) fn encode_f64(value: f64) -> Option<usize> {
 ///
 /// The result is canonical: bit-for-bit identical to [`encode_f64`] for a value
 /// that is an exact `f64`, so the two constructors never disagree.
-pub(super) fn encode_decimal(mantissa: i128, exp: i32) -> Option<usize> {
+pub(crate) fn encode_decimal(mantissa: i128, exp: i32) -> Option<usize> {
     if mantissa == 0 {
         // 0.0 / -0.0 with a decimal point.
         return Some(encode(0, exp_code(0, true)));
@@ -204,5 +218,98 @@ pub(super) fn encode_decimal(mantissa: i128, exp: i32) -> Option<usize> {
     } else {
         // A fraction; `m * 10^e` with `m` free of trailing zeros is canonical.
         (fits_mantissa(m) && e >= -EXP_BIAS).then(|| encode(m as i64, exp_code(e, true)))
+    }
+}
+
+/// The base-10 inline representation of a JSON number.
+pub(crate) struct InlineNumberRepr;
+impl InlineValue for InlineNumberRepr {
+    fn value_type(&self) -> ValueType {
+        ValueType::Number
+    }
+    fn has_decimal_point(&self, v: &IValue) -> bool {
+        has_decimal_point(v.ptr_usize())
+    }
+    unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
+        num_hash(num_val(v.ptr_usize()), state);
+    }
+    unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
+        number_cmp(a, b) == Ordering::Equal
+    }
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
+        Some(number_cmp(a, b))
+    }
+    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
+        num_debug(num_val(v.ptr_usize()), f)
+    }
+    fn destructure(&self, v: IValue) -> Destructured {
+        Destructured::Number(INumber(v))
+    }
+    unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
+        DestructuredRef::Number(v.as_number_unchecked())
+    }
+    unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
+        DestructuredMut::Number(v.as_number_unchecked_mut())
+    }
+    unsafe fn to_i64(&self, v: &IValue) -> Option<i64> {
+        num_to_i64(num_val(v.ptr_usize()))
+    }
+    unsafe fn to_u64(&self, v: &IValue) -> Option<u64> {
+        num_to_u64(num_val(v.ptr_usize()))
+    }
+    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
+        // The inline decimal decodes exactly itself.
+        to_f64_exact(v.ptr_usize())
+    }
+    unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
+        Some(to_f64_lossy(v.ptr_usize()))
+    }
+    // clone/drop use the inline defaults (bit-copy / nothing).
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_magnitudes_never_misencode() {
+        // Regression: `u128::checked_shl` silently drops overflow bits, so
+        // `encode_f64(2^127)` once wrongly produced an inline zero. Whenever a
+        // value encodes inline it must decode back to exactly the input; values
+        // that cannot be represented exactly inline must spill to the heap
+        // (`None`) rather than to a wrong value.
+        for &x in &[
+            0.5_f64,
+            1e18,
+            1e22,
+            1.7014118346046923e38, // 2^127
+            f64::MAX,
+            1e39,
+            6.022e23,
+            9.223372036854776e18,
+            f64::MIN_POSITIVE,
+        ] {
+            if let Some(bits) = encode_f64(x) {
+                assert_eq!(to_f64_lossy(bits), x, "{:e} misencoded inline", x);
+            }
+        }
+    }
+
+    #[test]
+    fn num_val_is_total_over_the_inline_domain() {
+        // The base-10 format can hold any `mantissa * 10^exp`, including exact
+        // decimals that are not exact `f64`s — e.g. `0.1 == 1 * 10^-1`. Today's
+        // constructors reach one via the string parser, but `num_val` decodes the
+        // representation and must handle the whole domain, holding the exact value
+        // rather than panicking or rounding.
+        let bits = encode(1, exp_code(-1, true)); // 1 * 10^-1 == 0.1
+        assert!(
+            to_f64_exact(bits).is_none(),
+            "0.1 is not exactly representable as f64"
+        );
+        match num_val(bits) {
+            NumVal::Decimal { mantissa, exp } => assert_eq!((mantissa, exp), (1, -1)),
+            _ => panic!("expected an exact Decimal"),
+        }
     }
 }
