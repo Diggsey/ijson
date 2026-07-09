@@ -26,6 +26,14 @@ cargo +nightly fuzz run number_ord
 
 Bound a run with libFuzzer flags, e.g. `-- -runs=5000000` or `-- -max_total_time=60`.
 
+By default the targets exercise the base-2 (binary float) inline encoding. Add
+`--features arbitrary_precision` to fuzz the base-10 (exact decimal) encoding and
+the heap arbitrary-precision path instead:
+
+```sh
+cargo +nightly fuzz run number_value --features arbitrary_precision
+```
+
 ### Windows
 
 Coverage-guided fuzzing works with the default AddressSanitizer build; it just

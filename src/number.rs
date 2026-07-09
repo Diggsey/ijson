@@ -292,20 +292,20 @@ fn classify_json_number(s: &str) -> Option<NumberShape> {
 /// Parses a JSON number from its textual form, exactly as the JSON grammar
 /// defines it (see <https://www.json.org/>).
 ///
-/// Unlike deserializing through `serde_json` (which rounds to the nearest `f64`),
-/// this preserves the *exact* decimal value: a number written with a fraction or
-/// exponent is stored as the exact decimal it denotes when that fits inline, so
-/// `"0.1"` is the exact `1 * 10^-1` rather than the `f64` approximation — and thus
-/// a *different* value from the `f64` `0.1`. A plain in-range integer keeps its
-/// integer representation (no decimal point); anything too large or too precise to
-/// hold exactly falls back to the nearest `f64`.
+/// A float-shaped number is parsed to the nearest `f64` (as deserializing through
+/// `serde_json` would), while a plain in-range integer keeps its exact integer
+/// representation (no decimal point).
+///
+/// With the `arbitrary_precision` feature this instead preserves the *exact*
+/// decimal value where it fits: `"0.1"` becomes the exact `1 * 10^-1` rather than
+/// the `f64` approximation — and thus a *different* value from the `f64` `0.1` —
+/// falling back to the nearest `f64` only when the value is too large or too
+/// precise to hold exactly.
 ///
 /// # Examples
 ///
 /// ```
 /// # use ijson::INumber;
-/// use std::convert::TryFrom;
-///
 /// let n: INumber = "1.5".parse().unwrap();
 /// assert_eq!(n.to_f64(), Some(1.5));
 /// assert!(n.has_decimal_point());
@@ -313,11 +313,6 @@ fn classify_json_number(s: &str) -> Option<NumberShape> {
 /// let n: INumber = "-42".parse().unwrap();
 /// assert_eq!(n.to_i64(), Some(-42));
 /// assert!(!n.has_decimal_point());
-///
-/// // The exact decimal `0.1` is kept, so it differs from the f64 `0.1`.
-/// let d: INumber = "0.1".parse().unwrap();
-/// assert_ne!(d, INumber::try_from(0.1_f64).unwrap());
-/// assert_eq!(d.to_f64(), None); // not exactly an f64
 ///
 /// // Invalid JSON numbers are rejected (leading zero, bare '+', trailing '.').
 /// assert!("01".parse::<INumber>().is_err());
@@ -349,14 +344,18 @@ impl FromStr for INumber {
                     float_from(s)?
                 }
             }
-            // Store the exact decimal inline when it fits; otherwise (too many
-            // digits, or the exponent out of the inline range) fall back to f64.
+            // With `arbitrary_precision`, store the exact decimal inline when it
+            // fits (falling back to f64 for too many digits or an out-of-range
+            // exponent). Otherwise a float is simply the nearest f64.
+            #[cfg(feature = "arbitrary_precision")]
             NumberShape::Float => {
                 match parse_decimal(s).and_then(|(m, e)| IValue::new_decimal(m, e)) {
                     Some(v) => v,
                     None => float_from(s)?,
                 }
             }
+            #[cfg(not(feature = "arbitrary_precision"))]
+            NumberShape::Float => float_from(s)?,
         };
         Ok(INumber(value))
     }
@@ -364,7 +363,9 @@ impl FromStr for INumber {
 
 /// Extracts the exact decimal value `mantissa * 10^exp` from a validated JSON
 /// *float*-shaped string. Returns `None` if the significant digits or exponent
-/// overflow (too many to hold exactly), so the caller falls back to `f64`.
+/// overflow (too many to hold exactly), so the caller falls back to `f64`. Only
+/// needed for the base-10 (`arbitrary_precision`) inline encoding.
+#[cfg(feature = "arbitrary_precision")]
 fn parse_decimal(s: &str) -> Option<(i128, i32)> {
     let b = s.as_bytes();
     let mut i = 0;
@@ -551,9 +552,7 @@ mod tests {
         }
         // A large round *integer* that exceeds the mantissa does not fit inline:
         // positive inline exponents are reserved for floats, so it spills to the
-        // heap (but still round-trips). The same magnitude as an e-notation
-        // *float* does factor into a positive inline exponent. The threshold
-        // differs by pointer width.
+        // heap (but still round-trips). The threshold differs by pointer width.
         let big_round = if usize::BITS == 64 {
             10i64.pow(18)
         } else {
@@ -565,7 +564,12 @@ mod tests {
             assert_eq!(n.to_i64(), Some(v));
             assert!(!n.has_decimal_point());
 
+            // The same magnitude as an e-notation *float* factors into a positive
+            // inline exponent with the base-10 encoding; the base-2 encoding has
+            // no such small exponent, so it spills to the heap. Either way it
+            // round-trips and keeps its decimal point.
             let f = INumber::try_from(v as f64).unwrap();
+            #[cfg(feature = "arbitrary_precision")]
             assert!(f.0.is_inline(), "{} (float) should factor inline", v);
             assert_eq!(f.to_i64(), Some(v));
             assert!(f.has_decimal_point());
@@ -780,6 +784,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "arbitrary_precision")]
     #[test]
     fn from_str_preserves_exact_decimals() {
         // "0.1" is stored as the exact decimal 1 * 10^-1, a *different* value from

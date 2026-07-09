@@ -7,6 +7,11 @@ edition = "2018"
 [package.metadata]
 cargo-fuzz = true
 
+# Forwards to ijson's feature so the targets can fuzz the base-10 (exact decimal)
+# inline encoding as well as the default base-2 (binary float) one.
+[features]
+arbitrary_precision = ["ijson/arbitrary_precision"]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }

@@ -404,6 +404,8 @@ mod tests {
     // list parsed through `INumber::from_str`. Deliberately contains duplicates
     // (the same value reached via different types/representations/parsers), which
     // is exactly what the equality/hash/order invariants must tolerate.
+    // Only the two O(n^2) pool tests use this, and both are skipped under Miri.
+    #[cfg(not(miri))]
     fn number_pool() -> Vec<IValue> {
         let mut pool = Vec::new();
         pool.extend(i64_cases().into_iter().map(IValue::from));
@@ -580,10 +582,11 @@ mod tests {
                     assert_eq!(v.number_repr_key(), js.number_repr_key(), "{:?} repr", s);
                 }
             } else {
-                // Stored as a float — possibly an *exact decimal* that is more
-                // precise than any f64 (from_str keeps e.g. 0.1 as 1*10^-1, unlike
-                // serde_json), so it is not equal to the f64 and is not compared as
-                // such. Its nearest f64 still matches a direct `std` parse.
+                // Stored as a float. With `arbitrary_precision` this may be an
+                // *exact decimal* more precise than any f64 (from_str keeps e.g.
+                // 0.1 as 1*10^-1, unlike serde_json), so it is not equal to the f64
+                // and is not compared as such — but its nearest f64 always matches
+                // a direct `std` parse, in either configuration.
                 assert_eq!(
                     v.to_f64_lossy(),
                     Some(s.parse::<f64>().unwrap()),
@@ -623,8 +626,9 @@ mod tests {
         }
         for &x in &f64_cases() {
             let v = inum(&serde_json::to_string(&x).unwrap());
-            // from_str may store the shortest decimal exactly rather than the f64
-            // (e.g. "0.1"), so compare via the nearest f64 rather than the value.
+            // With `arbitrary_precision`, from_str may store the shortest decimal
+            // exactly rather than the f64 (e.g. "0.1"), so compare via the nearest
+            // f64 rather than the value.
             assert_eq!(v.to_f64_lossy(), Some(x), "f64 {}", x);
             assert!(v.as_number().unwrap().has_decimal_point(), "f64 {} dot", x);
         }
