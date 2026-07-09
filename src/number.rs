@@ -111,7 +111,7 @@ impl INumber {
 
 impl Hash for INumber {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.number_hash(state);
+        self.0.hash(state);
     }
 }
 

@@ -16,7 +16,7 @@
 use std::alloc::{Layout, LayoutError};
 use std::cmp::{self, Ordering};
 use std::fmt::{self, Debug, Formatter};
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use std::ptr::NonNull;
 
 use crate::alloc::{alloc_infallible, dealloc_infallible, realloc_infallible};
@@ -271,9 +271,14 @@ pub(crate) unsafe fn drop(v: &mut IValue) {
     }
 }
 
-pub(crate) unsafe fn hash<H: Hasher>(v: &IValue, state: &mut H) {
-    // Recurses into each element through the standard slice/`IValue` `Hash` impl.
-    as_slice(v).hash(state);
+pub(crate) unsafe fn hash(v: &IValue, state: &mut dyn Hasher) {
+    let items = as_slice(v);
+    state.write_usize(items.len());
+    // Order matters for arrays: feed each element in turn, delegating down to its
+    // own representation via `repr()` (elements can be any value type).
+    for item in items {
+        item.repr().hash(item, state);
+    }
 }
 
 pub(crate) unsafe fn eq(a: &IValue, b: &IValue) -> bool {
