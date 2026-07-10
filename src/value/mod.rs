@@ -821,15 +821,20 @@ pub(crate) fn num_debug(nv: NumVal, f: &mut Formatter<'_>) -> fmt::Result {
     }
 }
 
-// Reduces a number of *either* representation to a `NumVal`. Numbers span two
-// representations, so the binary comparison below has to resolve each operand's
-// representation; this is the one place that dispatch remains.
+// Reduces a number of *any* representation to a `NumVal` — the one place number
+// dispatch remains, for the exact cross-representation comparison that has to
+// resolve either operand. Each representation returns its own variant directly.
 fn num_val_of(v: &IValue) -> NumVal {
     if v.is_inline() {
-        inline::InlineNumberRepr::num_val(v.ptr_usize())
-    } else {
-        // Safety: a non-inline number is a heap scalar.
-        unsafe { scalar::num_val(v) }
+        return inline::InlineNumberRepr::num_val(v.ptr_usize());
+    }
+    // A heap scalar; the tag identifies its kind.
+    // Safety: a non-inline number is a heap scalar of the tagged kind.
+    match v.type_tag() {
+        TypeTag::NumberI64 => unsafe { scalar::I64Repr::num_val(v) },
+        TypeTag::NumberU64 => unsafe { scalar::U64Repr::num_val(v) },
+        // `NumberF64` and the reserved tag (never produced) read as `f64`.
+        _ => unsafe { scalar::F64Repr::num_val(v) },
     }
 }
 
@@ -1307,8 +1312,8 @@ impl IValue {
             (tag, self.ptr_usize() as u64)
         } else {
             // Safety: a heap number stores its payload as the 8-byte scalar at
-            // `ptr()`; only called on numbers.
-            (tag, unsafe { scalar::read(self.ptr()) })
+            // `ptr()`; only called on numbers. The raw bits (as `u64`) are the key.
+            (tag, unsafe { scalar::read::<u64>(self.ptr()) })
         }
     }
 }

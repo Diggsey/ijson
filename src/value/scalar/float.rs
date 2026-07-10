@@ -20,13 +20,13 @@ impl F64Repr {
     /// `f64` — so it is the total fallback in construction.
     pub(crate) fn store(value: f64) -> IValue {
         // Safety: `alloc` returns a fresh, aligned, non-null allocation.
-        unsafe { IValue::new_ptr(alloc(value.to_bits()), TypeTag::NumberF64) }
+        unsafe { IValue::new_ptr(alloc::<f64>(value), TypeTag::NumberF64) }
     }
 
-    /// Decodes the 8-byte payload as an `f64`.
+    /// Decodes the payload as an `f64`.
     /// Safety: `v` must be a live `NumberF64` scalar.
-    pub(super) unsafe fn num_val(v: &IValue) -> NumVal {
-        NumVal::Float(f64::from_bits(read(v.ptr())))
+    pub(crate) unsafe fn num_val(v: &IValue) -> NumVal {
+        NumVal::Float(read::<f64>(v.ptr()))
     }
 }
 
@@ -71,9 +71,9 @@ impl ValueRepr for F64Repr {
         Some(num_to_f64_lossy(Self::num_val(v)))
     }
     unsafe fn clone(&self, v: &IValue) -> IValue {
-        IValue::new_ptr(alloc(read(v.ptr())), TypeTag::NumberF64)
+        Self::store(read::<f64>(v.ptr()))
     }
     unsafe fn drop(&self, v: &mut IValue) {
-        free(v.ptr());
+        free::<f64>(v.ptr());
     }
 }

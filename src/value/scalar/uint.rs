@@ -21,13 +21,13 @@ impl U64Repr {
     /// `u64` — so it is the total fallback in construction.
     pub(crate) fn store(value: u64) -> IValue {
         // Safety: `alloc` returns a fresh, aligned, non-null allocation.
-        unsafe { IValue::new_ptr(alloc(value), TypeTag::NumberU64) }
+        unsafe { IValue::new_ptr(alloc::<u64>(value), TypeTag::NumberU64) }
     }
 
-    /// Decodes the 8-byte payload as a `u64`.
+    /// Decodes the payload as a `u64`.
     /// Safety: `v` must be a live `NumberU64` scalar.
-    pub(super) unsafe fn num_val(v: &IValue) -> NumVal {
-        NumVal::UInt(read(v.ptr()))
+    pub(crate) unsafe fn num_val(v: &IValue) -> NumVal {
+        NumVal::UInt(read::<u64>(v.ptr()))
     }
 }
 
@@ -72,9 +72,9 @@ impl ValueRepr for U64Repr {
         Some(num_to_f64_lossy(Self::num_val(v)))
     }
     unsafe fn clone(&self, v: &IValue) -> IValue {
-        IValue::new_ptr(alloc(read(v.ptr())), TypeTag::NumberU64)
+        Self::store(read::<u64>(v.ptr()))
     }
     unsafe fn drop(&self, v: &mut IValue) {
-        free(v.ptr());
+        free::<u64>(v.ptr());
     }
 }
