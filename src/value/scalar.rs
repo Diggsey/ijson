@@ -24,13 +24,31 @@ fn layout() -> Layout {
 }
 
 /// Allocates a heap scalar holding `bits`, returning the aligned allocation.
-pub(crate) fn alloc(bits: u64) -> NonNull<u8> {
+fn alloc(bits: u64) -> NonNull<u8> {
     // Safety: freshly allocated, 8-aligned, non-null.
     unsafe {
         let ptr = alloc_infallible(layout()).cast::<u64>();
         ptr.as_ptr().write(bits);
         ptr.cast()
     }
+}
+
+/// Constructs a heap scalar `i64`. The tag records how to read the 8 bytes back.
+pub(crate) fn new_i64(value: i64) -> IValue {
+    // Safety: `alloc` returns a fresh, aligned, non-null scalar allocation.
+    unsafe { IValue::new_ptr(alloc(value as u64), TypeTag::NumberI64) }
+}
+
+/// Constructs a heap scalar `u64` (only reached for values above `i64::MAX`).
+pub(crate) fn new_u64(value: u64) -> IValue {
+    // Safety: `alloc` returns a fresh, aligned, non-null scalar allocation.
+    unsafe { IValue::new_ptr(alloc(value), TypeTag::NumberU64) }
+}
+
+/// Constructs a heap scalar `f64`.
+pub(crate) fn new_f64(value: f64) -> IValue {
+    // Safety: `alloc` returns a fresh, aligned, non-null scalar allocation.
+    unsafe { IValue::new_ptr(alloc(value.to_bits()), TypeTag::NumberF64) }
 }
 
 /// Reads the raw payload bits. Safety: `ptr` must be a live scalar allocation.

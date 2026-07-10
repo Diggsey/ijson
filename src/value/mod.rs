@@ -1234,12 +1234,10 @@ mod num_val_tests {
 // representation immediately.
 impl IValue {
     pub(crate) fn new_i64(value: i64) -> Self {
-        match inline::InlineNumberRepr::encode_int(value) {
-            // Safety: `encode_int` returns valid inline bits; the scalar
-            // allocation is aligned and non-null.
-            Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
-            None => unsafe { Self::new_ptr(scalar::alloc(value as u64), TypeTag::NumberI64) },
-        }
+        // Ask the inline representation to encode it; fall back to a heap scalar.
+        inline::InlineNumberRepr::encode_int(value)
+            .map(Self::new_inline_number)
+            .unwrap_or_else(|| scalar::new_i64(value))
     }
 
     pub(crate) fn new_u64(value: u64) -> Self {
@@ -1248,16 +1246,14 @@ impl IValue {
             Ok(v) => Self::new_i64(v),
             // Anything above `i64::MAX` far exceeds the inline mantissa, so it can
             // only be stored as a heap `u64`.
-            // Safety: the scalar allocation is aligned and non-null.
-            Err(_) => unsafe { Self::new_ptr(scalar::alloc(value), TypeTag::NumberU64) },
+            Err(_) => scalar::new_u64(value),
         }
     }
 
     pub(crate) fn new_f64(value: f64) -> Self {
-        match inline::InlineNumberRepr::encode_f64(value) {
-            Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
-            None => unsafe { Self::new_ptr(scalar::alloc(value.to_bits()), TypeTag::NumberF64) },
-        }
+        inline::InlineNumberRepr::encode_f64(value)
+            .map(Self::new_inline_number)
+            .unwrap_or_else(|| scalar::new_f64(value))
     }
 
     /// Wraps already-encoded inline-number bits as an `IValue`. The bits come from
