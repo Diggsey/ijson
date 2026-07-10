@@ -455,12 +455,12 @@ impl IValue {
         &mut *(self as *mut Self).cast::<T>()
     }
 
-    // Safety: Must be a string
+    // Safety: Must be a number
     unsafe fn as_number_unchecked(&self) -> &INumber {
         self.unchecked_cast_ref()
     }
 
-    // Safety: Must be a string
+    // Safety: Must be a number
     unsafe fn as_number_unchecked_mut(&mut self) -> &mut INumber {
         self.unchecked_cast_mut()
     }
@@ -675,12 +675,12 @@ impl IValue {
         self.type_tag() == TypeTag::Object
     }
 
-    // Safety: Must be an array
+    // Safety: Must be an object
     unsafe fn as_object_unchecked(&self) -> &IObject {
         self.unchecked_cast_ref()
     }
 
-    // Safety: Must be an array
+    // Safety: Must be an object
     unsafe fn as_object_unchecked_mut(&mut self) -> &mut IObject {
         self.unchecked_cast_mut()
     }
