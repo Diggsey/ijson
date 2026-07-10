@@ -824,12 +824,12 @@ pub(crate) fn num_debug(nv: NumVal, f: &mut Formatter<'_>) -> fmt::Result {
 }
 
 /// Compares the number `a` — already decoded to a `NumVal` by its own
-/// representation — to the number `b`, whose value is resolved through `b`'s own
-/// representation ([`IValue::num_val`]). `b` must be a number; the caller
-/// (`IValue`'s type-guarded `eq`/`partial_cmp`) guarantees it.
-pub(crate) fn number_cmp(a: NumVal, b: &IValue) -> Ordering {
-    debug_assert_eq!(b.type_(), ValueType::Number, "number_cmp requires a number");
-    cmp_num(&a, &b.num_val())
+/// representation — to `b`, whose value is resolved through `b`'s own
+/// representation ([`IValue::num_val`]). Yields `None` if `b` is not a number, so
+/// the caller need not know `b`'s type. (In a real comparison the type guard makes
+/// `b` the same type, so the result is always `Some`.)
+pub(crate) fn number_cmp(a: NumVal, b: &IValue) -> Option<Ordering> {
+    b.num_val().map(|b| cmp_num(&a, &b))
 }
 
 /// Compares two strings, regardless of how each is represented. Both operands must
@@ -1258,13 +1258,14 @@ impl IValue {
         self.repr().has_decimal_point(self)
     }
 
-    /// This number reduced to a [`NumVal`], via its representation. Used to resolve
-    /// the *other* operand of a number comparison (see [`number_cmp`]). Must be a
-    /// number.
-    pub(crate) fn num_val(&self) -> NumVal {
-        debug_assert_eq!(self.type_(), ValueType::Number, "num_val requires a number");
-        // Safety: `self.repr()` owns `self`, which is a number.
-        unsafe { self.repr().num_val(self) }
+    /// This value reduced to a [`NumVal`] if it is a number, otherwise `None`. Used
+    /// to resolve the *other* operand of a number comparison (see [`number_cmp`])
+    /// through its own representation — the caller need not know its type; a
+    /// non-number simply yields `None`.
+    pub(crate) fn num_val(&self) -> Option<NumVal> {
+        // Safety: `num_val` is only reached for a number, whose representation
+        // defines it, and `self.repr()` owns `self`.
+        (self.type_() == ValueType::Number).then(|| unsafe { self.repr().num_val(self) })
     }
 }
 

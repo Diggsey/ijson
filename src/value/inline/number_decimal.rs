@@ -414,10 +414,10 @@ impl InlineValue for InlineNumberRepr {
         num_hash(Self::num_val(v.ptr_usize()), state);
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
-        number_cmp(Self::num_val(a.ptr_usize()), b) == Ordering::Equal
+        number_cmp(Self::num_val(a.ptr_usize()), b) == Some(Ordering::Equal)
     }
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
-        Some(number_cmp(Self::num_val(a.ptr_usize()), b))
+        number_cmp(Self::num_val(a.ptr_usize()), b)
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
         num_debug(Self::num_val(v.ptr_usize()), f)

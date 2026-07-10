@@ -39,10 +39,10 @@ impl ValueRepr for I64Repr {
         num_hash(self.num_val(v), state);
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
-        number_cmp(self.num_val(a), b) == Ordering::Equal
+        number_cmp(self.num_val(a), b) == Some(Ordering::Equal)
     }
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
-        Some(number_cmp(self.num_val(a), b))
+        number_cmp(self.num_val(a), b)
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
         num_debug(self.num_val(v), f)
