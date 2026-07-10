@@ -1227,33 +1227,38 @@ mod num_val_tests {
     }
 }
 
-// Number-type dispatch. A JSON number is stored either as an inline decimal
-// (`inline::number`) or a heap scalar (`scalar`). Construction asks the inline
-// representation to encode the value and only falls back to the heap when it
-// cannot; the accessors dispatch on the tag and defer to the owning
-// representation immediately.
+// How a JSON number value is built in a given representation. Each representation
+// returns `None` for a value it cannot hold, so construction tries them in
+// preference order — the compact inline form first, then the heap scalar, which is
+// total (it can store any `i64`/`u64`/`f64`). Adding a representation (e.g. a heap
+// arbitrary-precision decimal) means implementing this and inserting it into the
+// chain in `IValue::new_i64`/`new_u64`/`new_f64`.
+pub(crate) trait NumberRepr {
+    fn from_i64(value: i64) -> Option<IValue>;
+    fn from_u64(value: u64) -> Option<IValue>;
+    fn from_f64(value: f64) -> Option<IValue>;
+}
+
+// Number-type dispatch. A JSON number is stored either inline (`inline::number`) or
+// as a heap scalar (`scalar`), both [`NumberRepr`]s. Construction tries each in
+// turn; the accessors dispatch on the tag and defer to the owning representation.
 impl IValue {
     pub(crate) fn new_i64(value: i64) -> Self {
-        // Ask the inline representation to encode it; fall back to a heap scalar.
-        inline::InlineNumberRepr::encode_int(value)
-            .map(Self::new_inline_number)
-            .unwrap_or_else(|| scalar::new_i64(value))
+        inline::InlineNumberRepr::from_i64(value)
+            .or_else(|| scalar::ScalarRepr::from_i64(value))
+            .expect("the scalar representation stores any i64")
     }
 
     pub(crate) fn new_u64(value: u64) -> Self {
-        match i64::try_from(value) {
-            // Fits `i64`: canonicalise through the signed path.
-            Ok(v) => Self::new_i64(v),
-            // Anything above `i64::MAX` far exceeds the inline mantissa, so it can
-            // only be stored as a heap `u64`.
-            Err(_) => scalar::new_u64(value),
-        }
+        inline::InlineNumberRepr::from_u64(value)
+            .or_else(|| scalar::ScalarRepr::from_u64(value))
+            .expect("the scalar representation stores any u64")
     }
 
     pub(crate) fn new_f64(value: f64) -> Self {
-        inline::InlineNumberRepr::encode_f64(value)
-            .map(Self::new_inline_number)
-            .unwrap_or_else(|| scalar::new_f64(value))
+        inline::InlineNumberRepr::from_f64(value)
+            .or_else(|| scalar::ScalarRepr::from_f64(value))
+            .expect("the scalar representation stores any f64")
     }
 
     /// Wraps already-encoded inline-number bits as an `IValue`. The bits come from

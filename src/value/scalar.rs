@@ -7,13 +7,15 @@
 
 use std::alloc::Layout;
 use std::cmp::Ordering;
+use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
 use std::hash::Hasher;
 use std::ptr::NonNull;
 
 use super::{
     num_debug, num_hash, num_to_f64, num_to_f64_lossy, num_to_i64, num_to_u64, number_cmp,
-    Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, TypeTag, ValueRepr, ValueType,
+    Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, NumberRepr, TypeTag, ValueRepr,
+    ValueType,
 };
 use crate::alloc::{alloc_infallible, dealloc_infallible};
 use crate::number::INumber;
@@ -33,22 +35,26 @@ fn alloc(bits: u64) -> NonNull<u8> {
     }
 }
 
-/// Constructs a heap scalar `i64`. The tag records how to read the 8 bytes back.
-pub(crate) fn new_i64(value: i64) -> IValue {
-    // Safety: `alloc` returns a fresh, aligned, non-null scalar allocation.
-    unsafe { IValue::new_ptr(alloc(value as u64), TypeTag::NumberI64) }
-}
-
-/// Constructs a heap scalar `u64` (only reached for values above `i64::MAX`).
-pub(crate) fn new_u64(value: u64) -> IValue {
-    // Safety: `alloc` returns a fresh, aligned, non-null scalar allocation.
-    unsafe { IValue::new_ptr(alloc(value), TypeTag::NumberU64) }
-}
-
-/// Constructs a heap scalar `f64`.
-pub(crate) fn new_f64(value: f64) -> IValue {
-    // Safety: `alloc` returns a fresh, aligned, non-null scalar allocation.
-    unsafe { IValue::new_ptr(alloc(value.to_bits()), TypeTag::NumberF64) }
+/// The heap scalar is the total number representation: it stores any `i64`, `u64`,
+/// or `f64` (each tag records how to read the eight bytes back), so it never
+/// declines a value and is the final fallback in the construction chain.
+impl NumberRepr for ScalarRepr {
+    fn from_i64(value: i64) -> Option<IValue> {
+        // Safety: `alloc` returns a fresh, aligned, non-null scalar allocation.
+        Some(unsafe { IValue::new_ptr(alloc(value as u64), TypeTag::NumberI64) })
+    }
+    fn from_u64(value: u64) -> Option<IValue> {
+        match i64::try_from(value) {
+            // Prefer the signed tag when it fits, so the representation is canonical.
+            Ok(v) => Self::from_i64(v),
+            // Safety: `alloc` returns a fresh, aligned, non-null scalar allocation.
+            Err(_) => Some(unsafe { IValue::new_ptr(alloc(value), TypeTag::NumberU64) }),
+        }
+    }
+    fn from_f64(value: f64) -> Option<IValue> {
+        // Safety: `alloc` returns a fresh, aligned, non-null scalar allocation.
+        Some(unsafe { IValue::new_ptr(alloc(value.to_bits()), TypeTag::NumberF64) })
+    }
 }
 
 /// Reads the raw payload bits. Safety: `ptr` must be a live scalar allocation.
