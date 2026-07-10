@@ -838,8 +838,14 @@ fn num_val_of(v: &IValue) -> NumVal {
     }
 }
 
-/// Compares two numbers exactly, regardless of how each is represented.
+/// Compares two numbers exactly, regardless of how each is represented. Both
+/// operands must be numbers — a non-number would have its bits misread as one — so
+/// the caller (`IValue`'s type-guarded `eq`/`partial_cmp`) guarantees it.
 pub(crate) fn number_cmp(a: &IValue, b: &IValue) -> Ordering {
+    debug_assert!(
+        a.type_() == ValueType::Number && b.type_() == ValueType::Number,
+        "number_cmp requires two numbers",
+    );
     if a.raw_eq(b) {
         Ordering::Equal
     } else {
@@ -847,8 +853,13 @@ pub(crate) fn number_cmp(a: &IValue, b: &IValue) -> Ordering {
     }
 }
 
-/// Compares two strings, regardless of how each is represented.
+/// Compares two strings, regardless of how each is represented. Both operands must
+/// be strings, guaranteed by the caller as for [`number_cmp`].
 pub(crate) fn string_cmp(a: &IValue, b: &IValue) -> Ordering {
+    debug_assert!(
+        a.type_() == ValueType::String && b.type_() == ValueType::String,
+        "string_cmp requires two strings",
+    );
     if a.raw_eq(b) {
         Ordering::Equal
     } else {
@@ -1884,5 +1895,71 @@ mod tests {
         // Also check consistency with the serde-based conversion.
         let via_serde: IValue = crate::to_value(&json).unwrap();
         assert_eq!(ivalue, via_serde);
+    }
+
+    #[test]
+    fn compares_across_types_without_panicking() {
+        let vals: Vec<IValue> = vec![
+            IValue::NULL,
+            true.into(),
+            5_i64.into(),
+            (u64::MAX).into(),         // heap u64
+            5.0_f64.into(),            // f64 equal in value to the i64 5
+            10_000_000_000_i64.into(), // heap i64
+            "hello".into(),
+            vec![IValue::from(1)].into(),
+        ];
+        // Every ordered/equality pair must resolve, never panic.
+        for a in &vals {
+            for b in &vals {
+                let _ = a == b;
+                let _ = a.partial_cmp(b);
+            }
+        }
+        // Cross-representation numeric equality still holds exactly.
+        assert_eq!(IValue::from(5_i64), IValue::from(5.0_f64));
+        assert_eq!(
+            IValue::from(5_i64).partial_cmp(&IValue::from(5.0_f64)),
+            Some(Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn compares_numbers_across_representations() {
+        use crate::INumber;
+        let ints: &[i64] = &[
+            0,
+            5,
+            -5,
+            1,
+            -1,
+            i64::MIN,
+            i64::MAX,
+            10_000_000_000,
+            -10_000_000_000,
+        ];
+        let mut nums: Vec<INumber> = ints.iter().map(|&x| x.into()).collect();
+        nums.extend([u64::MAX.into(), (i64::MAX as u64 + 1).into()]);
+        for &f in &[
+            0.0_f64,
+            5.0,
+            5.5,
+            -5.5,
+            0.1,
+            -0.1,
+            1e18,
+            9.2e18,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+        ] {
+            nums.push(f.try_into().unwrap());
+        }
+        // INumber: Ord — every pair must resolve, and the order must be total and
+        // antisymmetric (no pair panics or disagrees with itself reversed).
+        for a in &nums {
+            for b in &nums {
+                assert_eq!(a.cmp(b), b.cmp(a).reverse(), "{:?} vs {:?}", a, b);
+            }
+        }
     }
 }
