@@ -48,8 +48,8 @@ use super::number::{from_str_with, InlineNumber, InlineNumberError};
 use super::InlineValue;
 use crate::number::INumber;
 use crate::value::{
-    decimal_to_f64_lossy, num_debug, num_hash, num_to_i64, num_to_u64, number_cmp, Destructured,
-    DestructuredMut, DestructuredRef, IValue, NumVal, ValueType,
+    decimal_to_f64_lossy, number_cmp, Destructured, DestructuredMut, DestructuredRef, IValue,
+    NumVal, ValueType,
 };
 
 // --- Bit layout -------------------------------------------------------------
@@ -411,7 +411,7 @@ impl InlineValue for InlineNumberRepr {
         has_decimal_point(v.ptr_usize())
     }
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        num_hash(Self::num_val(v.ptr_usize()), state);
+        Self::num_val(v.ptr_usize()).hash(state);
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
         number_cmp(Self::num_val(a.ptr_usize()), b) == Some(Ordering::Equal)
@@ -420,7 +420,7 @@ impl InlineValue for InlineNumberRepr {
         number_cmp(Self::num_val(a.ptr_usize()), b)
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        num_debug(Self::num_val(v.ptr_usize()), f)
+        write!(f, "{:?}", Self::num_val(v.ptr_usize()))
     }
     fn destructure(&self, v: IValue) -> Destructured {
         Destructured::Number(INumber(v))
@@ -432,10 +432,10 @@ impl InlineValue for InlineNumberRepr {
         DestructuredMut::Number(v.as_number_unchecked_mut())
     }
     unsafe fn to_i64(&self, v: &IValue) -> Option<i64> {
-        num_to_i64(Self::num_val(v.ptr_usize()))
+        Self::num_val(v.ptr_usize()).to_i64()
     }
     unsafe fn to_u64(&self, v: &IValue) -> Option<u64> {
-        num_to_u64(Self::num_val(v.ptr_usize()))
+        Self::num_val(v.ptr_usize()).to_u64()
     }
     unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
         // The inline decimal decodes exactly itself.

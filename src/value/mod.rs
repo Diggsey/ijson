@@ -23,10 +23,10 @@ use indexmap::IndexMap;
 // decodes the family bits and dispatches to an inline sub-representation
 // (`inline::number`/`string`/`constant`) via the inline-only `InlineValue`
 // trait. `IValue` finds a value's representation once, via `repr()`, and every
-// operation delegates down to it; the per-`NumVal`/`&str` logic that both number
-// (or both string) representations share is factored into standalone utility
-// functions — `num_*`/`cmp_num` in the `numeric` module, `string_*` below — never
-// into a representation that reaches back up.
+// operation delegates down to it; the per-value logic that both number (or both
+// string) representations share is factored out — into `NumVal`'s methods in the
+// `numeric` module, and the standalone `string_*` utilities below — never into a
+// representation that reaches back up.
 //
 // A JSON *number* or *string* spans two representations, so `new_*` construction
 // picks one as early as possible, and comparing two of them — the one place that
@@ -41,13 +41,10 @@ mod numeric;
 pub(crate) mod object;
 pub(crate) mod scalar;
 
-// The numeric value model and its exact comparison/hash/conversion utilities,
-// shared by every number representation.
-use numeric::cmp_num;
-pub(crate) use numeric::{
-    decimal_to_f64_lossy, num_debug, num_hash, num_to_f64, num_to_f64_lossy, num_to_i64,
-    num_to_u64, NumVal,
-};
+// The numeric value model (`NumVal` and its exact comparison/hash/conversion
+// methods), shared by every number representation. `decimal_to_f64_lossy` is the
+// one scalar helper used outside the module (by the base-10 inline representation).
+pub(crate) use numeric::{decimal_to_f64_lossy, NumVal};
 
 // The active inline number representation's static interface (`encode_int`,
 // `encode_f64`, `num_val`, `encode_decimal`), used through `inline::InlineNumberRepr`.
@@ -731,7 +728,7 @@ impl IValue {
 /// the caller need not know `b`'s type. (In a real comparison the type guard makes
 /// `b` the same type, so the result is always `Some`.)
 pub(crate) fn number_cmp(a: NumVal, b: &IValue) -> Option<Ordering> {
-    b.num_val().map(|b| cmp_num(&a, &b))
+    b.num_val().map(|b| a.cmp(b))
 }
 
 /// Compares two strings, regardless of how each is represented. Both operands must

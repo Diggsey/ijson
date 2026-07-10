@@ -9,8 +9,8 @@ use std::hash::Hasher;
 use super::{alloc, free, read};
 use crate::number::INumber;
 use crate::value::{
-    num_debug, num_hash, num_to_f64, num_to_f64_lossy, num_to_i64, num_to_u64, number_cmp,
-    Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, TypeTag, ValueRepr, ValueType,
+    number_cmp, Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, TypeTag, ValueRepr,
+    ValueType,
 };
 
 /// The heap `u64` number representation.
@@ -37,7 +37,7 @@ impl ValueRepr for U64Repr {
         NumVal::UInt(read::<u64>(v.ptr()))
     }
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        num_hash(self.num_val(v), state);
+        self.num_val(v).hash(state);
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
         number_cmp(self.num_val(a), b) == Some(Ordering::Equal)
@@ -46,7 +46,7 @@ impl ValueRepr for U64Repr {
         number_cmp(self.num_val(a), b)
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        num_debug(self.num_val(v), f)
+        write!(f, "{:?}", self.num_val(v))
     }
     fn destructure(&self, v: IValue) -> Destructured {
         Destructured::Number(INumber(v))
@@ -58,16 +58,16 @@ impl ValueRepr for U64Repr {
         DestructuredMut::Number(v.as_number_unchecked_mut())
     }
     unsafe fn to_i64(&self, v: &IValue) -> Option<i64> {
-        num_to_i64(self.num_val(v))
+        self.num_val(v).to_i64()
     }
     unsafe fn to_u64(&self, v: &IValue) -> Option<u64> {
-        num_to_u64(self.num_val(v))
+        self.num_val(v).to_u64()
     }
     unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
-        num_to_f64(self.num_val(v))
+        self.num_val(v).to_f64()
     }
     unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
-        Some(num_to_f64_lossy(self.num_val(v)))
+        Some(self.num_val(v).to_f64_lossy())
     }
     unsafe fn clone(&self, v: &IValue) -> IValue {
         Self::store(read::<u64>(v.ptr()))
