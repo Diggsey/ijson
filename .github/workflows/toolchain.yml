@@ -51,8 +51,16 @@ jobs:
           args: --all-features -- -D warnings
 
   test:
-    name: Test
+    name: Test (${{ matrix.label }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: default
+            features: ""
+          - label: arbitrary_precision
+            features: "--features arbitrary_precision"
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -63,11 +71,19 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: test
-          args: -- --test-threads=1
+          args: ${{ matrix.features }} -- --test-threads=1
 
   test_miri:
-    name: Test (Miri)
+    name: Test (Miri, ${{ matrix.label }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: default
+            features: ""
+          - label: arbitrary_precision
+            features: "--features arbitrary_precision"
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -79,13 +95,21 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: miri
-          args: test
+          args: test ${{ matrix.features }}
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
 
   test_miri_32bit_linux:
-    name: Test (Miri i686-unknown-linux-gnu)
+    name: Test (Miri i686-unknown-linux-gnu, ${{ matrix.label }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: default
+            features: ""
+          - label: arbitrary_precision
+            features: "--features arbitrary_precision"
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -98,13 +122,21 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: miri
-          args: test --target i686-unknown-linux-gnu
+          args: test --target i686-unknown-linux-gnu ${{ matrix.features }}
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
 
   test_miri_32bit_windows:
-    name: Test (Miri i686-pc-windows-msvc)
+    name: Test (Miri i686-pc-windows-msvc, ${{ matrix.label }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: default
+            features: ""
+          - label: arbitrary_precision
+            features: "--features arbitrary_precision"
     steps:
       - uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
@@ -117,7 +149,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: miri
-          args: test --target i686-pc-windows-msvc
+          args: test --target i686-pc-windows-msvc ${{ matrix.features }}
         env:
           MIRIFLAGS: "-Zmiri-disable-isolation"
 
