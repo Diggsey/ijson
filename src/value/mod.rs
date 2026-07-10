@@ -29,11 +29,11 @@ use indexmap::IndexMap;
 // reaches back up.
 //
 // A JSON *number* or *string* spans two representations, so `new_*` construction
-// picks one as early as possible, and the one place that has to resolve an
-// operand of unknown representation — comparing two numbers or two strings — does
-// so through `num_val_of`/`string_as_str`. The public wrapper types (`IArray`,
-// `INumber`, `IObject`, `IString`) live in the top-level modules and delegate
-// down through `IValue`.
+// picks one as early as possible, and comparing two of them — the one place that
+// has to resolve the *other* operand's representation — reaches it through the same
+// `repr()` dispatch (`IValue::num_val`/`string_as_str`), not a second decoder. The
+// public wrapper types (`IArray`, `INumber`, `IObject`, `IString`) live in the
+// top-level modules and delegate down through `IValue`.
 pub(crate) mod array;
 pub(crate) mod inline;
 pub(crate) mod interned;
@@ -318,7 +318,9 @@ impl IValue {
 
     /// Whether this value is stored inline (tag `Inline`) rather than behind a
     /// pointer. What *kind* of inline value it is remains the `inline` module's
-    /// concern.
+    /// concern. Only the tests distinguish the storage; runtime dispatch goes
+    /// through `repr()`.
+    #[cfg(test)]
     pub(crate) fn is_inline(&self) -> bool {
         self.type_tag() == TypeTag::Inline
     }
@@ -726,9 +728,9 @@ impl IValue {
 // though, so the base-10 representation compiles and is unit-tested in either
 // configuration. `exp` is always in the inline range `-7..=7`.
 //
-// Each number *representation* reduces its own storage to a `NumVal` (see
-// `inline::number::num_val` and `scalar::num_val`); the standalone `num_*`
-// functions below then implement every value operation once, shared by both.
+// Each number *representation* reduces its own storage to a `NumVal` via its
+// `ValueRepr::num_val` (reached through `repr()` dispatch); the standalone `num_*`
+// functions below then implement every value operation once, shared by all.
 #[derive(Clone, Copy)]
 pub(crate) enum NumVal {
     Int(i64),
@@ -821,36 +823,13 @@ pub(crate) fn num_debug(nv: NumVal, f: &mut Formatter<'_>) -> fmt::Result {
     }
 }
 
-// Reduces a number of *any* representation to a `NumVal` — the one place number
-// dispatch remains, for the exact cross-representation comparison that has to
-// resolve either operand. Each representation returns its own variant directly.
-fn num_val_of(v: &IValue) -> NumVal {
-    if v.is_inline() {
-        return inline::InlineNumberRepr::num_val(v.ptr_usize());
-    }
-    // A heap scalar; the tag identifies its kind.
-    // Safety: a non-inline number is a heap scalar of the tagged kind.
-    match v.type_tag() {
-        TypeTag::NumberI64 => unsafe { scalar::I64Repr::num_val(v) },
-        TypeTag::NumberU64 => unsafe { scalar::U64Repr::num_val(v) },
-        // `NumberF64` and the reserved tag (never produced) read as `f64`.
-        _ => unsafe { scalar::F64Repr::num_val(v) },
-    }
-}
-
-/// Compares two numbers exactly, regardless of how each is represented. Both
-/// operands must be numbers — a non-number would have its bits misread as one — so
-/// the caller (`IValue`'s type-guarded `eq`/`partial_cmp`) guarantees it.
-pub(crate) fn number_cmp(a: &IValue, b: &IValue) -> Ordering {
-    debug_assert!(
-        a.type_() == ValueType::Number && b.type_() == ValueType::Number,
-        "number_cmp requires two numbers",
-    );
-    if a.raw_eq(b) {
-        Ordering::Equal
-    } else {
-        cmp_num(&num_val_of(a), &num_val_of(b))
-    }
+/// Compares the number `a` — already decoded to a `NumVal` by its own
+/// representation — to the number `b`, whose value is resolved through `b`'s own
+/// representation ([`IValue::num_val`]). `b` must be a number; the caller
+/// (`IValue`'s type-guarded `eq`/`partial_cmp`) guarantees it.
+pub(crate) fn number_cmp(a: NumVal, b: &IValue) -> Ordering {
+    debug_assert_eq!(b.type_(), ValueType::Number, "number_cmp requires a number");
+    cmp_num(&a, &b.num_val())
 }
 
 /// Compares two strings, regardless of how each is represented. Both operands must
@@ -1278,6 +1257,15 @@ impl IValue {
     pub(crate) fn has_decimal_point(&self) -> bool {
         self.repr().has_decimal_point(self)
     }
+
+    /// This number reduced to a [`NumVal`], via its representation. Used to resolve
+    /// the *other* operand of a number comparison (see [`number_cmp`]). Must be a
+    /// number.
+    pub(crate) fn num_val(&self) -> NumVal {
+        debug_assert_eq!(self.type_(), ValueType::Number, "num_val requires a number");
+        // Safety: `self.repr()` owns `self`, which is a number.
+        unsafe { self.repr().num_val(self) }
+    }
 }
 
 // String-type dispatch. A JSON string is stored either inline (`inline::string`)
@@ -1374,6 +1362,15 @@ pub(crate) trait ValueRepr {
     /// Ordering within a type. Default: unordered (only `Object` keeps it).
     unsafe fn partial_cmp(&self, _a: &IValue, _b: &IValue) -> Option<Ordering> {
         None
+    }
+    /// This number reduced to a [`NumVal`] for the shared numeric utilities. This is
+    /// how the number comparison resolves its *other* operand: `a.repr()` decodes
+    /// `a` directly, and reaches `b`'s value through `b`'s representation via this
+    /// method — the same `repr()` dispatch, no separate number decoder. Only the
+    /// number representations produce a `NumVal`; it is never called on a
+    /// non-number (comparison is type-guarded), so the default is unreachable.
+    unsafe fn num_val(&self, _v: &IValue) -> NumVal {
+        unreachable!("num_val is only defined for number representations")
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result;
 

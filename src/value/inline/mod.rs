@@ -36,7 +36,9 @@ use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
 use std::hash::Hasher;
 
-use crate::value::{Destructured, DestructuredMut, DestructuredRef, IValue, ValueRepr, ValueType};
+use crate::value::{
+    Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, ValueRepr, ValueType,
+};
 
 // Bit 3 of an inline value: set for the string/constant sub-family, clear for
 // inline numbers.
@@ -158,6 +160,10 @@ impl ValueRepr for InlineRepr {
     }
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
         Self::inner(a).partial_cmp(a, b)
+    }
+    unsafe fn num_val(&self, v: &IValue) -> NumVal {
+        // Only reached for inline numbers, which use the number representation.
+        InlineNumberRepr::num_val(v.ptr_usize())
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
         Self::inner(v).debug(v, f)

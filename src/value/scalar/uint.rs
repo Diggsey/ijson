@@ -23,12 +23,6 @@ impl U64Repr {
         // Safety: `alloc` returns a fresh, aligned, non-null allocation.
         unsafe { IValue::new_ptr(alloc::<u64>(value), TypeTag::NumberU64) }
     }
-
-    /// Decodes the payload as a `u64`.
-    /// Safety: `v` must be a live `NumberU64` scalar.
-    pub(crate) unsafe fn num_val(v: &IValue) -> NumVal {
-        NumVal::UInt(read::<u64>(v.ptr()))
-    }
 }
 
 impl ValueRepr for U64Repr {
@@ -38,17 +32,21 @@ impl ValueRepr for U64Repr {
     fn has_decimal_point(&self, _v: &IValue) -> bool {
         false
     }
+    /// Decodes the payload as a `u64`. Safety: `v` must be a live `NumberU64`.
+    unsafe fn num_val(&self, v: &IValue) -> NumVal {
+        NumVal::UInt(read::<u64>(v.ptr()))
+    }
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        num_hash(Self::num_val(v), state);
+        num_hash(self.num_val(v), state);
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
-        number_cmp(a, b) == Ordering::Equal
+        number_cmp(self.num_val(a), b) == Ordering::Equal
     }
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
-        Some(number_cmp(a, b))
+        Some(number_cmp(self.num_val(a), b))
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        num_debug(Self::num_val(v), f)
+        num_debug(self.num_val(v), f)
     }
     fn destructure(&self, v: IValue) -> Destructured {
         Destructured::Number(INumber(v))
@@ -60,16 +58,16 @@ impl ValueRepr for U64Repr {
         DestructuredMut::Number(v.as_number_unchecked_mut())
     }
     unsafe fn to_i64(&self, v: &IValue) -> Option<i64> {
-        num_to_i64(Self::num_val(v))
+        num_to_i64(self.num_val(v))
     }
     unsafe fn to_u64(&self, v: &IValue) -> Option<u64> {
-        num_to_u64(Self::num_val(v))
+        num_to_u64(self.num_val(v))
     }
     unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
-        num_to_f64(Self::num_val(v))
+        num_to_f64(self.num_val(v))
     }
     unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
-        Some(num_to_f64_lossy(Self::num_val(v)))
+        Some(num_to_f64_lossy(self.num_val(v)))
     }
     unsafe fn clone(&self, v: &IValue) -> IValue {
         Self::store(read::<u64>(v.ptr()))
