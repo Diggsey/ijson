@@ -40,7 +40,8 @@ use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
 use std::hash::Hasher;
 
-use super::{InlineNumber, InlineValue};
+use super::number::{from_str_with, InlineNumber, InlineNumberError};
+use super::InlineValue;
 use crate::number::INumber;
 use crate::value::{
     num_debug, num_hash, num_to_i64, num_to_u64, number_cmp, Destructured, DestructuredMut,
@@ -207,6 +208,16 @@ impl InlineNumber for InlineNumberRepr {
             Some(i) => NumVal::Int(i),
             None => NumVal::Float(scale_pow2(m as f64, exp)),
         }
+    }
+
+    /// A float is stored as its nearest finite `f64` when that fits inline.
+    fn from_str(s: &str) -> Result<usize, InlineNumberError> {
+        from_str_with(s, Self::encode_int, |s| {
+            s.parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .and_then(Self::encode_f64)
+        })
     }
 }
 

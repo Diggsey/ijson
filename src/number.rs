@@ -206,89 +206,6 @@ impl fmt::Display for ParseNumberError {
 
 impl std::error::Error for ParseNumberError {}
 
-/// Whether a valid JSON number is written as a plain integer or with a fraction
-/// or exponent (i.e. as a float).
-enum NumberShape {
-    Integer,
-    Float,
-}
-
-/// Validates `s` against the JSON number grammar (see <https://www.json.org/>),
-/// reporting whether it is integer- or float-shaped, or `None` if it is not a
-/// valid JSON number.
-///
-/// ```text
-/// number   = integer fraction exponent
-/// integer  = digit | onenine digits | '-' digit | '-' onenine digits
-/// fraction = "" | '.' digits
-/// exponent = "" | ('E' | 'e') sign digits
-/// sign     = "" | '+' | '-'
-/// digits   = digit | digit digits
-/// ```
-fn classify_json_number(s: &str) -> Option<NumberShape> {
-    let b = s.as_bytes();
-    let n = b.len();
-    let mut i = 0;
-
-    // Optional minus sign (a leading '+' is not permitted).
-    if i < n && b[i] == b'-' {
-        i += 1;
-    }
-
-    // Integer part: a single '0', or a '1'..='9' followed by more digits. This
-    // rejects leading zeros such as "01".
-    match b.get(i) {
-        Some(b'0') => i += 1,
-        Some(&c) if c.is_ascii_digit() => {
-            i += 1;
-            while i < n && b[i].is_ascii_digit() {
-                i += 1;
-            }
-        }
-        _ => return None,
-    }
-
-    let mut is_float = false;
-
-    // Fraction: a '.' must be followed by at least one digit.
-    if i < n && b[i] == b'.' {
-        is_float = true;
-        i += 1;
-        if !matches!(b.get(i), Some(c) if c.is_ascii_digit()) {
-            return None;
-        }
-        while i < n && b[i].is_ascii_digit() {
-            i += 1;
-        }
-    }
-
-    // Exponent: 'e'/'E', an optional sign, then at least one digit.
-    if i < n && (b[i] == b'e' || b[i] == b'E') {
-        is_float = true;
-        i += 1;
-        if i < n && (b[i] == b'+' || b[i] == b'-') {
-            i += 1;
-        }
-        if !matches!(b.get(i), Some(c) if c.is_ascii_digit()) {
-            return None;
-        }
-        while i < n && b[i].is_ascii_digit() {
-            i += 1;
-        }
-    }
-
-    // Reject any trailing characters (and surrounding whitespace).
-    if i != n {
-        return None;
-    }
-
-    Some(if is_float {
-        NumberShape::Float
-    } else {
-        NumberShape::Integer
-    })
-}
-
 /// Parses a JSON number from its textual form, exactly as the JSON grammar
 /// defines it (see <https://www.json.org/>).
 ///
@@ -323,18 +240,25 @@ impl FromStr for INumber {
     type Err = ParseNumberError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let float_from = |s: &str| -> Result<IValue, ParseNumberError> {
-            // A valid JSON float is always accepted by `f64::from_str`; only its
-            // magnitude can be out of range (parsing to an infinity), which we
-            // reject so the `INumber` stays finite.
-            match s.parse::<f64>() {
-                Ok(v) if v.is_finite() => Ok(IValue::new_f64(v)),
-                _ => Err(ParseNumberError(())),
-            }
+        use crate::value::inline::{
+            InlineNumber, InlineNumberError, InlineNumberRepr, NumberShape,
         };
 
-        let value = match classify_json_number(s).ok_or(ParseNumberError(()))? {
-            NumberShape::Integer => {
+        // A valid JSON float is always accepted by `f64::from_str`; only its
+        // magnitude can be out of range (parsing to an infinity), which we reject
+        // so the `INumber` stays finite.
+        let float_from = |s: &str| match s.parse::<f64>() {
+            Ok(v) if v.is_finite() => Ok(IValue::new_f64(v)),
+            _ => Err(ParseNumberError(())),
+        };
+
+        // Ask the active inline representation to store it directly; only if that
+        // spills (a valid number too large for the inline form) do we fall back to
+        // a heap representation appropriate to its shape.
+        let value = match InlineNumberRepr::from_str(s) {
+            Ok(bits) => IValue::new_inline_number(bits),
+            Err(InlineNumberError::Invalid) => return Err(ParseNumberError(())),
+            Err(InlineNumberError::Spill(NumberShape::Integer)) => {
                 if let Ok(v) = s.parse::<i64>() {
                     IValue::new_i64(v)
                 } else if let Ok(v) = s.parse::<u64>() {
@@ -344,74 +268,10 @@ impl FromStr for INumber {
                     float_from(s)?
                 }
             }
-            // With `arbitrary_precision`, store the exact decimal inline when it
-            // fits (falling back to f64 for too many digits or an out-of-range
-            // exponent). Otherwise a float is simply the nearest f64.
-            #[cfg(feature = "arbitrary_precision")]
-            NumberShape::Float => {
-                match parse_decimal(s).and_then(|(m, e)| IValue::new_decimal(m, e)) {
-                    Some(v) => v,
-                    None => float_from(s)?,
-                }
-            }
-            #[cfg(not(feature = "arbitrary_precision"))]
-            NumberShape::Float => float_from(s)?,
+            Err(InlineNumberError::Spill(NumberShape::Float)) => float_from(s)?,
         };
         Ok(INumber(value))
     }
-}
-
-/// Extracts the exact decimal value `mantissa * 10^exp` from a validated JSON
-/// *float*-shaped string. Returns `None` if the significant digits or exponent
-/// overflow (too many to hold exactly), so the caller falls back to `f64`. Only
-/// needed for the base-10 (`arbitrary_precision`) inline encoding.
-#[cfg(feature = "arbitrary_precision")]
-fn parse_decimal(s: &str) -> Option<(i128, i32)> {
-    let b = s.as_bytes();
-    let mut i = 0;
-    let neg = b[0] == b'-';
-    if neg {
-        i += 1;
-    }
-    let mut mantissa: i128 = 0;
-    let mut frac_digits: i32 = 0;
-    let mut seen_point = false;
-    let mut explicit_exp: i32 = 0;
-    while i < b.len() {
-        match b[i] {
-            c @ b'0'..=b'9' => {
-                mantissa = mantissa
-                    .checked_mul(10)?
-                    .checked_add(i128::from(c - b'0'))?;
-                if seen_point {
-                    frac_digits += 1;
-                }
-                i += 1;
-            }
-            b'.' => {
-                seen_point = true;
-                i += 1;
-            }
-            b'e' | b'E' => {
-                i += 1;
-                let exp_neg = b[i] == b'-';
-                if b[i] == b'+' || b[i] == b'-' {
-                    i += 1;
-                }
-                let mut e: i32 = 0;
-                while i < b.len() {
-                    e = e.checked_mul(10)?.checked_add(i32::from(b[i] - b'0'))?;
-                    i += 1;
-                }
-                explicit_exp = if exp_neg { -e } else { e };
-                break;
-            }
-            // A validated float contains no other bytes.
-            _ => return None,
-        }
-    }
-    let exp = explicit_exp.checked_sub(frac_digits)?;
-    Some((if neg { -mantissa } else { mantissa }, exp))
 }
 
 /// Converts a [`serde_json::Number`] into an [`INumber`].

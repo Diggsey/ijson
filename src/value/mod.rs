@@ -1260,16 +1260,12 @@ impl IValue {
         }
     }
 
-    /// Constructs the exact decimal `mantissa * 10^exp` (as written, with a
-    /// decimal point) if it fits the inline representation; `None` otherwise, so
-    /// the caller can fall back to an `f64`. This is how a decimal that is *not*
-    /// an exact `f64` (e.g. `0.1`) is stored without losing precision. Only with
-    /// `arbitrary_precision` (the base-10 inline encoding).
-    #[cfg(feature = "arbitrary_precision")]
-    pub(crate) fn new_decimal(mantissa: i128, exp: i32) -> Option<Self> {
-        // Safety: `encode_decimal` returns valid inline bits.
-        inline::InlineNumberRepr::encode_decimal(mantissa, exp)
-            .map(|bits| unsafe { Self::new_inline(TypeTag::Inline, bits) })
+    /// Wraps already-encoded inline-number bits as an `IValue`. The bits come from
+    /// the active representation's encoder (`InlineNumber::from_str`/`encode_*`),
+    /// e.g. when `INumber::from_str` stores a parsed number inline.
+    pub(crate) fn new_inline_number(bits: usize) -> Self {
+        // Safety: `bits` is a valid inline number encoding from the representation.
+        unsafe { Self::new_inline(TypeTag::Inline, bits) }
     }
 
     /// Whether this number was written with a decimal point (`1.0` vs `1`).

@@ -44,7 +44,8 @@ use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
 use std::hash::Hasher;
 
-use super::{InlineNumber, InlineValue};
+use super::number::{from_str_with, InlineNumber, InlineNumberError};
+use super::InlineValue;
 use crate::number::INumber;
 use crate::value::{
     decimal_to_f64_lossy, num_debug, num_hash, num_to_i64, num_to_u64, number_cmp, Destructured,
@@ -260,6 +261,84 @@ fn has_decimal_point(bits: usize) -> bool {
     code_has_dot(code(bits))
 }
 
+/// Encodes an exact decimal `mantissa * 10^exp` (written with a decimal point)
+/// inline, or `None` if it does not fit. Unlike [`InlineNumberRepr::encode_f64`],
+/// the value need not be an exact `f64` — this is how `"0.1"` is stored as the
+/// exact `1 * 10^-1`. The result is canonical: bit-for-bit identical to
+/// `encode_f64` for a value that is an exact `f64`, so the two never disagree.
+fn encode_decimal(mantissa: i128, exp: i32) -> Option<usize> {
+    if mantissa == 0 {
+        // 0.0 / -0.0 with a decimal point.
+        return Some(encode(0, exp_code(0, true)));
+    }
+    // Strip trailing zeros to reach the canonical (minimal-mantissa) form.
+    let mut m = mantissa;
+    let mut e = exp;
+    while m % 10 == 0 {
+        m /= 10;
+        e += 1;
+    }
+    if e >= 0 {
+        // An integer written as a float: the integer-float encoder keeps the
+        // largest mantissa that fits (minimal exponent), matching `encode_f64`.
+        encode_int_float(m.checked_mul(10i128.checked_pow(e as u32)?)?)
+    } else {
+        // A fraction; `m * 10^e` with `m` free of trailing zeros is canonical.
+        (fits_mantissa(m) && e >= -EXP_BIAS).then(|| encode(m as i64, exp_code(e, true)))
+    }
+}
+
+/// Extracts the exact decimal value `mantissa * 10^exp` from a validated JSON
+/// *float*-shaped string. Returns `None` if the significant digits or exponent
+/// overflow (too many to hold exactly), so the caller falls back to `f64`.
+fn parse_decimal(s: &str) -> Option<(i128, i32)> {
+    let b = s.as_bytes();
+    let mut i = 0;
+    let neg = b[0] == b'-';
+    if neg {
+        i += 1;
+    }
+    let mut mantissa: i128 = 0;
+    let mut frac_digits: i32 = 0;
+    let mut seen_point = false;
+    let mut explicit_exp: i32 = 0;
+    while i < b.len() {
+        match b[i] {
+            c @ b'0'..=b'9' => {
+                mantissa = mantissa
+                    .checked_mul(10)?
+                    .checked_add(i128::from(c - b'0'))?;
+                if seen_point {
+                    frac_digits += 1;
+                }
+                i += 1;
+            }
+            b'.' => {
+                seen_point = true;
+                i += 1;
+            }
+            b'e' | b'E' => {
+                i += 1;
+                let exp_neg = b[i] == b'-';
+                if b[i] == b'+' || b[i] == b'-' {
+                    i += 1;
+                }
+                let mut e: i32 = 0;
+                while i < b.len() {
+                    e = e.checked_mul(10)?.checked_add(i32::from(b[i] - b'0'))?;
+                    i += 1;
+                }
+                explicit_exp = if exp_neg { -e } else { e };
+                break;
+            }
+            // A validated float contains no other bytes.
+            _ => return None,
+        }
+    }
+    let exp = explicit_exp.checked_sub(frac_digits)?;
+    Some((if neg { -mantissa } else { mantissa }, exp))
+}
+
 /// The base-10 inline representation of a JSON number.
 pub(crate) struct InlineNumberRepr;
 
@@ -298,35 +377,6 @@ impl InlineNumber for InlineNumberRepr {
         None
     }
 
-    /// Encodes an exact decimal `mantissa * 10^exp` (written with a decimal point)
-    /// inline, or `None` if it does not fit. Unlike [`encode_f64`], the value need
-    /// not be an exact `f64` — this is how e.g. `0.1` (parsed from a string) is
-    /// stored as the exact `1 * 10^-1`.
-    ///
-    /// The result is canonical: bit-for-bit identical to [`encode_f64`] for a value
-    /// that is an exact `f64`, so the two constructors never disagree.
-    fn encode_decimal(mantissa: i128, exp: i32) -> Option<usize> {
-        if mantissa == 0 {
-            // 0.0 / -0.0 with a decimal point.
-            return Some(encode(0, exp_code(0, true)));
-        }
-        // Strip trailing zeros to reach the canonical (minimal-mantissa) form.
-        let mut m = mantissa;
-        let mut e = exp;
-        while m % 10 == 0 {
-            m /= 10;
-            e += 1;
-        }
-        if e >= 0 {
-            // An integer written as a float: the integer-float encoder keeps the
-            // largest mantissa that fits (minimal exponent), matching `encode_f64`.
-            encode_int_float(m.checked_mul(10i128.checked_pow(e as u32)?)?)
-        } else {
-            // A fraction; `m * 10^e` with `m` free of trailing zeros is canonical.
-            (fits_mantissa(m) && e >= -EXP_BIAS).then(|| encode(m as i64, exp_code(e, true)))
-        }
-    }
-
     /// This inline decimal reduced to a [`NumVal`]. An integer that fits `i64`
     /// becomes `Int`; a value that is exactly an `f64` becomes `Float`; anything
     /// else — an exact `mantissa * 10^exp` that is neither (e.g. `0.1`) — becomes
@@ -341,6 +391,15 @@ impl InlineNumber for InlineNumberRepr {
         } else {
             NumVal::Decimal { mantissa: m, exp }
         }
+    }
+
+    /// A float is stored as the *exact* decimal it denotes when that fits inline —
+    /// so `"0.1"` becomes the exact `1 * 10^-1`, not the `f64` approximation. A
+    /// value too precise or out of the inline exponent range spills to the heap.
+    fn from_str(s: &str) -> Result<usize, InlineNumberError> {
+        from_str_with(s, Self::encode_int, |s| {
+            parse_decimal(s).and_then(|(m, e)| encode_decimal(m, e))
+        })
     }
 }
 
