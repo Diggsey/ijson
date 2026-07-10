@@ -9,8 +9,8 @@ use std::hash::Hasher;
 use super::{alloc, free, read};
 use crate::number::INumber;
 use crate::value::{
-    number_cmp, Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, TypeTag, ValueRepr,
-    ValueType,
+    number_cmp, Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, NumberRepr,
+    TypeTag, ValueRepr, ValueType,
 };
 
 /// The heap `u64` number representation.
@@ -28,13 +28,6 @@ impl U64Repr {
 impl ValueRepr for U64Repr {
     fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::Number
-    }
-    fn has_decimal_point(&self, _v: &IValue) -> bool {
-        false
-    }
-    /// Decodes the payload as a `u64`. Safety: `v` must be a live `NumberU64`.
-    unsafe fn num_val(&self, v: &IValue) -> NumVal {
-        NumVal::UInt(read::<u64>(v.ptr()))
     }
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
         self.num_val(v).hash(state);
@@ -57,22 +50,18 @@ impl ValueRepr for U64Repr {
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
         DestructuredMut::Number(v.as_number_unchecked_mut())
     }
-    unsafe fn to_i64(&self, v: &IValue) -> Option<i64> {
-        self.num_val(v).to_i64()
-    }
-    unsafe fn to_u64(&self, v: &IValue) -> Option<u64> {
-        self.num_val(v).to_u64()
-    }
-    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
-        self.num_val(v).to_f64()
-    }
-    unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
-        Some(self.num_val(v).to_f64_lossy())
-    }
     unsafe fn clone(&self, v: &IValue) -> IValue {
         Self::store(read::<u64>(v.ptr()))
     }
     unsafe fn drop(&self, v: &mut IValue) {
         free::<u64>(v.ptr());
     }
+}
+
+impl NumberRepr for U64Repr {
+    /// Decodes the payload as a `u64`. Safety: `v` must be a live `NumberU64`.
+    unsafe fn num_val(&self, v: &IValue) -> NumVal {
+        NumVal::UInt(read::<u64>(v.ptr()))
+    }
+    // `has_decimal_point` and the numeric conversions use the `NumberRepr` defaults.
 }

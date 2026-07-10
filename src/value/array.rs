@@ -24,7 +24,8 @@ use crate::array::IArray;
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
 use super::{
-    Destructured, DestructuredMut, DestructuredRef, IValue, TypeTag, ValueRepr, ValueType,
+    ArrayRepr, Destructured, DestructuredMut, DestructuredRef, IValue, TypeTag, ValueRepr,
+    ValueType,
 };
 
 #[repr(C)]
@@ -301,8 +302,8 @@ pub(crate) unsafe fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
 }
 
 /// The array representation.
-pub(crate) struct ArrayRepr;
-impl ValueRepr for ArrayRepr {
+pub(crate) struct ArrayStore;
+impl ValueRepr for ArrayStore {
     fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::Array
     }
@@ -333,7 +334,11 @@ impl ValueRepr for ArrayRepr {
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
         DestructuredMut::Array(v.as_array_unchecked_mut())
     }
-    unsafe fn len(&self, v: &IValue) -> Option<usize> {
-        Some(v.as_array_unchecked().len())
+}
+
+impl ArrayRepr for ArrayStore {
+    /// The number of elements. Safety: `v` must be an array.
+    unsafe fn len(&self, v: &IValue) -> usize {
+        v.as_array_unchecked().len()
     }
 }

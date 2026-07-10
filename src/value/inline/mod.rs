@@ -24,9 +24,9 @@ pub(crate) use number::{InlineNumber, InlineNumberError, NumberShape};
 // binary float — are fully independent modules (sharing no code, so their bit
 // layouts can diverge). Both are always compiled, so a single `cargo test`
 // unit-tests both regardless of features; this alias selects the active
-// representation *type*, whose associated functions (`encode_int`/`encode_f64`/
-// `num_val`, and `encode_decimal` for base 10) are how `IValue` builds and decodes
-// inline numbers.
+// representation *type*, whose `InlineNumber` associated functions
+// (`encode_int`/`encode_f64`/`from_str`) are how `IValue` builds inline numbers, and
+// whose `NumberRepr` impl decodes them.
 #[cfg(not(feature = "arbitrary_precision"))]
 pub(crate) use number_binary::InlineNumberRepr;
 #[cfg(feature = "arbitrary_precision")]
@@ -36,9 +36,7 @@ use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
 use std::hash::Hasher;
 
-use crate::value::{
-    Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, ValueRepr, ValueType,
-};
+use crate::value::{Destructured, DestructuredMut, DestructuredRef, IValue, ValueRepr, ValueType};
 
 // Bit 3 of an inline value: set for the string/constant sub-family, clear for
 // inline numbers.
@@ -77,13 +75,17 @@ fn is_string(bits: usize) -> bool {
     bits & STR_FAMILY != 0 && bits & CONST_FLAG == 0
 }
 
-/// The per-type behaviour of an inline value. A single [`InlineRepr`] implements
-/// [`ValueRepr`] for the whole inline family and decodes the family bits to pick
-/// the right one of these; each sub-representation only overrides what it needs.
+/// The *universal* behaviour of an inline value — the [`ValueRepr`] operations that
+/// every inline type answers, minus the ones [`InlineRepr`] supplies uniformly
+/// (`clone`/`drop`: every inline value is a bit-copy with nothing to free). A single
+/// [`InlineRepr`] implements [`ValueRepr`] for the whole inline family and decodes
+/// the family bits to pick the right one of these; each sub-representation only
+/// overrides what it needs.
 ///
-/// This mirrors the value operations of [`ValueRepr`] but omits `clone`/`drop`
-/// (every inline value is a bit-copy with nothing to free) and `len` (an inline
-/// value is never a collection); [`InlineRepr`] supplies those uniformly.
+/// The *type-specific* accessors are not here: the inline number and string
+/// sub-representations implement the per-type traits (`NumberRepr` / `StringRepr`)
+/// directly, reached through `IValue::number_repr` / `string_repr`, and inline
+/// `bool`/`null` carry no accessor at all.
 pub(crate) trait InlineValue {
     /// The JSON type this inline sub-representation stores.
     fn value_type(&self) -> ValueType;
@@ -104,27 +106,6 @@ pub(crate) trait InlineValue {
     fn destructure(&self, v: IValue) -> Destructured;
     unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a>;
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a>;
-    fn to_bool(&self, _v: &IValue) -> Option<bool> {
-        None
-    }
-    unsafe fn to_i64(&self, _v: &IValue) -> Option<i64> {
-        None
-    }
-    unsafe fn to_u64(&self, _v: &IValue) -> Option<u64> {
-        None
-    }
-    unsafe fn to_f64(&self, _v: &IValue) -> Option<f64> {
-        None
-    }
-    unsafe fn to_f64_lossy(&self, _v: &IValue) -> Option<f64> {
-        None
-    }
-    unsafe fn as_bytes<'a>(&self, _v: &'a IValue) -> Option<&'a [u8]> {
-        None
-    }
-    fn has_decimal_point(&self, _v: &IValue) -> bool {
-        false
-    }
 }
 
 /// The single representation for the whole inline family. Every operation decodes
@@ -147,8 +128,8 @@ impl InlineRepr {
 }
 
 impl ValueRepr for InlineRepr {
-    // clone/drop/len use the `ValueRepr` defaults: every inline value is a
-    // bit-copy to clone, has nothing to free, and is never a collection.
+    // clone/drop use the `ValueRepr` defaults: every inline value is a bit-copy to
+    // clone and has nothing to free.
     fn value_type(&self, v: &IValue) -> ValueType {
         Self::inner(v).value_type()
     }
@@ -160,10 +141,6 @@ impl ValueRepr for InlineRepr {
     }
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
         Self::inner(a).partial_cmp(a, b)
-    }
-    unsafe fn num_val(&self, v: &IValue) -> NumVal {
-        // Only reached for inline numbers, which use the number representation.
-        InlineNumberRepr::num_val(v.ptr_usize())
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
         Self::inner(v).debug(v, f)
@@ -177,26 +154,5 @@ impl ValueRepr for InlineRepr {
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
         let inner = Self::inner(v);
         inner.destructure_mut(v)
-    }
-    fn to_bool(&self, v: &IValue) -> Option<bool> {
-        Self::inner(v).to_bool(v)
-    }
-    unsafe fn to_i64(&self, v: &IValue) -> Option<i64> {
-        Self::inner(v).to_i64(v)
-    }
-    unsafe fn to_u64(&self, v: &IValue) -> Option<u64> {
-        Self::inner(v).to_u64(v)
-    }
-    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
-        Self::inner(v).to_f64(v)
-    }
-    unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
-        Self::inner(v).to_f64_lossy(v)
-    }
-    unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> Option<&'a [u8]> {
-        Self::inner(v).as_bytes(v)
-    }
-    fn has_decimal_point(&self, v: &IValue) -> bool {
-        Self::inner(v).has_decimal_point(v)
     }
 }

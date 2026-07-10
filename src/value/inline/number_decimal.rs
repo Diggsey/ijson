@@ -49,7 +49,7 @@ use super::InlineValue;
 use crate::number::INumber;
 use crate::value::{
     decimal_to_f64_lossy, number_cmp, Destructured, DestructuredMut, DestructuredRef, IValue,
-    NumVal, ValueType,
+    NumVal, NumberRepr, ValueType,
 };
 
 // --- Bit layout -------------------------------------------------------------
@@ -377,22 +377,6 @@ impl InlineNumber for InlineNumberRepr {
         None
     }
 
-    /// This inline decimal reduced to a [`NumVal`]. An integer that fits `i64`
-    /// becomes `Int`; a value that is exactly an `f64` becomes `Float`; anything
-    /// else — an exact `mantissa * 10^exp` that is neither (e.g. `0.1`) — becomes
-    /// the exact `Decimal`. `num_val` covers the whole representable domain, not
-    /// just what today's constructors produce.
-    fn num_val(bits: usize) -> NumVal {
-        let (m, exp) = decode(bits);
-        if let Some(i) = decimal_to_i64(m, exp) {
-            NumVal::Int(i)
-        } else if let Some(f) = decimal_to_f64_exact(m, exp) {
-            NumVal::Float(f)
-        } else {
-            NumVal::Decimal { mantissa: m, exp }
-        }
-    }
-
     /// A float is stored as the *exact* decimal it denotes when that fits inline —
     /// so `"0.1"` becomes the exact `1 * 10^-1`, not the `f64` approximation. A
     /// value too precise or out of the inline exponent range spills to the heap.
@@ -403,24 +387,54 @@ impl InlineNumber for InlineNumberRepr {
     }
 }
 
-impl InlineValue for InlineNumberRepr {
-    fn value_type(&self) -> ValueType {
-        ValueType::Number
+/// Decodes inline bits to a [`NumVal`]. An integer that fits `i64` becomes `Int`; a
+/// value that is exactly an `f64` becomes `Float`; anything else — an exact
+/// `mantissa * 10^exp` that is neither (e.g. `0.1`) — becomes the exact `Decimal`.
+/// This covers the whole representable domain, not just what today's constructors
+/// produce.
+fn num_val(bits: usize) -> NumVal {
+    let (m, exp) = decode(bits);
+    if let Some(i) = decimal_to_i64(m, exp) {
+        NumVal::Int(i)
+    } else if let Some(f) = decimal_to_f64_exact(m, exp) {
+        NumVal::Float(f)
+    } else {
+        NumVal::Decimal { mantissa: m, exp }
+    }
+}
+
+impl NumberRepr for InlineNumberRepr {
+    unsafe fn num_val(&self, v: &IValue) -> NumVal {
+        num_val(v.ptr_usize())
     }
     fn has_decimal_point(&self, v: &IValue) -> bool {
         has_decimal_point(v.ptr_usize())
     }
+    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
+        // The inline decimal decodes exactly itself.
+        to_f64_exact(v.ptr_usize())
+    }
+    unsafe fn to_f64_lossy(&self, v: &IValue) -> f64 {
+        to_f64_lossy(v.ptr_usize())
+    }
+    // to_i64/to_u64 use the `NumberRepr` defaults (derived from `num_val`).
+}
+
+impl InlineValue for InlineNumberRepr {
+    fn value_type(&self) -> ValueType {
+        ValueType::Number
+    }
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        Self::num_val(v.ptr_usize()).hash(state);
+        num_val(v.ptr_usize()).hash(state);
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
-        number_cmp(Self::num_val(a.ptr_usize()), b) == Some(Ordering::Equal)
+        number_cmp(num_val(a.ptr_usize()), b) == Some(Ordering::Equal)
     }
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
-        number_cmp(Self::num_val(a.ptr_usize()), b)
+        number_cmp(num_val(a.ptr_usize()), b)
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", Self::num_val(v.ptr_usize()))
+        write!(f, "{:?}", num_val(v.ptr_usize()))
     }
     fn destructure(&self, v: IValue) -> Destructured {
         Destructured::Number(INumber(v))
@@ -430,19 +444,6 @@ impl InlineValue for InlineNumberRepr {
     }
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
         DestructuredMut::Number(v.as_number_unchecked_mut())
-    }
-    unsafe fn to_i64(&self, v: &IValue) -> Option<i64> {
-        Self::num_val(v.ptr_usize()).to_i64()
-    }
-    unsafe fn to_u64(&self, v: &IValue) -> Option<u64> {
-        Self::num_val(v.ptr_usize()).to_u64()
-    }
-    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
-        // The inline decimal decodes exactly itself.
-        to_f64_exact(v.ptr_usize())
-    }
-    unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
-        Some(to_f64_lossy(v.ptr_usize()))
     }
     // clone/drop use the inline defaults (bit-copy / nothing).
 }
@@ -511,7 +512,7 @@ mod tests {
             to_f64_exact(bits).is_none(),
             "0.1 is not exactly representable as f64"
         );
-        match InlineNumberRepr::num_val(bits) {
+        match num_val(bits) {
             NumVal::Decimal { mantissa, exp } => assert_eq!((mantissa, exp), (1, -1)),
             _ => panic!("expected an exact Decimal"),
         }

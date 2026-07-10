@@ -26,7 +26,8 @@ use crate::string::IString;
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
 use super::{
-    Destructured, DestructuredMut, DestructuredRef, IValue, TypeTag, ValueRepr, ValueType,
+    Destructured, DestructuredMut, DestructuredRef, IValue, ObjectRepr, TypeTag, ValueRepr,
+    ValueType,
 };
 use crate::object::IObject;
 
@@ -413,8 +414,8 @@ pub(crate) unsafe fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
 }
 
 /// The object representation.
-pub(crate) struct ObjectRepr;
-impl ValueRepr for ObjectRepr {
+pub(crate) struct ObjectStore;
+impl ValueRepr for ObjectStore {
     fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::Object
     }
@@ -443,7 +444,11 @@ impl ValueRepr for ObjectRepr {
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
         DestructuredMut::Object(v.as_object_unchecked_mut())
     }
-    unsafe fn len(&self, v: &IValue) -> Option<usize> {
-        Some(v.as_object_unchecked().len())
+}
+
+impl ObjectRepr for ObjectStore {
+    /// The number of entries. Safety: `v` must be an object.
+    unsafe fn len(&self, v: &IValue) -> usize {
+        v.as_object_unchecked().len()
     }
 }

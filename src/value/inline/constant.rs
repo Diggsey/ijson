@@ -55,7 +55,6 @@ impl InlineValue for BoolRepr {
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
         DestructuredMut::Bool(BoolMut(v))
     }
-    fn to_bool(&self, v: &IValue) -> Option<bool> {
-        Some(v.is_true())
-    }
+    // `to_bool` is not a `ValueRepr`/`InlineValue` operation: `IValue::to_bool`
+    // decodes the two constant bit patterns directly.
 }

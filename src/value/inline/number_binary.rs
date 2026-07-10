@@ -44,7 +44,8 @@ use super::number::{from_str_with, InlineNumber, InlineNumberError};
 use super::InlineValue;
 use crate::number::INumber;
 use crate::value::{
-    number_cmp, Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, ValueType,
+    number_cmp, Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, NumberRepr,
+    ValueType,
 };
 
 // --- Bit layout -------------------------------------------------------------
@@ -199,16 +200,6 @@ impl InlineNumber for InlineNumberRepr {
             .then(|| encode(m as i64, exp_code(exp, true)))
     }
 
-    /// A binary inline float is always an exact `f64`, so it is either an `Int` or
-    /// a `Float`, never a `Decimal`.
-    fn num_val(bits: usize) -> NumVal {
-        let (m, exp) = decode(bits);
-        match to_i64(m, exp) {
-            Some(i) => NumVal::Int(i),
-            None => NumVal::Float(scale_pow2(m as f64, exp)),
-        }
-    }
-
     /// A float is stored as its nearest finite `f64` when that fits inline.
     fn from_str(s: &str) -> Result<usize, InlineNumberError> {
         from_str_with(s, Self::encode_int, |s| {
@@ -220,24 +211,48 @@ impl InlineNumber for InlineNumberRepr {
     }
 }
 
-impl InlineValue for InlineNumberRepr {
-    fn value_type(&self) -> ValueType {
-        ValueType::Number
+/// Decodes inline bits to a [`NumVal`]. A binary inline float is always an exact
+/// `f64`, so it is either an `Int` or a `Float`, never a `Decimal`.
+fn num_val(bits: usize) -> NumVal {
+    let (m, exp) = decode(bits);
+    match to_i64(m, exp) {
+        Some(i) => NumVal::Int(i),
+        None => NumVal::Float(scale_pow2(m as f64, exp)),
+    }
+}
+
+impl NumberRepr for InlineNumberRepr {
+    unsafe fn num_val(&self, v: &IValue) -> NumVal {
+        num_val(v.ptr_usize())
     }
     fn has_decimal_point(&self, v: &IValue) -> bool {
         has_decimal_point(v.ptr_usize())
     }
+    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
+        // A binary inline float decodes exactly.
+        to_f64_exact(v.ptr_usize())
+    }
+    unsafe fn to_f64_lossy(&self, v: &IValue) -> f64 {
+        to_f64_lossy(v.ptr_usize())
+    }
+    // to_i64/to_u64 use the `NumberRepr` defaults (derived from `num_val`).
+}
+
+impl InlineValue for InlineNumberRepr {
+    fn value_type(&self) -> ValueType {
+        ValueType::Number
+    }
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        Self::num_val(v.ptr_usize()).hash(state);
+        num_val(v.ptr_usize()).hash(state);
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
-        number_cmp(Self::num_val(a.ptr_usize()), b) == Some(Ordering::Equal)
+        number_cmp(num_val(a.ptr_usize()), b) == Some(Ordering::Equal)
     }
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
-        number_cmp(Self::num_val(a.ptr_usize()), b)
+        number_cmp(num_val(a.ptr_usize()), b)
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", Self::num_val(v.ptr_usize()))
+        write!(f, "{:?}", num_val(v.ptr_usize()))
     }
     fn destructure(&self, v: IValue) -> Destructured {
         Destructured::Number(INumber(v))
@@ -247,19 +262,6 @@ impl InlineValue for InlineNumberRepr {
     }
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
         DestructuredMut::Number(v.as_number_unchecked_mut())
-    }
-    unsafe fn to_i64(&self, v: &IValue) -> Option<i64> {
-        Self::num_val(v.ptr_usize()).to_i64()
-    }
-    unsafe fn to_u64(&self, v: &IValue) -> Option<u64> {
-        Self::num_val(v.ptr_usize()).to_u64()
-    }
-    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
-        // A binary inline float decodes exactly.
-        to_f64_exact(v.ptr_usize())
-    }
-    unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
-        Some(to_f64_lossy(v.ptr_usize()))
     }
     // clone/drop use the inline defaults (bit-copy / nothing).
 }
@@ -323,7 +325,7 @@ mod tests {
         // `Decimal`. `1 * 2^-1 == 0.5`.
         let bits = encode(1, exp_code(-1, true));
         assert_eq!(to_f64_exact(bits), Some(0.5));
-        match InlineNumberRepr::num_val(bits) {
+        match num_val(bits) {
             NumVal::Float(f) => assert_eq!(f, 0.5),
             _ => panic!("expected Float(0.5)"),
         }

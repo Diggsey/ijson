@@ -395,8 +395,12 @@ impl IValue {
     /// Returns `None` for other types.
     #[must_use]
     pub fn len(&self) -> Option<usize> {
-        // Safety: `repr()` selects this value's own representation.
-        unsafe { self.repr().len(self) }
+        // Safety: each arm's `*_repr()` matches the type just checked.
+        match self.type_() {
+            ValueType::Array => Some(unsafe { self.array_repr().len(self) }),
+            ValueType::Object => Some(unsafe { self.object_repr().len(self) }),
+            _ => None,
+        }
     }
 
     /// Returns whether this value is empty if it is an array or object.
@@ -437,7 +441,7 @@ impl IValue {
     /// Returns `None` if it's not a boolean.
     #[must_use]
     pub fn to_bool(&self) -> Option<bool> {
-        self.repr().to_bool(self)
+        self.is_bool().then(|| self.is_true())
     }
 
     // # Number methods
@@ -504,20 +508,26 @@ impl IValue {
     /// Converts this value to an i64 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
-        // Safety: `repr()` selects this value's own representation.
-        unsafe { self.repr().to_i64(self) }
+        // Safety: guarded on `is_number`, so `number_repr()` matches this number.
+        self.is_number()
+            .then(|| unsafe { self.number_repr().to_i64(self) })
+            .flatten()
     }
     /// Converts this value to a u64 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_u64(&self) -> Option<u64> {
-        // Safety: `repr()` selects this value's own representation.
-        unsafe { self.repr().to_u64(self) }
+        // Safety: guarded on `is_number`, so `number_repr()` matches this number.
+        self.is_number()
+            .then(|| unsafe { self.number_repr().to_u64(self) })
+            .flatten()
     }
     /// Converts this value to an f64 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_f64(&self) -> Option<f64> {
-        // Safety: `repr()` selects this value's own representation.
-        unsafe { self.repr().to_f64(self) }
+        // Safety: guarded on `is_number`, so `number_repr()` matches this number.
+        self.is_number()
+            .then(|| unsafe { self.number_repr().to_f64(self) })
+            .flatten()
     }
     /// Converts this value to an f32 if it is a number that can be represented exactly.
     #[must_use]
@@ -552,8 +562,9 @@ impl IValue {
     /// in the process.
     #[must_use]
     pub fn to_f64_lossy(&self) -> Option<f64> {
-        // Safety: `repr()` selects this value's own representation.
-        unsafe { self.repr().to_f64_lossy(self) }
+        // Safety: guarded on `is_number`, so `number_repr()` matches this number.
+        self.is_number()
+            .then(|| unsafe { self.number_repr().to_f64_lossy(self) })
     }
     /// Converts this value to an f32 if it is a number, potentially losing precision
     /// in the process.
@@ -783,7 +794,8 @@ impl IValue {
     /// Whether this number was written with a decimal point (`1.0` vs `1`).
     /// Delegates down to the representation; `false` for non-numbers.
     pub(crate) fn has_decimal_point(&self) -> bool {
-        self.repr().has_decimal_point(self)
+        // `number_repr()` is only meaningful on a number, so guard on the type.
+        self.is_number() && self.number_repr().has_decimal_point(self)
     }
 
     /// This value reduced to a [`NumVal`] if it is a number, otherwise `None`. Used
@@ -791,9 +803,9 @@ impl IValue {
     /// through its own representation — the caller need not know its type; a
     /// non-number simply yields `None`.
     pub(crate) fn num_val(&self) -> Option<NumVal> {
-        // Safety: `num_val` is only reached for a number, whose representation
-        // defines it, and `self.repr()` owns `self`.
-        (self.type_() == ValueType::Number).then(|| unsafe { self.repr().num_val(self) })
+        // Safety: guarded on the number type, so `number_repr()` matches this number.
+        self.is_number()
+            .then(|| unsafe { self.number_repr().num_val(self) })
     }
 }
 
@@ -812,19 +824,18 @@ impl IValue {
     }
 
     pub(crate) fn string_bytes(&self) -> &[u8] {
-        // Safety: `repr()` selects this value's own representation; `as_bytes` is
-        // `Some` for both string representations (and this is only called on a
-        // string).
-        unsafe { self.repr().as_bytes(self).expect("not a string") }
+        // Safety: only called on a string, so `string_repr()` matches it.
+        unsafe { self.string_repr().as_bytes(self) }
     }
 
     pub(crate) fn string_as_str(&self) -> &str {
-        // Safety: inline and interned string bytes are both valid UTF-8.
-        unsafe { std::str::from_utf8_unchecked(self.string_bytes()) }
+        // Safety: only called on a string, so `string_repr()` matches it.
+        unsafe { self.string_repr().as_str(self) }
     }
 
     pub(crate) fn string_len(&self) -> usize {
-        self.string_bytes().len()
+        // Safety: only called on a string, so `string_repr()` matches it.
+        unsafe { self.string_repr().len(self) }
     }
 }
 
@@ -846,13 +857,17 @@ impl IValue {
     }
 }
 
-/// The operations each value *representation* provides, along with defaults so a
-/// representation only overrides what it supports. Every operation is
-/// fundamentally per-representation: cloning an inline value is a bit-copy, a
-/// scalar allocates, an interned string bumps a refcount, and so on. `IValue`'s
-/// public methods and its `Clone`/`Drop`/`PartialEq`/`PartialOrd`/`Debug` impls
-/// find the representation once, via [`IValue::repr`], and delegate to a trait
-/// method — the delegation only ever goes downward.
+/// The universal operations every value *representation* provides — the ones
+/// [`IValue`]'s `Clone`/`Drop`/`PartialEq`/`PartialOrd`/`Hash`/`Debug` impls and
+/// `destructure` need *without* knowing the JSON type. Defaults cover the common
+/// case (an inline value is a bit-copy with nothing to free; constants and strings
+/// hash and compare by their canonical bits), so a representation overrides only
+/// what differs. Every delegation goes downward, found once via [`IValue::repr`].
+///
+/// The *type-specific* accessors live on the per-type traits [`NumberRepr`],
+/// [`StringRepr`], [`ArrayRepr`] and [`ObjectRepr`], reached through
+/// [`IValue::number_repr`] and its siblings, which the I-types invoke once they know
+/// the type.
 ///
 /// # Safety
 ///
@@ -892,15 +907,6 @@ pub(crate) trait ValueRepr {
     unsafe fn partial_cmp(&self, _a: &IValue, _b: &IValue) -> Option<Ordering> {
         None
     }
-    /// This number reduced to a [`NumVal`] for the shared numeric utilities. This is
-    /// how the number comparison resolves its *other* operand: `a.repr()` decodes
-    /// `a` directly, and reaches `b`'s value through `b`'s representation via this
-    /// method — the same `repr()` dispatch, no separate number decoder. Only the
-    /// number representations produce a `NumVal`; it is never called on a
-    /// non-number (comparison is type-guarded), so the default is unreachable.
-    unsafe fn num_val(&self, _v: &IValue) -> NumVal {
-        unreachable!("num_val is only defined for number representations")
-    }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result;
 
     /// Wrap this value in the owned destructuring enum.
@@ -909,39 +915,88 @@ pub(crate) trait ValueRepr {
     unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a>;
     /// Wrap a mutable reference to this value in the mutable destructuring enum.
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a>;
+}
 
-    // Value accessors: the default is "this representation is not that kind of
-    // value", so each representation only overrides what it actually supports.
-    fn to_bool(&self, _v: &IValue) -> Option<bool> {
-        None
-    }
-    unsafe fn to_i64(&self, _v: &IValue) -> Option<i64> {
-        None
-    }
-    unsafe fn to_u64(&self, _v: &IValue) -> Option<u64> {
-        None
-    }
-    unsafe fn to_f64(&self, _v: &IValue) -> Option<f64> {
-        None
-    }
-    unsafe fn to_f64_lossy(&self, _v: &IValue) -> Option<f64> {
-        None
-    }
-    /// Length of a collection; `None` for everything else.
-    unsafe fn len(&self, _v: &IValue) -> Option<usize> {
-        None
-    }
-    /// The UTF-8 bytes of a string; `None` for every non-string representation.
-    /// The two string representations override this with their own byte access.
-    unsafe fn as_bytes<'a>(&self, _v: &'a IValue) -> Option<&'a [u8]> {
-        None
-    }
-    /// Whether a number was written with a decimal point (`1.0` vs `1`); `false`
-    /// for every non-number representation. The two number representations
-    /// override this.
+/// The number-specific operations, implemented by every number representation (the
+/// three heap scalars and the active inline number). A representation only has to
+/// decode its storage to a [`NumVal`] via [`num_val`](NumberRepr::num_val); the
+/// numeric accessors derive from it by default — though the inline representations
+/// override the `f64` conversions with an exact decode of their own bit layout.
+/// Reached through [`IValue::number_repr`], only invoked on a number.
+///
+/// `num_val` is also how a number comparison resolves its *other* operand: it decodes
+/// that operand through its own `number_repr()`, the same dispatch, no separate
+/// decoder (see [`number_cmp`]).
+///
+/// # Safety
+///
+/// `v` must be a number of this representation.
+pub(crate) trait NumberRepr {
+    /// This number reduced to a [`NumVal`].
+    unsafe fn num_val(&self, v: &IValue) -> NumVal;
+    /// Whether the number was written with a decimal point (`1.0` vs `1`). Default:
+    /// `false`; the float and inline representations override.
     fn has_decimal_point(&self, _v: &IValue) -> bool {
         false
     }
+    unsafe fn to_i64(&self, v: &IValue) -> Option<i64> {
+        self.num_val(v).to_i64()
+    }
+    unsafe fn to_u64(&self, v: &IValue) -> Option<u64> {
+        self.num_val(v).to_u64()
+    }
+    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
+        self.num_val(v).to_f64()
+    }
+    unsafe fn to_f64_lossy(&self, v: &IValue) -> f64 {
+        self.num_val(v).to_f64_lossy()
+    }
+}
+
+/// The string-specific operations, implemented by both string representations
+/// (inline and interned). A representation only has to expose its UTF-8 bytes;
+/// `as_str`/`len` derive from them. Reached through [`IValue::string_repr`], only
+/// invoked on a string.
+///
+/// # Safety
+///
+/// `v` must be a string of this representation.
+pub(crate) trait StringRepr {
+    /// The UTF-8 bytes of the string.
+    unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> &'a [u8];
+    /// The string as a `&str`.
+    unsafe fn as_str<'a>(&self, v: &'a IValue) -> &'a str {
+        // Safety: inline and interned string bytes are both valid UTF-8.
+        std::str::from_utf8_unchecked(self.as_bytes(v))
+    }
+    /// The byte length of the string.
+    unsafe fn len(&self, v: &IValue) -> usize {
+        self.as_bytes(v).len()
+    }
+}
+
+/// The array-specific operations. A JSON array has a single representation, so this
+/// has one implementor; it exists so array access stays off the universal
+/// [`ValueRepr`], symmetric with [`NumberRepr`]/[`StringRepr`]. Reached through
+/// [`IValue::array_repr`], only invoked on an array.
+///
+/// # Safety
+///
+/// `v` must be an array.
+pub(crate) trait ArrayRepr {
+    /// The number of elements.
+    unsafe fn len(&self, v: &IValue) -> usize;
+}
+
+/// The object-specific operations; the object counterpart to [`ArrayRepr`], reached
+/// through [`IValue::object_repr`], only invoked on an object.
+///
+/// # Safety
+///
+/// `v` must be an object.
+pub(crate) trait ObjectRepr {
+    /// The number of entries.
+    unsafe fn len(&self, v: &IValue) -> usize;
 }
 
 impl IValue {
@@ -960,9 +1015,50 @@ impl IValue {
             // The reserved tag is never produced; it reads back as an `f64`.
             TypeTag::NumberF64 | TypeTag::NumberReserved => &scalar::F64Repr,
             TypeTag::String => &interned::InternedRepr,
-            TypeTag::Array => &array::ArrayRepr,
-            TypeTag::Object => &object::ObjectRepr,
+            TypeTag::Array => &array::ArrayStore,
+            TypeTag::Object => &object::ObjectStore,
         }
+    }
+
+    /// This number's representation, for the number-specific operations. Unlike
+    /// [`repr`](IValue::repr), which covers every type, this narrows to the four
+    /// number representations — and for an inline value returns the inline *number*
+    /// sub-representation directly, since the caller already knows it is a number.
+    ///
+    /// Only ever called on a number (from a number accessor or an [`INumber`]).
+    fn number_repr(&self) -> &'static dyn NumberRepr {
+        match self.type_tag() {
+            TypeTag::Inline => &inline::InlineNumberRepr,
+            TypeTag::NumberI64 => &scalar::I64Repr,
+            TypeTag::NumberU64 => &scalar::U64Repr,
+            // The reserved tag is never produced; it reads back as an `f64`.
+            TypeTag::NumberF64 | TypeTag::NumberReserved => &scalar::F64Repr,
+            TypeTag::String | TypeTag::Array | TypeTag::Object => {
+                unreachable!("number_repr called on a non-number value")
+            }
+        }
+    }
+
+    /// This string's representation, for the string-specific operations — the inline
+    /// string sub-representation or the interned one. Only ever called on a string.
+    fn string_repr(&self) -> &'static dyn StringRepr {
+        match self.type_tag() {
+            TypeTag::Inline => &inline::string::InlineStringRepr,
+            TypeTag::String => &interned::InternedRepr,
+            _ => unreachable!("string_repr called on a non-string value"),
+        }
+    }
+
+    /// This array's representation. A JSON array has a single representation, so this
+    /// is a fixed marker; it exists for symmetry. Only ever called on an array.
+    fn array_repr(&self) -> &'static dyn ArrayRepr {
+        &array::ArrayStore
+    }
+
+    /// This object's representation; the object counterpart to
+    /// [`array_repr`](IValue::array_repr). Only ever called on an object.
+    fn object_repr(&self) -> &'static dyn ObjectRepr {
+        &object::ObjectStore
     }
 }
 

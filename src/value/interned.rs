@@ -22,8 +22,8 @@ use crate::alloc::{alloc_infallible, dealloc_infallible};
 use crate::string::IString;
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 use crate::value::{
-    string_cmp, string_debug, Destructured, DestructuredMut, DestructuredRef, IValue, ValueRepr,
-    ValueType,
+    string_cmp, string_debug, Destructured, DestructuredMut, DestructuredRef, IValue, StringRepr,
+    ValueRepr, ValueType,
 };
 
 #[repr(C)]
@@ -244,9 +244,6 @@ impl ValueRepr for InternedRepr {
     fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::String
     }
-    unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> Option<&'a [u8]> {
-        Some(bytes(v.ptr()))
-    }
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
         Some(string_cmp(a, b))
     }
@@ -271,4 +268,11 @@ impl ValueRepr for InternedRepr {
     }
     // hash/eq use the defaults (pointer word / `raw_eq`): interning deduplicates,
     // so equal interned strings share one allocation and compare by pointer.
+}
+
+impl StringRepr for InternedRepr {
+    /// The interned UTF-8 bytes. Safety: `v` must be a live interned string.
+    unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> &'a [u8] {
+        bytes(v.ptr())
+    }
 }

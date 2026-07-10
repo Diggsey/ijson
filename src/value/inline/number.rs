@@ -8,7 +8,7 @@
 
 use std::convert::TryFrom;
 
-use crate::value::{IValue, NumVal};
+use crate::value::IValue;
 
 /// Whether a valid JSON number is written as a plain integer or with a fraction or
 /// exponent (i.e. as a float). Determines the heap fallback when a number does not
@@ -28,21 +28,20 @@ pub(crate) enum InlineNumberError {
 }
 
 /// The interface both inline number representations implement: encoding a value or
-/// a JSON-number string into inline bits, and decoding bits back to a [`NumVal`].
-/// The methods are associated functions (no `self`) because they operate on raw
-/// values and bits, not on a representation instance.
+/// a JSON-number string into inline bits. The methods are associated functions (no
+/// `self`) because they operate on raw values and bits, not on a representation
+/// instance. (Decoding bits back to a [`NumVal`] is the job of each representation's
+/// [`NumberRepr`](crate::value::NumberRepr) impl, not this trait.)
 ///
 /// This is distinct from [`super::InlineValue`], the dynamically dispatched
 /// per-type behaviour [`super::InlineRepr`] delegates to; this is the statically
-/// resolved construction/decoding of the active number representation.
+/// resolved construction of the active number representation.
 pub(crate) trait InlineNumber {
     /// Encodes a plain integer (no decimal point) inline, or `None` if it does not
     /// fit.
     fn encode_int(value: i64) -> Option<usize>;
     /// Encodes a finite `f64` inline, or `None` if it does not fit.
     fn encode_f64(value: f64) -> Option<usize>;
-    /// Decodes inline bits to a [`NumVal`] for the shared numeric utilities.
-    fn num_val(bits: usize) -> NumVal;
     /// Parses a JSON number string directly into inline bits — this is where each
     /// representation applies its own scheme (an exact decimal for base 10, the
     /// nearest binary float for base 2). Returns [`InlineNumberError::Invalid`] if
