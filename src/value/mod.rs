@@ -1227,38 +1227,26 @@ mod num_val_tests {
     }
 }
 
-// How a JSON number value is built in a given representation. Each representation
-// returns `None` for a value it cannot hold, so construction tries them in
-// preference order — the compact inline form first, then the heap scalar, which is
-// total (it can store any `i64`/`u64`/`f64`). Adding a representation (e.g. a heap
-// arbitrary-precision decimal) means implementing this and inserting it into the
-// chain in `IValue::new_i64`/`new_u64`/`new_f64`.
-pub(crate) trait NumberRepr {
-    fn from_i64(value: i64) -> Option<IValue>;
-    fn from_u64(value: u64) -> Option<IValue>;
-    fn from_f64(value: f64) -> Option<IValue>;
-}
-
 // Number-type dispatch. A JSON number is stored either inline (`inline::number`) or
-// as a heap scalar (`scalar`), both [`NumberRepr`]s. Construction tries each in
-// turn; the accessors dispatch on the tag and defer to the owning representation.
+// as one of the heap scalar representations (`scalar::{I64Repr, U64Repr, F64Repr}`,
+// one per tag). Construction tries the compact inline form first — it may decline
+// (return `None`) — then stores the value on the heap, which is total. The
+// accessors dispatch on the tag and defer to the owning representation.
 impl IValue {
     pub(crate) fn new_i64(value: i64) -> Self {
-        inline::InlineNumberRepr::from_i64(value)
-            .or_else(|| scalar::ScalarRepr::from_i64(value))
-            .expect("the scalar representation stores any i64")
+        inline::InlineNumberRepr::from_i64(value).unwrap_or_else(|| scalar::I64Repr::store(value))
     }
 
     pub(crate) fn new_u64(value: u64) -> Self {
-        inline::InlineNumberRepr::from_u64(value)
-            .or_else(|| scalar::ScalarRepr::from_u64(value))
-            .expect("the scalar representation stores any u64")
+        inline::InlineNumberRepr::from_u64(value).unwrap_or_else(|| match i64::try_from(value) {
+            // A `u64` that fits `i64` canonicalises to the signed representation.
+            Ok(v) => scalar::I64Repr::store(v),
+            Err(_) => scalar::U64Repr::store(value),
+        })
     }
 
     pub(crate) fn new_f64(value: f64) -> Self {
-        inline::InlineNumberRepr::from_f64(value)
-            .or_else(|| scalar::ScalarRepr::from_f64(value))
-            .expect("the scalar representation stores any f64")
+        inline::InlineNumberRepr::from_f64(value).unwrap_or_else(|| scalar::F64Repr::store(value))
     }
 
     /// Wraps already-encoded inline-number bits as an `IValue`. The bits come from
@@ -1425,10 +1413,10 @@ impl IValue {
             // One representation covers the whole inline family; it decodes the
             // family bits to dispatch further (see `inline::InlineRepr`).
             TypeTag::Inline => &inline::InlineRepr,
-            TypeTag::NumberI64
-            | TypeTag::NumberU64
-            | TypeTag::NumberF64
-            | TypeTag::NumberReserved => &scalar::ScalarRepr,
+            TypeTag::NumberI64 => &scalar::I64Repr,
+            TypeTag::NumberU64 => &scalar::U64Repr,
+            // The reserved tag is never produced; it reads back as an `f64`.
+            TypeTag::NumberF64 | TypeTag::NumberReserved => &scalar::F64Repr,
             TypeTag::String => &interned::InternedRepr,
             TypeTag::Array => &array::ArrayRepr,
             TypeTag::Object => &object::ObjectRepr,

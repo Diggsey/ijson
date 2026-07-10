@@ -6,7 +6,9 @@
 //! trait they both implement, and the JSON-number grammar validation their
 //! `from_str` uses.
 
-use crate::value::NumVal;
+use std::convert::TryFrom;
+
+use crate::value::{IValue, NumVal};
 
 /// Whether a valid JSON number is written as a plain integer or with a fraction or
 /// exponent (i.e. as a float). Determines the heap fallback when a number does not
@@ -47,6 +49,22 @@ pub(crate) trait InlineNumber {
     /// `s` is not a JSON number, or [`InlineNumberError::Spill`] if it is a valid
     /// number that does not fit inline, so the caller can store it on the heap.
     fn from_str(s: &str) -> Result<usize, InlineNumberError>;
+
+    /// Constructs an inline `IValue` from an `i64`, or `None` if it does not fit
+    /// inline (so the caller falls back to a heap scalar).
+    fn from_i64(value: i64) -> Option<IValue> {
+        Self::encode_int(value).map(IValue::new_inline_number)
+    }
+    /// Constructs an inline `IValue` from a `u64`, or `None` if it does not fit —
+    /// the inline form only holds the signed range.
+    fn from_u64(value: u64) -> Option<IValue> {
+        i64::try_from(value).ok().and_then(Self::from_i64)
+    }
+    /// Constructs an inline `IValue` from a finite `f64`, or `None` if it does not
+    /// fit inline.
+    fn from_f64(value: f64) -> Option<IValue> {
+        Self::encode_f64(value).map(IValue::new_inline_number)
+    }
 }
 
 /// Validates `s` against the JSON number grammar (see <https://www.json.org/>),

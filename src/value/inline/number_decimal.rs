@@ -49,7 +49,7 @@ use super::InlineValue;
 use crate::number::INumber;
 use crate::value::{
     decimal_to_f64_lossy, num_debug, num_hash, num_to_i64, num_to_u64, number_cmp, Destructured,
-    DestructuredMut, DestructuredRef, IValue, NumVal, NumberRepr, ValueType,
+    DestructuredMut, DestructuredRef, IValue, NumVal, ValueType,
 };
 
 // --- Bit layout -------------------------------------------------------------
@@ -400,19 +400,6 @@ impl InlineNumber for InlineNumberRepr {
         from_str_with(s, Self::encode_int, |s| {
             parse_decimal(s).and_then(|(m, e)| encode_decimal(m, e))
         })
-    }
-}
-
-impl NumberRepr for InlineNumberRepr {
-    fn from_i64(value: i64) -> Option<IValue> {
-        Self::encode_int(value).map(IValue::new_inline_number)
-    }
-    fn from_u64(value: u64) -> Option<IValue> {
-        // The inline form only holds the signed range; a larger `u64` never fits.
-        i64::try_from(value).ok().and_then(Self::from_i64)
-    }
-    fn from_f64(value: f64) -> Option<IValue> {
-        Self::encode_f64(value).map(IValue::new_inline_number)
     }
 }
 

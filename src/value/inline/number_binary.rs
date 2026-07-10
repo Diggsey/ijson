@@ -37,7 +37,6 @@
 #![cfg_attr(feature = "arbitrary_precision", allow(dead_code))]
 
 use std::cmp::Ordering;
-use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
 use std::hash::Hasher;
 
@@ -46,7 +45,7 @@ use super::InlineValue;
 use crate::number::INumber;
 use crate::value::{
     num_debug, num_hash, num_to_i64, num_to_u64, number_cmp, Destructured, DestructuredMut,
-    DestructuredRef, IValue, NumVal, NumberRepr, ValueType,
+    DestructuredRef, IValue, NumVal, ValueType,
 };
 
 // --- Bit layout -------------------------------------------------------------
@@ -219,19 +218,6 @@ impl InlineNumber for InlineNumberRepr {
                 .filter(|v| v.is_finite())
                 .and_then(Self::encode_f64)
         })
-    }
-}
-
-impl NumberRepr for InlineNumberRepr {
-    fn from_i64(value: i64) -> Option<IValue> {
-        Self::encode_int(value).map(IValue::new_inline_number)
-    }
-    fn from_u64(value: u64) -> Option<IValue> {
-        // The inline form only holds the signed range; a larger `u64` never fits.
-        i64::try_from(value).ok().and_then(Self::from_i64)
-    }
-    fn from_f64(value: f64) -> Option<IValue> {
-        Self::encode_f64(value).map(IValue::new_inline_number)
     }
 }
 
