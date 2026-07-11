@@ -6,9 +6,9 @@
 //! constant flag clear (bit 4; set only for the `null`/`false`/`true` constants),
 //! and the length (bits 5-7). The remaining bytes hold the UTF-8 data.
 //!
-//! The encode/decode helpers operate on the raw inline bits (and, for the
-//! borrowed bytes, a pointer to the value's own storage); only the [`ValueRepr`]
-//! impl at the bottom knows about `IValue`.
+//! The encode/decode helpers are associated functions of [`InlineStringRepr`] that
+//! operate on the raw inline bits (and, for the borrowed bytes, a pointer to the
+//! value's own storage); only its trait impls at the bottom know about `IValue`.
 
 use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
@@ -42,40 +42,43 @@ const CONTROL_OFFSET: usize = std::mem::size_of::<usize>() - 1;
 #[cfg(target_endian = "big")]
 const CHAR_OFFSET: usize = 0;
 
-/// The inline bits for `s` if it fits inline (at most [`CAPACITY`] bytes), or
-/// `None` if it is too long and must be stored some other way. This is how the
-/// value layer asks the inline representation whether it can hold a string.
-pub(crate) fn try_encode(s: &str) -> Option<usize> {
-    (s.len() <= CAPACITY).then(|| encode(s))
-}
-
-/// The inline bits for a string of at most [`CAPACITY`] bytes.
-pub(crate) fn encode(s: &str) -> usize {
-    debug_assert!(s.len() <= CAPACITY);
-
-    // The control byte sets the string sub-family flag and the length (the
-    // `Inline` tag bits are zero), and the remaining bytes carry the characters.
-    let mut bytes = [0u8; std::mem::size_of::<usize>()];
-    bytes[CONTROL_OFFSET] = STR_FAMILY as u8 | ((s.len() as u8) << LEN_SHIFT);
-    bytes[CHAR_OFFSET..CHAR_OFFSET + s.len()].copy_from_slice(s.as_bytes());
-    usize::from_ne_bytes(bytes)
-}
-
-/// The byte length of an inline string, read from the control byte.
-pub(crate) fn len(bits: usize) -> usize {
-    (bits >> LEN_SHIFT) & LEN_MASK
-}
-
-/// The UTF-8 bytes of an inline string, borrowed from `storage`.
-///
-/// Safety: `storage` must point at the value holding `bits` and remain valid
-/// for `'a`.
-pub(crate) unsafe fn bytes<'a>(storage: NonNull<u8>, bits: usize) -> &'a [u8] {
-    std::slice::from_raw_parts(storage.as_ptr().add(CHAR_OFFSET), len(bits))
-}
-
 /// The inline short-string representation of a JSON string.
 pub(crate) struct InlineStringRepr;
+
+impl InlineStringRepr {
+    /// The inline bits for `s` if it fits inline (at most [`CAPACITY`] bytes), or
+    /// `None` if it is too long and must be stored some other way. This is how the
+    /// value layer asks the inline representation whether it can hold a string.
+    pub(crate) fn try_encode(s: &str) -> Option<usize> {
+        (s.len() <= CAPACITY).then(|| Self::encode(s))
+    }
+
+    /// The inline bits for a string of at most [`CAPACITY`] bytes.
+    fn encode(s: &str) -> usize {
+        debug_assert!(s.len() <= CAPACITY);
+
+        // The control byte sets the string sub-family flag and the length (the
+        // `Inline` tag bits are zero), and the remaining bytes carry the characters.
+        let mut bytes = [0u8; std::mem::size_of::<usize>()];
+        bytes[CONTROL_OFFSET] = STR_FAMILY as u8 | ((s.len() as u8) << LEN_SHIFT);
+        bytes[CHAR_OFFSET..CHAR_OFFSET + s.len()].copy_from_slice(s.as_bytes());
+        usize::from_ne_bytes(bytes)
+    }
+
+    /// The byte length of an inline string, read from the control byte.
+    fn len(bits: usize) -> usize {
+        (bits >> LEN_SHIFT) & LEN_MASK
+    }
+
+    /// The UTF-8 bytes of an inline string, borrowed from `storage`.
+    ///
+    /// Safety: `storage` must point at the value holding `bits` and remain valid
+    /// for `'a`.
+    unsafe fn bytes<'a>(storage: NonNull<u8>, bits: usize) -> &'a [u8] {
+        std::slice::from_raw_parts(storage.as_ptr().add(CHAR_OFFSET), Self::len(bits))
+    }
+}
+
 impl InlineValue for InlineStringRepr {
     fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::String
@@ -103,6 +106,6 @@ impl StringRepr for InlineStringRepr {
     /// The inline UTF-8 bytes, borrowed from `v`'s own storage. Safety: `v` must be
     /// an inline string.
     unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> &'a [u8] {
-        bytes(NonNull::from(v).cast(), v.usize_())
+        Self::bytes(NonNull::from(v).cast(), v.usize_())
     }
 }

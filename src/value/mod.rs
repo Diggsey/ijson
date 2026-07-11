@@ -832,7 +832,7 @@ impl IValue {
 // dispatch on the tag and defer to the owning representation immediately.
 impl IValue {
     pub(crate) fn new_string(s: &str) -> Self {
-        match inline::string::try_encode(s) {
+        match inline::string::InlineStringRepr::try_encode(s) {
             // Safety: `try_encode` returns valid inline-string bits.
             Some(bits) => unsafe { Self::new_usize(ReprTag::Inline, bits) },
             // Safety: `intern` returns a live, aligned interned header pointer.
