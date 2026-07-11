@@ -59,10 +59,10 @@ impl NumVal {
     /// range (so `1e18` and the integer `10^18` become the same value).
     pub(crate) fn from_f64(x: f64) -> NumVal {
         if x.fract() == 0.0 {
-            if x >= i64::MIN as f64 && x < i64::MAX as f64 {
+            if (-I64_RANGE..I64_RANGE).contains(&x) {
                 return NumVal(Repr::Int(x as i64));
             }
-            if x >= 0.0 && x < u64::MAX as f64 {
+            if (0.0..U64_RANGE).contains(&x) {
                 return NumVal(Repr::UInt(x as u64));
             }
         }
@@ -204,6 +204,16 @@ impl Debug for NumVal {
     }
 }
 
+// `2^63` and `2^64`: one past `i64::MAX`/`u64::MAX`, and (negated) exactly `i64::MIN`.
+// The maxima are *not* representable as `f64` — they round up to these powers of two
+// — and no `f64` lies between a maximum and the next power of two. So these bound the
+// `f64`s that convert to the integer type exactly: a whole `x` fits `i64` iff
+// `-I64_RANGE <= x < I64_RANGE`, and `u64` iff `0 <= x < U64_RANGE`. (Using the
+// powers of two directly, rather than `i64::MAX as f64` etc., keeps that reasoning
+// explicit and matches the comparison helpers below.)
+const I64_RANGE: f64 = 9_223_372_036_854_775_808.0;
+const U64_RANGE: f64 = 18_446_744_073_709_551_616.0;
+
 fn can_represent_as_f64(x: u64) -> bool {
     x.leading_zeros() + x.trailing_zeros() >= 11
 }
@@ -221,7 +231,6 @@ fn cmp_by_fraction(b: f64, bt: f64) -> Ordering {
 
 /// Compares an `i64` to a finite float exactly.
 fn cmp_i64_f64(a: i64, b: f64) -> Ordering {
-    const I64_RANGE: f64 = 9_223_372_036_854_775_808.0; // 2^63
     if b >= I64_RANGE {
         return Ordering::Less; // b >= 2^63 > i64::MAX >= a
     }
@@ -237,7 +246,6 @@ fn cmp_i64_f64(a: i64, b: f64) -> Ordering {
 
 /// Compares a `u64` to a finite float exactly.
 fn cmp_u64_f64(a: u64, b: f64) -> Ordering {
-    const U64_RANGE: f64 = 18_446_744_073_709_551_616.0; // 2^64
     if b < 0.0 {
         return Ordering::Greater; // a >= 0 > b
     }
@@ -466,6 +474,35 @@ mod tests {
         let mut h = DefaultHasher::new();
         nv.hash(&mut h);
         h.finish()
+    }
+
+    #[test]
+    fn from_f64_normalises_integers_at_the_i64_u64_boundaries() {
+        // 2^63 (== i64::MAX + 1) and 2^64 (== u64::MAX + 1) are exact f64s; the
+        // integer maxima themselves are not representable.
+        let two63 = 9_223_372_036_854_775_808.0_f64;
+        let two64 = 18_446_744_073_709_551_616.0_f64;
+
+        // The largest i64-valued f64 is 2^63 - 1024; it reduces to `Int`. 2^63 itself
+        // exceeds i64::MAX, so it spills to `UInt`.
+        assert_eq!(
+            NumVal::from_f64(two63 - 1024.0).to_i64(),
+            Some(i64::MAX - 1023)
+        );
+        assert_eq!(NumVal::from_f64(two63).to_i64(), None);
+        assert_eq!(NumVal::from_f64(two63).to_u64(), Some(1 << 63));
+
+        // i64::MIN is exactly -2^63 and stays `Int` (the lower bound is inclusive).
+        assert_eq!(NumVal::from_f64(-two63).to_i64(), Some(i64::MIN));
+
+        // The largest u64-valued f64 is 2^64 - 2048; it reduces to `UInt`. 2^64 itself
+        // exceeds u64::MAX, so it stays `Float`.
+        assert_eq!(
+            NumVal::from_f64(two64 - 2048.0).to_u64(),
+            Some(u64::MAX - 2047)
+        );
+        assert_eq!(NumVal::from_f64(two64).to_u64(), None);
+        assert_eq!(NumVal::from_f64(two64).to_f64(), Some(two64));
     }
 
     #[test]

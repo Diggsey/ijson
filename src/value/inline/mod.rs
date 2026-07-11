@@ -151,7 +151,6 @@ impl ValueRepr for InlineRepr {
         Self::inner(v).destructure_ref(v)
     }
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
-        let inner = Self::inner(v);
-        inner.destructure_mut(v)
+        Self::inner(v).destructure_mut(v)
     }
 }
