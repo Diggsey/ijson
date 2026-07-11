@@ -1,16 +1,19 @@
 //! The inline value family (tag `Inline`).
 //!
 //! A value with the `Inline` tag stores its whole contents in the pointer-sized
-//! [`IValue`] rather than behind a pointer. Bit 3 selects the sub-family:
+//! [`IValue`] rather than behind a pointer. The bits just above the tag pick the
+//! sub-family (see [`InlineKind`] and [`InlineRepr::kind`]):
 //!
-//!   - 0 => number: `mantissa * BASE^exp`, base 10 or 2 (see [`number_decimal`]
-//!     and [`number_binary`], one selected as [`InlineNumberRepr`]).
-//!   - 1 => string or constant, distinguished by bit 7 (`CONST_FLAG`):
-//!       - bit 7 = 0 => string (see [`string`]).
-//!       - bit 7 = 1 => constant: `null` / `false` / `true`.
+//!   - bit 3 clear => number: `mantissa * BASE^exp`, base 10 or 2 (see
+//!     [`number_decimal`]/[`number_binary`], one selected as [`InlineNumberRepr`]).
+//!   - bit 3 set   => string or constant, distinguished by bit 4 (`CONST_FLAG`,
+//!     adjacent to the family bit):
+//!       - bit 4 clear => string (see [`string`]); bits 5-7 hold its length.
+//!       - bit 4 set   => constant: `null` / `false` / `true` (see [`constant`]);
+//!         bits 5-7 hold the constant's discriminant.
 //!
-//! The all-zero value is never produced (the number exponent is biased so
-//! integer zero is non-zero), reserving it as the `NonNull` niche.
+//! The all-zero value is never produced (the number exponent is biased so integer
+//! zero is non-zero), reserving it as the `NonNull` niche.
 
 pub(crate) mod constant;
 pub(crate) mod number;
@@ -18,6 +21,7 @@ pub(crate) mod number_binary;
 pub(crate) mod number_decimal;
 pub(crate) mod string;
 
+pub(crate) use constant::{FALSE, NULL, TRUE};
 pub(crate) use number::{InlineNumber, InlineNumberError, NumberShape};
 
 // The two inline number representations — an exact base-10 decimal and a base-2
@@ -38,46 +42,28 @@ use std::hash::Hasher;
 
 use crate::value::{Destructured, DestructuredMut, DestructuredRef, IValue, ValueRepr, ValueType};
 
-// Bit 3 of an inline value: set for the string/constant sub-family, clear for
-// inline numbers.
+// Bit 3: set for the string/constant sub-family, clear for inline numbers.
 const STR_FAMILY: usize = 1 << 3;
-// Bit 7 of an inline string-family value: set for a constant (`null`/`false`/
-// `true`), clear for an actual inline string.
-const CONST_FLAG: usize = 1 << 7;
+// Bit 4 (adjacent to the family bit): within the string/constant sub-family, set
+// for a constant (`null`/`false`/`true`), clear for an inline string.
+const CONST_FLAG: usize = 1 << 4;
+// Bits 5-7 carry the payload of a string/constant value: an inline string's length
+// or a constant's discriminant (see [`constant::Constant`]).
+const PAYLOAD_SHIFT: u32 = 5;
 
-// Bit patterns of the inline constants (the `Inline` tag is 0, so these are the
-// whole inline value). The constant is selected by bits 4-6 (0 = null,
-// 1 = false, 2 = true).
-pub(crate) const NULL: usize = STR_FAMILY | CONST_FLAG;
-pub(crate) const FALSE: usize = NULL | (1 << 4);
-pub(crate) const TRUE: usize = NULL | (2 << 4);
-
-/// The JSON type of an inline value, from its raw bits.
-pub(crate) fn value_type(bits: usize) -> ValueType {
-    if is_number(bits) {
-        ValueType::Number
-    } else if is_string(bits) {
-        ValueType::String
-    } else if bits == NULL {
-        ValueType::Null
-    } else {
-        ValueType::Bool
-    }
-}
-
-/// `true` if the inline value is a number (number sub-family).
-fn is_number(bits: usize) -> bool {
-    bits & STR_FAMILY == 0
-}
-
-/// `true` if the inline value is a string (string sub-family, not a constant).
-fn is_string(bits: usize) -> bool {
-    bits & STR_FAMILY != 0 && bits & CONST_FLAG == 0
+/// Which of the three inline sub-families a value belongs to — exactly the
+/// distinction the inline bits encode, unlike the six-way [`ValueType`]. (The null
+/// vs. bool split within `Constant` is a further decode, done by [`constant`].)
+enum InlineKind {
+    Number,
+    String,
+    Constant,
 }
 
 /// The *universal* behaviour of an inline value — the [`ValueRepr`] operations that
-/// every inline type answers, minus the ones [`InlineRepr`] supplies uniformly
-/// (`clone`/`drop`: every inline value is a bit-copy with nothing to free). A single
+/// [`InlineRepr`] delegates to a sub-representation, minus the ones it supplies
+/// uniformly (`clone`/`drop`: every inline value is a bit-copy with nothing to free,
+/// and `value_type`, which [`InlineRepr`] answers from the bits directly). A single
 /// [`InlineRepr`] implements [`ValueRepr`] for the whole inline family and decodes
 /// the family bits to pick the right one of these; each sub-representation only
 /// overrides what it needs.
@@ -87,8 +73,6 @@ fn is_string(bits: usize) -> bool {
 /// directly, reached through `IValue::number_repr` / `string_repr`, and inline
 /// `bool`/`null` carry no accessor at all.
 pub(crate) trait InlineValue {
-    /// The JSON type this inline sub-representation stores.
-    fn value_type(&self) -> ValueType;
     /// Hash by value. Default: the canonical pointer word (correct for the
     /// constants and inline strings). Inline numbers override to hash by value.
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
@@ -113,23 +97,36 @@ pub(crate) trait InlineValue {
 pub(crate) struct InlineRepr;
 
 impl InlineRepr {
+    /// Which inline sub-family the raw bits belong to.
+    fn kind(bits: usize) -> InlineKind {
+        if bits & STR_FAMILY == 0 {
+            InlineKind::Number
+        } else if bits & CONST_FLAG == 0 {
+            InlineKind::String
+        } else {
+            InlineKind::Constant
+        }
+    }
+
     /// Selects the inline sub-representation for `v` from its family bits.
     #[inline]
     fn inner(v: &IValue) -> &'static dyn InlineValue {
-        match value_type(v.usize_()) {
-            ValueType::Null => &constant::NullRepr,
-            ValueType::Bool => &constant::BoolRepr,
-            ValueType::Number => &InlineNumberRepr,
-            ValueType::String => &string::InlineStringRepr,
-            // An inline value is never an array or object.
-            ValueType::Array | ValueType::Object => unreachable!(),
+        match Self::kind(v.usize_()) {
+            InlineKind::Number => &InlineNumberRepr,
+            InlineKind::String => &string::InlineStringRepr,
+            InlineKind::Constant => &constant::ConstantRepr,
         }
     }
 }
 
 impl ValueRepr for InlineRepr {
     fn value_type(&self, v: &IValue) -> ValueType {
-        Self::inner(v).value_type()
+        match Self::kind(v.usize_()) {
+            InlineKind::Number => ValueType::Number,
+            InlineKind::String => ValueType::String,
+            // A constant is either `null` or a `bool`; `constant` tells them apart.
+            InlineKind::Constant => constant::value_type(v.usize_()),
+        }
     }
     // Every inline value is stored entirely in the pointer word: cloning is a
     // bit-copy of that word, and there is no heap storage to release on drop.

@@ -2,9 +2,9 @@
 //!
 //! A string of at most [`CAPACITY`] bytes is packed into the value with the
 //! `Inline` tag and the string sub-family flag. The low byte is the control
-//! byte — the `Inline` tag (bits 0-2), the string sub-family flag (bit 3), and
-//! the length (bits 4-6), with bit 7 clear (set only for the `null`/`false`/
-//! `true` constants). The remaining bytes hold the UTF-8 data.
+//! byte — the `Inline` tag (bits 0-2), the string sub-family flag (bit 3), the
+//! constant flag clear (bit 4; set only for the `null`/`false`/`true` constants),
+//! and the length (bits 5-7). The remaining bytes hold the UTF-8 data.
 //!
 //! The encode/decode helpers operate on the raw inline bits (and, for the
 //! borrowed bytes, a pointer to the value's own storage); only the [`ValueRepr`]
@@ -18,14 +18,14 @@ use super::{InlineValue, STR_FAMILY};
 use crate::string::IString;
 use crate::value::{
     string_cmp, string_debug, Destructured, DestructuredMut, DestructuredRef, IValue, StringRepr,
-    ValueType,
 };
 
 /// The number of string bytes that fit inline in a pointer-sized value:
 /// 7 on 64-bit platforms and 3 on 32-bit (one byte is the control byte).
 pub(crate) const CAPACITY: usize = std::mem::size_of::<usize>() - 1;
 
-const LEN_SHIFT: u32 = 4;
+// The length occupies the shared payload bits (5-7) of the control byte.
+const LEN_SHIFT: u32 = super::PAYLOAD_SHIFT;
 const LEN_MASK: usize = 0b111;
 
 // Memory offsets of the control byte and the first character byte. The control
@@ -76,9 +76,6 @@ pub(crate) unsafe fn bytes<'a>(storage: NonNull<u8>, bits: usize) -> &'a [u8] {
 /// The inline short-string representation of a JSON string.
 pub(crate) struct InlineStringRepr;
 impl InlineValue for InlineStringRepr {
-    fn value_type(&self) -> ValueType {
-        ValueType::String
-    }
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
         Some(string_cmp(a, b))
     }

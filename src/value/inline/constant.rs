@@ -1,60 +1,92 @@
-//! The inline constant representations: `null` and the two booleans.
+//! The inline constant representation: `null` and the two booleans.
 //!
-//! Each is a single fixed bit pattern (`super::NULL` / `FALSE` / `TRUE`) with no
-//! payload to decode. Cloning is a bit-copy and there is nothing to drop, so both
-//! representations keep the inline defaults for everything except comparison,
-//! debug formatting and destructuring.
+//! The three constants are the string/constant sub-family with the `CONST_FLAG` bit
+//! set (see [`super`]); the [`Constant`] discriminant is packed into the payload
+//! bits. A single [`ConstantRepr`] handles all three, decoding the discriminant from
+//! the value's own bits. Each is a fixed bit pattern with no payload to free, so it
+//! keeps the inline defaults for everything except comparison, debug formatting and
+//! destructuring.
 
 use std::cmp::Ordering;
-use std::fmt::{self, Debug, Formatter};
 
-use super::InlineValue;
+use super::{CONST_FLAG, PAYLOAD_SHIFT, STR_FAMILY};
 use crate::value::{BoolMut, Destructured, DestructuredMut, DestructuredRef, IValue, ValueType};
 
-pub(crate) struct NullRepr;
-impl InlineValue for NullRepr {
-    fn value_type(&self) -> ValueType {
-        ValueType::Null
-    }
-    // clone/drop/hash/eq use the defaults (bit-copy / nothing / pointer word /
-    // `raw_eq`), all correct for the single `null` value.
-    unsafe fn partial_cmp(&self, _a: &IValue, _b: &IValue) -> Option<Ordering> {
-        Some(Ordering::Equal)
-    }
-    unsafe fn debug(&self, _v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str("null")
-    }
-    fn destructure(&self, _v: IValue) -> Destructured {
-        Destructured::Null
-    }
-    unsafe fn destructure_ref<'a>(&self, _v: &'a IValue) -> DestructuredRef<'a> {
-        DestructuredRef::Null
-    }
-    unsafe fn destructure_mut<'a>(&self, _v: &'a mut IValue) -> DestructuredMut<'a> {
-        DestructuredMut::Null
+/// The three inline constants, numbered from zero. The discriminant is stored in the
+/// payload bits and also gives the constants their order (`null` < `false` < `true`;
+/// only the same-type comparisons — two `null`s or two `bool`s — are ever observed).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(usize)]
+pub(crate) enum Constant {
+    Null = 0,
+    False = 1,
+    True = 2,
+}
+
+/// The inline bits for a constant.
+const fn encode(c: Constant) -> usize {
+    STR_FAMILY | CONST_FLAG | ((c as usize) << PAYLOAD_SHIFT)
+}
+
+/// The constant an inline constant value holds.
+fn decode(bits: usize) -> Constant {
+    match (bits >> PAYLOAD_SHIFT) & 0b11 {
+        0 => Constant::Null,
+        1 => Constant::False,
+        2 => Constant::True,
+        _ => unreachable!("only the three constants are ever encoded"),
     }
 }
 
-pub(crate) struct BoolRepr;
-impl InlineValue for BoolRepr {
-    fn value_type(&self) -> ValueType {
-        ValueType::Bool
+// The whole inline value for each constant (the `Inline` tag is 0), re-exported by
+// `super` so `IValue` can build and recognise them.
+pub(crate) const NULL: usize = encode(Constant::Null);
+pub(crate) const FALSE: usize = encode(Constant::False);
+pub(crate) const TRUE: usize = encode(Constant::True);
+
+/// The JSON type of a constant: `null`, or a `bool` for either boolean.
+pub(crate) fn value_type(bits: usize) -> ValueType {
+    match decode(bits) {
+        Constant::Null => ValueType::Null,
+        Constant::False | Constant::True => ValueType::Bool,
     }
+}
+
+/// The inline representation of the `null`/`false`/`true` constants.
+pub(crate) struct ConstantRepr;
+impl super::InlineValue for ConstantRepr {
+    // clone/drop/hash/eq use the inline defaults (bit-copy / nothing / pointer word /
+    // `raw_eq`), all correct for the fixed constant bit patterns.
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
-        a.is_true().partial_cmp(&b.is_true())
+        // The caller guarantees `a` and `b` share a type, so this only orders two
+        // `null`s (equal) or two `bool`s; the discriminant order gives both.
+        Some(decode(a.usize_()).cmp(&decode(b.usize_())))
     }
-    unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        Debug::fmt(&v.is_true(), f)
+    unsafe fn debug(&self, v: &IValue, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match decode(v.usize_()) {
+            Constant::Null => "null",
+            Constant::False => "false",
+            Constant::True => "true",
+        })
     }
     fn destructure(&self, v: IValue) -> Destructured {
-        Destructured::Bool(v.is_true())
+        match decode(v.usize_()) {
+            Constant::Null => Destructured::Null,
+            Constant::False => Destructured::Bool(false),
+            Constant::True => Destructured::Bool(true),
+        }
     }
     unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
-        DestructuredRef::Bool(v.is_true())
+        match decode(v.usize_()) {
+            Constant::Null => DestructuredRef::Null,
+            Constant::False => DestructuredRef::Bool(false),
+            Constant::True => DestructuredRef::Bool(true),
+        }
     }
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
-        DestructuredMut::Bool(BoolMut(v))
+        match decode(v.usize_()) {
+            Constant::Null => DestructuredMut::Null,
+            Constant::False | Constant::True => DestructuredMut::Bool(BoolMut(v)),
+        }
     }
-    // `to_bool` is not a `ValueRepr`/`InlineValue` operation: `IValue::to_bool`
-    // decodes the two constant bit patterns directly.
 }
