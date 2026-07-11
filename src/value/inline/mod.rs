@@ -32,9 +32,9 @@ pub(crate) use number::{InlineNumber, InlineNumberError, NumberShape};
 // (`encode_int`/`encode_f64`/`from_str`) are how `IValue` builds inline numbers, and
 // whose `NumberRepr` impl decodes them.
 #[cfg(not(feature = "arbitrary_precision"))]
-pub(crate) use number_binary::InlineNumberRepr;
+pub(crate) use number_binary::BinaryNumberRepr as InlineNumberRepr;
 #[cfg(feature = "arbitrary_precision")]
-pub(crate) use number_decimal::InlineNumberRepr;
+pub(crate) use number_decimal::DecimalNumberRepr as InlineNumberRepr;
 
 use std::cmp::Ordering;
 use std::fmt::{self, Formatter};

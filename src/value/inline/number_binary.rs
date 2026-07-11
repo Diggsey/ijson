@@ -172,9 +172,9 @@ fn has_decimal_point(bits: usize) -> bool {
 }
 
 /// The base-2 inline representation of a JSON number.
-pub(crate) struct InlineNumberRepr;
+pub(crate) struct BinaryNumberRepr;
 
-impl InlineNumber for InlineNumberRepr {
+impl InlineNumber for BinaryNumberRepr {
     /// Only exponent 0 is available to integers — positive inline exponents are
     /// reserved for floats — so a value too large for the mantissa does not fit
     /// inline and goes to the heap instead.
@@ -221,7 +221,7 @@ fn num_val(bits: usize) -> NumVal {
     }
 }
 
-impl NumberRepr for InlineNumberRepr {
+impl NumberRepr for BinaryNumberRepr {
     unsafe fn num_val(&self, v: &IValue) -> NumVal {
         num_val(v.usize_())
     }
@@ -238,7 +238,7 @@ impl NumberRepr for InlineNumberRepr {
     // to_i64/to_u64 use the `NumberRepr` defaults (derived from `num_val`).
 }
 
-impl InlineValue for InlineNumberRepr {
+impl InlineValue for BinaryNumberRepr {
     fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::Number
     }
@@ -287,11 +287,11 @@ mod tests {
 
         // Integer zero (and 0.0) must never be the all-zero niche pattern.
         assert_eq!(
-            InlineNumberRepr::encode_int(0),
+            BinaryNumberRepr::encode_int(0),
             Some(encode(0, INT_EXP0_CODE))
         );
-        assert_ne!(InlineNumberRepr::encode_int(0), Some(0));
-        assert_ne!(InlineNumberRepr::encode_f64(0.0), Some(0));
+        assert_ne!(BinaryNumberRepr::encode_int(0), Some(0));
+        assert_ne!(BinaryNumberRepr::encode_f64(0.0), Some(0));
     }
 
     #[test]
@@ -312,7 +312,7 @@ mod tests {
             9.223372036854776e18,
             f64::MIN_POSITIVE,
         ] {
-            if let Some(bits) = InlineNumberRepr::encode_f64(x) {
+            if let Some(bits) = BinaryNumberRepr::encode_f64(x) {
                 assert_eq!(to_f64_lossy(bits), x, "{:e} misencoded inline", x);
             }
         }

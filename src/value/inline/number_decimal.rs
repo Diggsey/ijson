@@ -210,7 +210,7 @@ fn has_decimal_point(bits: usize) -> bool {
 }
 
 /// Encodes an exact decimal `mantissa * 10^exp` (written with a decimal point)
-/// inline, or `None` if it does not fit. Unlike [`InlineNumberRepr::encode_f64`],
+/// inline, or `None` if it does not fit. Unlike [`DecimalNumberRepr::encode_f64`],
 /// the value need not be an exact `f64` — this is how `"0.1"` is stored as the
 /// exact `1 * 10^-1`. The result is canonical: bit-for-bit identical to
 /// `encode_f64` for a value that is an exact `f64`, so the two never disagree.
@@ -288,9 +288,9 @@ fn parse_decimal(s: &str) -> Option<(i128, i32)> {
 }
 
 /// The base-10 inline representation of a JSON number.
-pub(crate) struct InlineNumberRepr;
+pub(crate) struct DecimalNumberRepr;
 
-impl InlineNumber for InlineNumberRepr {
+impl InlineNumber for DecimalNumberRepr {
     /// Only exponent 0 is available to integers — positive inline exponents are
     /// reserved for floats — so a value too large for the mantissa does not fit
     /// inline and goes to the heap instead.
@@ -345,7 +345,7 @@ fn num_val(bits: usize) -> NumVal {
     NumVal::from_decimal(mantissa, exp)
 }
 
-impl NumberRepr for InlineNumberRepr {
+impl NumberRepr for DecimalNumberRepr {
     unsafe fn num_val(&self, v: &IValue) -> NumVal {
         num_val(v.usize_())
     }
@@ -362,7 +362,7 @@ impl NumberRepr for InlineNumberRepr {
     // to_i64/to_u64 use the `NumberRepr` defaults (derived from `num_val`).
 }
 
-impl InlineValue for InlineNumberRepr {
+impl InlineValue for DecimalNumberRepr {
     fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::Number
     }
@@ -411,11 +411,11 @@ mod tests {
 
         // Integer zero (and 0.0) must never be the all-zero niche pattern.
         assert_eq!(
-            InlineNumberRepr::encode_int(0),
+            DecimalNumberRepr::encode_int(0),
             Some(encode(0, INT_EXP0_CODE))
         );
-        assert_ne!(InlineNumberRepr::encode_int(0), Some(0));
-        assert_ne!(InlineNumberRepr::encode_f64(0.0), Some(0));
+        assert_ne!(DecimalNumberRepr::encode_int(0), Some(0));
+        assert_ne!(DecimalNumberRepr::encode_f64(0.0), Some(0));
     }
 
     #[test]
@@ -436,7 +436,7 @@ mod tests {
             9.223372036854776e18,
             f64::MIN_POSITIVE,
         ] {
-            if let Some(bits) = InlineNumberRepr::encode_f64(x) {
+            if let Some(bits) = DecimalNumberRepr::encode_f64(x) {
                 assert_eq!(to_f64_lossy(bits), x, "{:e} misencoded inline", x);
             }
         }
