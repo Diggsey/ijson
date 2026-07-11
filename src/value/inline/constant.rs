@@ -23,33 +23,36 @@ pub(crate) enum Constant {
     True = 2,
 }
 
-/// The inline bits for a constant.
-const fn encode(c: Constant) -> usize {
-    STR_FAMILY | CONST_FLAG | ((c as usize) << PAYLOAD_SHIFT)
-}
+/// The inline representation of the `null`/`false`/`true` constants.
+pub(crate) struct ConstantRepr;
 
-/// The constant an inline constant value holds.
-fn decode(bits: usize) -> Constant {
-    match (bits >> PAYLOAD_SHIFT) & 0b11 {
-        0 => Constant::Null,
-        1 => Constant::False,
-        2 => Constant::True,
-        _ => unreachable!("only the three constants are ever encoded"),
+impl ConstantRepr {
+    /// The inline bits for a constant.
+    const fn encode(c: Constant) -> usize {
+        STR_FAMILY | CONST_FLAG | ((c as usize) << PAYLOAD_SHIFT)
+    }
+
+    /// The constant an inline constant value holds.
+    fn decode(bits: usize) -> Constant {
+        match (bits >> PAYLOAD_SHIFT) & 0b11 {
+            0 => Constant::Null,
+            1 => Constant::False,
+            2 => Constant::True,
+            _ => unreachable!("only the three constants are ever encoded"),
+        }
     }
 }
 
 // The whole inline value for each constant (the `Inline` tag is 0), re-exported by
 // `super` so `IValue` can build and recognise them.
-pub(crate) const NULL: usize = encode(Constant::Null);
-pub(crate) const FALSE: usize = encode(Constant::False);
-pub(crate) const TRUE: usize = encode(Constant::True);
+pub(crate) const NULL: usize = ConstantRepr::encode(Constant::Null);
+pub(crate) const FALSE: usize = ConstantRepr::encode(Constant::False);
+pub(crate) const TRUE: usize = ConstantRepr::encode(Constant::True);
 
-/// The inline representation of the `null`/`false`/`true` constants.
-pub(crate) struct ConstantRepr;
 impl super::InlineValue for ConstantRepr {
     fn value_type(&self, v: &IValue) -> ValueType {
         // A constant is `null`, or a `bool` for either boolean.
-        match decode(v.usize_()) {
+        match Self::decode(v.usize_()) {
             Constant::Null => ValueType::Null,
             Constant::False | Constant::True => ValueType::Bool,
         }
@@ -59,31 +62,31 @@ impl super::InlineValue for ConstantRepr {
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
         // The caller guarantees `a` and `b` share a type, so this only orders two
         // `null`s (equal) or two `bool`s; the discriminant order gives both.
-        Some(decode(a.usize_()).cmp(&decode(b.usize_())))
+        Some(Self::decode(a.usize_()).cmp(&Self::decode(b.usize_())))
     }
     unsafe fn debug(&self, v: &IValue, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match decode(v.usize_()) {
+        f.write_str(match Self::decode(v.usize_()) {
             Constant::Null => "null",
             Constant::False => "false",
             Constant::True => "true",
         })
     }
     fn destructure(&self, v: IValue) -> Destructured {
-        match decode(v.usize_()) {
+        match Self::decode(v.usize_()) {
             Constant::Null => Destructured::Null,
             Constant::False => Destructured::Bool(false),
             Constant::True => Destructured::Bool(true),
         }
     }
     unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
-        match decode(v.usize_()) {
+        match Self::decode(v.usize_()) {
             Constant::Null => DestructuredRef::Null,
             Constant::False => DestructuredRef::Bool(false),
             Constant::True => DestructuredRef::Bool(true),
         }
     }
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
-        match decode(v.usize_()) {
+        match Self::decode(v.usize_()) {
             Constant::Null => DestructuredMut::Null,
             Constant::False | Constant::True => DestructuredMut::Bool(BoolMut(v)),
         }
