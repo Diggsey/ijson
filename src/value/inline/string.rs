@@ -102,6 +102,6 @@ impl StringRepr for InlineStringRepr {
     /// The inline UTF-8 bytes, borrowed from `v`'s own storage. Safety: `v` must be
     /// an inline string.
     unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> &'a [u8] {
-        bytes(NonNull::from(v).cast(), v.ptr_usize())
+        bytes(NonNull::from(v).cast(), v.usize_())
     }
 }

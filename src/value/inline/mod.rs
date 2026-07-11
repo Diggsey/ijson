@@ -92,7 +92,7 @@ pub(crate) trait InlineValue {
     /// Hash by value. Default: the canonical pointer word (correct for the
     /// constants and inline strings). Inline numbers override to hash by value.
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        state.write_usize(v.ptr_usize());
+        state.write_usize(v.usize_());
     }
     /// Equality within a type. Default: the canonical bits. Numbers override.
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
@@ -116,7 +116,7 @@ impl InlineRepr {
     /// Selects the inline sub-representation for `v` from its family bits.
     #[inline]
     fn inner(v: &IValue) -> &'static dyn InlineValue {
-        match value_type(v.ptr_usize()) {
+        match value_type(v.usize_()) {
             ValueType::Null => &constant::NullRepr,
             ValueType::Bool => &constant::BoolRepr,
             ValueType::Number => &InlineNumberRepr,
@@ -128,11 +128,15 @@ impl InlineRepr {
 }
 
 impl ValueRepr for InlineRepr {
-    // clone/drop use the `ValueRepr` defaults: every inline value is a bit-copy to
-    // clone and has nothing to free.
     fn value_type(&self, v: &IValue) -> ValueType {
         Self::inner(v).value_type()
     }
+    // Every inline value is stored entirely in the pointer word: cloning is a
+    // bit-copy of that word, and there is no heap storage to release on drop.
+    unsafe fn clone(&self, v: &IValue) -> IValue {
+        v.raw_copy()
+    }
+    unsafe fn drop(&self, _v: &mut IValue) {}
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
         Self::inner(v).hash(v, state);
     }

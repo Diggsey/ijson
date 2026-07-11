@@ -10,7 +10,7 @@ use super::{alloc, free, read};
 use crate::number::INumber;
 use crate::value::{
     number_cmp, Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, NumberRepr,
-    TypeTag, ValueRepr, ValueType,
+    ReprTag, ValueRepr, ValueType,
 };
 
 /// The heap `u64` number representation.
@@ -21,7 +21,7 @@ impl U64Repr {
     /// `u64` — so it is the total fallback in construction.
     pub(crate) fn store(value: u64) -> IValue {
         // Safety: `alloc` returns a fresh, aligned, non-null allocation.
-        unsafe { IValue::new_ptr(alloc::<u64>(value), TypeTag::NumberU64) }
+        unsafe { IValue::new_ptr(ReprTag::NumberU64, alloc::<u64>(value)) }
     }
 }
 

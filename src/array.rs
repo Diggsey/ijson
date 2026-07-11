@@ -19,7 +19,7 @@ use std::iter::FromIterator;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 use std::slice::SliceIndex;
 
-use crate::value::array as repr;
+use crate::value::array::ArrayRepr;
 use crate::value::IValue;
 
 /// Iterator over [`IValue`]s returned from [`IArray::into_iter`]
@@ -62,14 +62,14 @@ impl IArray {
     /// Constructs a new empty `IArray`. Does not allocate.
     #[must_use]
     pub fn new() -> Self {
-        IArray(repr::new())
+        IArray(ArrayRepr::empty())
     }
 
     /// Constructs a new `IArray` with the specified capacity. At least that many items
     /// can be added to the array without reallocating.
     #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
-        IArray(repr::with_capacity(cap))
+        IArray(ArrayRepr::with_capacity(cap))
     }
 
     /// Returns the capacity of the array. This is the maximum number of items the array
@@ -77,14 +77,14 @@ impl IArray {
     #[must_use]
     pub fn capacity(&self) -> usize {
         // Safety: `self.0` is always an array.
-        unsafe { repr::capacity(&self.0) }
+        unsafe { ArrayRepr::capacity(&self.0) }
     }
 
     /// Returns the number of items currently stored in the array.
     #[must_use]
     pub fn len(&self) -> usize {
         // Safety: `self.0` is always an array.
-        unsafe { repr::len(&self.0) }
+        unsafe { ArrayRepr::len(&self.0) }
     }
 
     /// Returns `true` if the array is empty.
@@ -97,26 +97,26 @@ impl IArray {
     #[must_use]
     pub fn as_slice(&self) -> &[IValue] {
         // Safety: `self.0` is always an array.
-        unsafe { repr::as_slice(&self.0) }
+        unsafe { ArrayRepr::as_slice(&self.0) }
     }
 
     /// Borrows a mutable slice of [`IValue`]s from the array
     pub fn as_mut_slice(&mut self) -> &mut [IValue] {
         // Safety: `self.0` is always an array.
-        unsafe { repr::as_mut_slice(&mut self.0) }
+        unsafe { ArrayRepr::as_mut_slice(&mut self.0) }
     }
 
     /// Reserves space for at least this many additional items.
     pub fn reserve(&mut self, additional: usize) {
         // Safety: `self.0` is always an array.
-        unsafe { repr::reserve(&mut self.0, additional) }
+        unsafe { ArrayRepr::reserve(&mut self.0, additional) }
     }
 
     /// Truncates the array by removing items until it is no longer than the specified
     /// length. The capacity is unchanged.
     pub fn truncate(&mut self, len: usize) {
         // Safety: `self.0` is always an array.
-        unsafe { repr::truncate(&mut self.0, len) }
+        unsafe { ArrayRepr::truncate(&mut self.0, len) }
     }
 
     /// Removes all items from the array. The capacity is unchanged.
@@ -130,7 +130,7 @@ impl IArray {
     /// a large number of items.
     pub fn insert(&mut self, index: usize, item: impl Into<IValue>) {
         // Safety: `self.0` is always an array.
-        unsafe { repr::insert(&mut self.0, index, item.into()) }
+        unsafe { ArrayRepr::insert(&mut self.0, index, item.into()) }
     }
 
     /// Removes and returns the item at the specified index from the array. Any
@@ -143,7 +143,7 @@ impl IArray {
     /// If the index is outside the array bounds, `None` is returned.
     pub fn remove(&mut self, index: usize) -> Option<IValue> {
         // Safety: `self.0` is always an array.
-        unsafe { repr::remove(&mut self.0, index) }
+        unsafe { ArrayRepr::remove(&mut self.0, index) }
     }
 
     /// Removes and returns the item at the specified index from the array by
@@ -156,27 +156,27 @@ impl IArray {
     /// If the index is outside the array bounds, `None` is returned.
     pub fn swap_remove(&mut self, index: usize) -> Option<IValue> {
         // Safety: `self.0` is always an array.
-        unsafe { repr::swap_remove(&mut self.0, index) }
+        unsafe { ArrayRepr::swap_remove(&mut self.0, index) }
     }
 
     /// Pushes a new item onto the back of the array.
     pub fn push(&mut self, item: impl Into<IValue>) {
         // Safety: `self.0` is always an array.
-        unsafe { repr::push(&mut self.0, item.into()) }
+        unsafe { ArrayRepr::push(&mut self.0, item.into()) }
     }
 
     /// Pops the last item from the array and returns it. If the array is
     /// empty, `None` is returned.
     pub fn pop(&mut self) -> Option<IValue> {
         // Safety: `self.0` is always an array.
-        unsafe { repr::pop(&mut self.0) }
+        unsafe { ArrayRepr::pop(&mut self.0) }
     }
 
     /// Shrinks the memory allocation used by the array such that its
     /// capacity becomes equal to its length.
     pub fn shrink_to_fit(&mut self) {
         // Safety: `self.0` is always an array.
-        unsafe { repr::shrink_to_fit(&mut self.0) }
+        unsafe { ArrayRepr::shrink_to_fit(&mut self.0) }
     }
 }
 
@@ -220,8 +220,9 @@ impl BorrowMut<[IValue]> for IArray {
 
 impl Hash for IArray {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // Safety: `self.0` is always an array.
-        unsafe { repr::hash(&self.0, state) }
+        // Delegates through `IValue`'s own `Hash`, which dispatches to the array
+        // representation — the hashing logic lives there, in one place.
+        self.0.hash(state);
     }
 }
 
@@ -251,16 +252,18 @@ impl AsRef<[IValue]> for IArray {
 
 impl PartialEq for IArray {
     fn eq(&self, other: &Self) -> bool {
-        // Safety: `self.0` and `other.0` are always arrays.
-        unsafe { repr::eq(&self.0, &other.0) }
+        // Delegates through `IValue`'s own `PartialEq`, which dispatches to the
+        // array representation.
+        self.0 == other.0
     }
 }
 
 impl Eq for IArray {}
 impl PartialOrd for IArray {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        // Safety: `self.0` and `other.0` are always arrays.
-        unsafe { repr::cmp(&self.0, &other.0) }
+        // Delegates through `IValue`'s own `PartialOrd`, which dispatches to the
+        // array representation.
+        self.0.partial_cmp(&other.0)
     }
 }
 
@@ -336,6 +339,44 @@ mod tests {
         let y = IArray::with_capacity(10);
 
         assert_eq!(x, y);
+    }
+
+    #[mockalloc::test]
+    fn empty_array_is_unallocated() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_of(a: &IArray) -> u64 {
+            let mut h = DefaultHasher::new();
+            a.hash(&mut h);
+            h.finish()
+        }
+
+        // An empty array carries no allocation (just the tag). Every accessor must
+        // read the unallocated form as length/capacity zero, not dereference it.
+        let mut x = IArray::new();
+        assert_eq!(x.len(), 0);
+        assert_eq!(x.capacity(), 0);
+        assert!(x.is_empty());
+        assert_eq!(x.as_slice(), &[] as &[IValue]);
+        assert_eq!(x.as_mut_slice(), &mut [] as &mut [IValue]);
+        assert_eq!(x.pop(), None);
+        assert_eq!(x.remove(0), None);
+        assert_eq!(format!("{x:?}"), "[]");
+        assert_eq!(x.clone().into_iter().count(), 0);
+
+        // Cloning stays empty and equal; an allocated-but-empty array compares and
+        // hashes identically to the unallocated one.
+        let allocated_empty = IArray::with_capacity(8);
+        assert_eq!(x, x.clone());
+        assert_eq!(x, allocated_empty);
+        assert_eq!(hash_of(&x), hash_of(&allocated_empty));
+
+        // Growing allocates; emptying again returns to length zero.
+        x.push(IValue::NULL);
+        assert_eq!(x.len(), 1);
+        assert_eq!(x.pop(), Some(IValue::NULL));
+        assert!(x.is_empty());
     }
 
     #[mockalloc::test]

@@ -26,7 +26,7 @@ use indexmap::IndexMap;
 
 use crate::string::IString;
 use crate::thin::{ThinMut, ThinMutExt, ThinRef};
-use crate::value::object::{self as repr, Header, HeaderMut, HeaderRef, KeyValuePair};
+use crate::value::object::{Header, HeaderMut, HeaderRef, KeyValuePair, ObjectRepr};
 use crate::value::IValue;
 
 // Safety: `header` must have capacity for an extra element.
@@ -284,24 +284,24 @@ impl IObject {
     /// Constructs a new empty `IObject`. Does not allocate.
     #[must_use]
     pub fn new() -> Self {
-        IObject(repr::new())
+        IObject(ObjectRepr::empty())
     }
 
     /// Constructs a new `IObject` with the specified capacity. At least that many entries
     /// can be added to the object without reallocating.
     #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
-        IObject(repr::with_capacity(cap))
+        IObject(ObjectRepr::with_capacity(cap))
     }
 
     fn header(&self) -> ThinRef<'_, Header> {
         // Safety: `self.0` is always an object.
-        unsafe { repr::header(&self.0) }
+        unsafe { ObjectRepr::header(&self.0) }
     }
 
     // Safety: must not be static
     unsafe fn header_mut(&mut self) -> ThinMut<'_, Header> {
-        repr::header_mut(&mut self.0)
+        ObjectRepr::header_mut(&mut self.0)
     }
 
     fn is_static(&self) -> bool {
@@ -311,12 +311,14 @@ impl IObject {
     /// can hold without reallocating.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.header().cap
+        // Safety: `self.0` is always an object.
+        unsafe { ObjectRepr::capacity(&self.0) }
     }
     /// Returns the number of entries currently stored in the object.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.header().len
+        // Safety: `self.0` is always an object.
+        unsafe { ObjectRepr::len(&self.0) }
     }
     /// Returns `true` if the object is empty.
     #[must_use]
@@ -341,9 +343,8 @@ impl IObject {
 
     /// Reserves space for at least this many additional entries.
     pub fn reserve(&mut self, additional: usize) {
-        let hd = self.header();
-        let current_capacity = hd.cap;
-        let desired_capacity = hd.len.checked_add(additional).unwrap();
+        let current_capacity = self.capacity();
+        let desired_capacity = self.len().checked_add(additional).unwrap();
         if current_capacity >= desired_capacity {
             return;
         }
@@ -374,7 +375,8 @@ impl IObject {
     /// Returns an iterator over (&key, &value) pairs in this object.
     #[must_use]
     pub fn iter(&self) -> Iter<'_> {
-        Iter(self.header().split().items.iter())
+        // Safety: `self.0` is always an object.
+        Iter(unsafe { ObjectRepr::items(&self.0) }.iter())
     }
     /// Returns an iterator over mutable references to the values in
     /// this object.
@@ -494,9 +496,12 @@ impl IntoIterator for IObject {
     type IntoIter = IntoIter;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        unsafe {
-            let split_header = self.header_mut().split_mut();
-            split_header.items.reverse();
+        if !self.is_empty() {
+            // Safety: not empty, so the object is allocated.
+            unsafe {
+                let split_header = self.header_mut().split_mut();
+                split_header.items.reverse();
+            }
         }
         IntoIter {
             reversed_object: self,
@@ -506,8 +511,9 @@ impl IntoIterator for IObject {
 
 impl PartialEq for IObject {
     fn eq(&self, other: &Self) -> bool {
-        // Safety: `self.0` and `other.0` are always objects.
-        unsafe { repr::eq(&self.0, &other.0) }
+        // Delegates through `IValue`'s own `PartialEq`, which dispatches to the
+        // object representation.
+        self.0 == other.0
     }
 }
 
@@ -524,8 +530,9 @@ impl PartialOrd for IObject {
 
 impl Hash for IObject {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Safety: `self.0` is always an object.
-        unsafe { repr::hash(&self.0, state) }
+        // Delegates through `IValue`'s own `Hash`, which dispatches to the object
+        // representation.
+        self.0.hash(state);
     }
 }
 
@@ -687,8 +694,9 @@ impl<T: ObjectIndex> ObjectIndex for &T {
 
 impl Debug for IObject {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // Safety: `self.0` is always an object.
-        unsafe { repr::debug(&self.0, f) }
+        // Delegates through `IValue`'s own `Debug`, which dispatches to the object
+        // representation.
+        Debug::fmt(&self.0, f)
     }
 }
 
@@ -816,6 +824,45 @@ mod tests {
         let y = IObject::with_capacity(10);
 
         assert_eq!(x, y);
+    }
+
+    #[mockalloc::test]
+    fn empty_object_is_unallocated() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_of(o: &IObject) -> u64 {
+            let mut h = DefaultHasher::new();
+            o.hash(&mut h);
+            h.finish()
+        }
+
+        // An empty object carries no allocation (just the tag). Every read must
+        // treat the unallocated form as empty, not dereference it — including the
+        // hash-table lookups, which must never probe a zero-capacity table.
+        let mut x = IObject::new();
+        assert_eq!(x.len(), 0);
+        assert_eq!(x.capacity(), 0);
+        assert!(x.is_empty());
+        assert_eq!(x.get("missing"), None);
+        assert_eq!(x.remove("missing"), None);
+        assert!(!x.contains_key("missing"));
+        assert_eq!(x.iter().count(), 0);
+        assert_eq!(format!("{x:?}"), "{}");
+        assert_eq!(x.clone().into_iter().count(), 0);
+
+        // Cloning stays empty and equal; an allocated-but-empty object compares and
+        // hashes identically to the unallocated one.
+        let allocated_empty = IObject::with_capacity(8);
+        assert_eq!(x, x.clone());
+        assert_eq!(x, allocated_empty);
+        assert_eq!(hash_of(&x), hash_of(&allocated_empty));
+
+        // Inserting allocates; removing the last entry returns to length zero.
+        x.insert("k", IValue::NULL);
+        assert_eq!(x.len(), 1);
+        assert_eq!(x.remove("k"), Some(IValue::NULL));
+        assert!(x.is_empty());
     }
 
     #[mockalloc::test]

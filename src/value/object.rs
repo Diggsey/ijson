@@ -4,11 +4,11 @@
 //! length and capacity, followed by the insertion-ordered key/value pairs and a
 //! Robin-Hood hash table indexing them. This module owns that layout and the
 //! low-level machinery for manipulating it (the header, the split
-//! item/table views, the hash probing). The value-facing operations that
-//! [`IValue`] itself needs — clone, drop, hash, equality and formatting — are
-//! exposed as free functions on an `&IValue` known to be an object; they operate
-//! on the representation directly and never refer to the public
-//! [`crate::IObject`] wrapper.
+//! item/table views, the hash probing). Every operation is an associated function
+//! of the [`ObjectRepr`] representation type — the accessors and mutators directly,
+//! the value-facing ones `IValue` needs (clone, drop, hash, equality, formatting)
+//! through its [`ValueRepr`] impl. None refer to the public [`crate::IObject`]
+//! wrapper.
 //!
 //! The public `IObject` type (and its `Entry`/iterator/index API) lives in the
 //! top-level [`crate::object`] module. It is a thin facade that reuses the header
@@ -26,8 +26,7 @@ use crate::string::IString;
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
 use super::{
-    Destructured, DestructuredMut, DestructuredRef, IValue, ObjectRepr, TypeTag, ValueRepr,
-    ValueType,
+    Destructured, DestructuredMut, DestructuredRef, IValue, ReprTag, ValueRepr, ValueType,
 };
 use crate::object::IObject;
 
@@ -45,23 +44,6 @@ pub(crate) struct KeyValuePair {
     pub(crate) value: IValue,
 }
 
-fn hash_capacity(cap: usize) -> usize {
-    cap + cap / 4
-}
-
-fn hash_fn(s: &IString) -> usize {
-    let v: &IValue = s.as_ref();
-    // We know the bottom two bits are always the same
-    let mut p = v.ptr_usize() >> 2;
-    p = p.wrapping_mul(202_529);
-    p = p ^ (p >> 13);
-    p.wrapping_mul(202_529)
-}
-
-fn hash_bucket(s: &IString, hash_cap: usize) -> usize {
-    hash_fn(s) % hash_cap
-}
-
 pub(crate) struct SplitHeader<'a> {
     pub(crate) cap: usize,
     pub(crate) items: &'a [KeyValuePair],
@@ -70,8 +52,8 @@ pub(crate) struct SplitHeader<'a> {
 
 impl SplitHeader<'_> {
     pub(crate) fn find_bucket(&self, key: &IString) -> Result<usize, usize> {
-        let hash_cap = hash_capacity(self.cap);
-        let initial_bucket = hash_bucket(key, hash_cap);
+        let hash_cap = ObjectRepr::hash_capacity(self.cap);
+        let initial_bucket = ObjectRepr::hash_bucket(key, hash_cap);
         unsafe {
             // Linear search from expected bucket
             for i in 0..hash_cap {
@@ -91,7 +73,8 @@ impl SplitHeader<'_> {
 
                 // If the bucket contains a different key, and its probe length is less than
                 // ours, then we know our key is not present or we would have evicted this one.
-                let key_dist = (bucket + hash_cap - hash_bucket(k, hash_cap)) % hash_cap;
+                let key_dist =
+                    (bucket + hash_cap - ObjectRepr::hash_bucket(k, hash_cap)) % hash_cap;
                 if key_dist < i {
                     return Err(bucket);
                 }
@@ -101,9 +84,9 @@ impl SplitHeader<'_> {
     }
     // Safety: index must be in bounds
     pub(crate) unsafe fn find_bucket_from_index(&self, index: usize) -> usize {
-        let hash_cap = hash_capacity(self.cap);
+        let hash_cap = ObjectRepr::hash_capacity(self.cap);
         let key = &self.items.get_unchecked(index).key;
-        let mut bucket = hash_bucket(key, hash_cap);
+        let mut bucket = ObjectRepr::hash_bucket(key, hash_cap);
 
         // We don't bother with any early exit conditions, because
         // we know the item is present.
@@ -133,7 +116,7 @@ impl SplitHeaderMut<'_> {
     //
     // Shifts elements up to fill the empty space if they are not at their ideal location.
     pub(crate) unsafe fn unshift(&mut self, initial_bucket: usize) {
-        let hash_cap = hash_capacity(self.cap);
+        let hash_cap = ObjectRepr::hash_capacity(self.cap);
         let mut prev_bucket = initial_bucket;
         for i in 1..hash_cap {
             let bucket = (initial_bucket + i) % hash_cap;
@@ -146,7 +129,7 @@ impl SplitHeaderMut<'_> {
 
             // If the probe length is zero, we're done
             let k = &self.items.get_unchecked(index).key;
-            if hash_bucket(k, hash_cap) == bucket {
+            if ObjectRepr::hash_bucket(k, hash_cap) == bucket {
                 return;
             }
 
@@ -161,7 +144,7 @@ impl SplitHeaderMut<'_> {
     // Inserts an index into the table, shifting existing elements down until
     // there's an empty slot.
     pub(crate) unsafe fn shift(&mut self, initial_bucket: usize, mut index: usize) {
-        let hash_cap = hash_capacity(self.cap);
+        let hash_cap = ObjectRepr::hash_capacity(self.cap);
         for i in 0..hash_cap {
             // If we hit an empty bucket, we're done
             if index == usize::MAX {
@@ -212,7 +195,10 @@ pub(crate) trait HeaderRef<'a>: ThinRefExt<'a, Header> {
             SplitHeader {
                 cap: self.cap,
                 items: std::slice::from_raw_parts(self.items_ptr(), self.len),
-                table: std::slice::from_raw_parts(self.hashes_ptr(), hash_capacity(self.cap)),
+                table: std::slice::from_raw_parts(
+                    self.hashes_ptr(),
+                    ObjectRepr::hash_capacity(self.cap),
+                ),
             }
         }
     }
@@ -230,7 +216,7 @@ pub(crate) trait HeaderMut<'a>: ThinMutExt<'a, Header> {
     fn split_mut(mut self) -> SplitHeaderMut<'a> {
         // Safety: Header `len` and `cap` must be accurate
         let len = self.len;
-        let hash_cap = hash_capacity(self.cap);
+        let hash_cap = ObjectRepr::hash_capacity(self.cap);
         let item_ptr = self.items_ptr_mut();
         let hash_ptr = self.hashes_ptr_mut();
         unsafe {
@@ -274,166 +260,198 @@ pub(crate) trait HeaderMut<'a>: ThinMutExt<'a, Header> {
 impl<'a, T: ThinRefExt<'a, Header>> HeaderRef<'a> for T {}
 impl<'a, T: ThinMutExt<'a, Header>> HeaderMut<'a> for T {}
 
-static EMPTY_HEADER: Header = Header { len: 0, cap: 0 };
-
-fn layout(cap: usize) -> Result<Layout, LayoutError> {
-    Ok(Layout::new::<Header>()
-        .extend(Layout::array::<KeyValuePair>(cap)?)?
-        .0
-        .extend(Layout::array::<usize>(hash_capacity(cap))?)?
-        .0
-        .pad_to_align())
-}
-
-fn alloc(cap: usize) -> NonNull<Header> {
-    unsafe {
-        let hd = alloc_infallible(layout(cap).unwrap()).cast::<Header>();
-        hd.write(Header { len: 0, cap });
-        let mut hd_mut = ThinMut::new(hd);
-        let hash_ptr = hd_mut.hashes_ptr_mut();
-        for i in 0..hash_capacity(cap) {
-            hash_ptr.add(i).write(usize::MAX);
-        }
-        hd
-    }
-}
-
-fn dealloc(ptr: NonNull<Header>) {
-    unsafe {
-        let layout = layout(ptr.as_ref().cap).unwrap();
-        dealloc_infallible(ptr.cast(), layout);
-    }
-}
-
-// Safety (header helpers): `v` must be an object.
-pub(crate) unsafe fn header(v: &IValue) -> ThinRef<'_, Header> {
-    ThinRef::new(v.ptr().cast())
-}
-
-// Safety: `v` must be an object and must not be the shared static empty header.
-pub(crate) unsafe fn header_mut(v: &mut IValue) -> ThinMut<'_, Header> {
-    ThinMut::new(v.ptr().cast())
-}
-
-// Safety: `v` must be an object. A static (capacity-0) object shares the
-// immutable `EMPTY_HEADER` and so must never be mutated in place.
-pub(crate) unsafe fn is_static(v: &IValue) -> bool {
-    header(v).cap == 0
-}
-
-/// Constructs a new empty object. Does not allocate.
-pub(crate) fn new() -> IValue {
-    // Safety: `EMPTY_HEADER` is a valid, aligned static header.
-    unsafe { IValue::new_ref(&EMPTY_HEADER, TypeTag::Object) }
-}
-
-/// Constructs a new object with the given capacity.
-pub(crate) fn with_capacity(cap: usize) -> IValue {
-    if cap == 0 {
-        new()
-    } else {
-        // Safety: `alloc` returns a freshly allocated, aligned header.
-        unsafe { IValue::new_ptr(alloc(cap).cast(), TypeTag::Object) }
-    }
-}
-
-pub(crate) unsafe fn clone(v: &IValue) -> IValue {
-    let split = header(v).split();
-    let mut res = with_capacity(split.items.len());
-
-    if !split.items.is_empty() {
-        // Safety: `res` has capacity for every entry, so it is not static.
-        let mut hd = header_mut(&mut res);
-        for kvp in split.items {
-            // Keys in the source are unique, so every lookup is a fresh bucket.
-            if let Err(bucket) = hd.split().find_bucket(&kvp.key) {
-                let index = hd.push(kvp.key.clone(), kvp.value.clone());
-                hd.reborrow().split_mut().shift(bucket, index);
-            }
-        }
-    }
-    res
-}
-
-pub(crate) unsafe fn drop(v: &mut IValue) {
-    if is_static(v) {
-        return;
-    }
-    header_mut(v).clear();
-    dealloc(v.ptr().cast());
-    v.set_ref(&EMPTY_HEADER);
-}
-
-pub(crate) unsafe fn hash(v: &IValue, state: &mut dyn Hasher) {
-    let split = header(v).split();
-    state.write_usize(split.items.len());
-
-    // Order-independent: sum each entry's hash (computed with a local hasher), so
-    // objects that differ only in insertion order still hash equal. Each entry
-    // recurses through the standard `Hash` impls of its key and value; the value's
-    // `IValue: Hash` in turn delegates down to its representation.
-    let mut total_hash = 0_u64;
-    for kvp in split.items {
-        let mut h = DefaultHasher::new();
-        (&kvp.key, &kvp.value).hash(&mut h);
-        total_hash = total_hash.wrapping_add(h.finish());
-    }
-    state.write_u64(total_hash);
-}
-
-pub(crate) unsafe fn eq(a: &IValue, b: &IValue) -> bool {
-    if a.raw_eq(b) {
-        return true;
-    }
-    let sa = header(a).split();
-    let sb = header(b).split();
-    if sa.items.len() != sb.items.len() {
-        return false;
-    }
-    for kvp in sa.items {
-        // `sa` is non-empty here, so `sb` is too (equal lengths): `find_bucket`
-        // is never invoked on a capacity-0 table.
-        match sb.find_bucket(&kvp.key) {
-            Ok(bucket) => {
-                let index = *sb.table.get_unchecked(bucket);
-                if sb.items.get_unchecked(index).value != kvp.value {
-                    return false;
-                }
-            }
-            Err(_) => return false,
-        }
-    }
-    true
-}
-
-pub(crate) unsafe fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-    let split = header(v).split();
-    f.debug_map()
-        .entries(split.items.iter().map(|kvp| (&kvp.key, &kvp.value)))
-        .finish()
-}
-
 /// The object representation.
-pub(crate) struct ObjectStore;
-impl ValueRepr for ObjectStore {
+pub(crate) struct ObjectRepr;
+
+impl ObjectRepr {
+    fn hash_capacity(cap: usize) -> usize {
+        cap + cap / 4
+    }
+
+    fn hash_fn(s: &IString) -> usize {
+        let v: &IValue = s.as_ref();
+        // `usize_()` has masked the tag off, so the low 3 bits are always zero;
+        // shift them out before mixing.
+        let mut p = v.usize_() >> 3;
+        p = p.wrapping_mul(202_529);
+        p = p ^ (p >> 13);
+        p.wrapping_mul(202_529)
+    }
+
+    fn hash_bucket(s: &IString, hash_cap: usize) -> usize {
+        Self::hash_fn(s) % hash_cap
+    }
+
+    fn layout(cap: usize) -> Result<Layout, LayoutError> {
+        Ok(Layout::new::<Header>()
+            .extend(Layout::array::<KeyValuePair>(cap)?)?
+            .0
+            .extend(Layout::array::<usize>(Self::hash_capacity(cap))?)?
+            .0
+            .pad_to_align())
+    }
+
+    fn alloc(cap: usize) -> NonNull<Header> {
+        unsafe {
+            let hd = alloc_infallible(Self::layout(cap).unwrap()).cast::<Header>();
+            hd.write(Header { len: 0, cap });
+            let mut hd_mut = ThinMut::new(hd);
+            let hash_ptr = hd_mut.hashes_ptr_mut();
+            for i in 0..Self::hash_capacity(cap) {
+                hash_ptr.add(i).write(usize::MAX);
+            }
+            hd
+        }
+    }
+
+    fn dealloc(ptr: NonNull<Header>) {
+        unsafe {
+            let layout = Self::layout(ptr.as_ref().cap).unwrap();
+            dealloc_infallible(ptr.cast(), layout);
+        }
+    }
+
+    // Safety (header accessors): `v` must be an *allocated* object — never the
+    // empty, unallocated form (`v.usize_() == 0`), whose pointer bits are zero. The
+    // read accessors guard that case; mutators grow the object first.
+    pub(crate) unsafe fn header(v: &IValue) -> ThinRef<'_, Header> {
+        ThinRef::new(v.ptr().cast())
+    }
+
+    // Safety: `v` must be an allocated object (see `header`).
+    pub(crate) unsafe fn header_mut(v: &mut IValue) -> ThinMut<'_, Header> {
+        ThinMut::new(v.ptr().cast())
+    }
+
+    // Safety: `v` must be an object.
+    pub(crate) unsafe fn len(v: &IValue) -> usize {
+        if v.usize_() == 0 {
+            0
+        } else {
+            Self::header(v).len
+        }
+    }
+
+    // Safety: `v` must be an object.
+    pub(crate) unsafe fn capacity(v: &IValue) -> usize {
+        if v.usize_() == 0 {
+            0
+        } else {
+            Self::header(v).cap
+        }
+    }
+
+    // The insertion-ordered entries; empty for the unallocated object.
+    // Safety: `v` must be an object.
+    pub(crate) unsafe fn items(v: &IValue) -> &[KeyValuePair] {
+        if v.usize_() == 0 {
+            &[]
+        } else {
+            Self::header(v).split().items
+        }
+    }
+
+    /// Constructs a new empty object. Does not allocate: an empty object is just the
+    /// `Object` tag with no pointer.
+    pub(crate) fn empty() -> IValue {
+        // Safety: `Object` is a non-inline tag, so the tagged word is non-null.
+        unsafe { IValue::new_usize(ReprTag::Object, 0) }
+    }
+
+    /// Constructs a new object with the given capacity.
+    pub(crate) fn with_capacity(cap: usize) -> IValue {
+        if cap == 0 {
+            Self::empty()
+        } else {
+            // Safety: `alloc` returns a freshly allocated, aligned header.
+            unsafe { IValue::new_ptr(ReprTag::Object, Self::alloc(cap).cast()) }
+        }
+    }
+}
+
+impl ValueRepr for ObjectRepr {
     fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::Object
     }
     unsafe fn clone(&self, v: &IValue) -> IValue {
-        clone(v)
+        if v.usize_() == 0 {
+            return Self::empty();
+        }
+        let split = Self::header(v).split();
+        let mut res = Self::with_capacity(split.items.len());
+
+        if !split.items.is_empty() {
+            // Safety: `res` has capacity for every entry, so it is allocated.
+            let mut hd = Self::header_mut(&mut res);
+            for kvp in split.items {
+                // Keys in the source are unique, so every lookup is a fresh bucket.
+                if let Err(bucket) = hd.split().find_bucket(&kvp.key) {
+                    let index = hd.push(kvp.key.clone(), kvp.value.clone());
+                    hd.reborrow().split_mut().shift(bucket, index);
+                }
+            }
+        }
+        res
     }
     unsafe fn drop(&self, v: &mut IValue) {
-        self::drop(v);
+        if v.usize_() == 0 {
+            return;
+        }
+        Self::header_mut(v).clear();
+        Self::dealloc(v.ptr().cast());
+        v.set_usize(0);
     }
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        hash(v, state);
+        let entries = Self::items(v);
+        state.write_usize(entries.len());
+
+        // Order-independent: sum each entry's hash (computed with a local hasher), so
+        // objects that differ only in insertion order still hash equal. Each entry
+        // recurses through the standard `Hash` impls of its key and value; the value's
+        // `IValue: Hash` in turn delegates down to its representation.
+        let mut total_hash = 0_u64;
+        for kvp in entries {
+            let mut h = DefaultHasher::new();
+            (&kvp.key, &kvp.value).hash(&mut h);
+            total_hash = total_hash.wrapping_add(h.finish());
+        }
+        state.write_u64(total_hash);
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
-        eq(a, b)
+        if a.raw_eq(b) {
+            return true;
+        }
+        let len_a = Self::len(a);
+        if len_a != Self::len(b) {
+            return false;
+        }
+        if len_a == 0 {
+            // Two empty objects are equal, and neither has a table to probe below.
+            return true;
+        }
+        // Equal, non-zero lengths: both objects are allocated, so `header` is safe.
+        let sa = Self::header(a).split();
+        let sb = Self::header(b).split();
+        for kvp in sa.items {
+            // `sa` is non-empty here, so `sb` is too (equal lengths): `find_bucket`
+            // is never invoked on a capacity-0 table.
+            match sb.find_bucket(&kvp.key) {
+                Ok(bucket) => {
+                    let index = *sb.table.get_unchecked(bucket);
+                    if sb.items.get_unchecked(index).value != kvp.value {
+                        return false;
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+        true
     }
     // partial_cmp uses the default (`None`) — objects are unordered.
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        debug(v, f)
+        f.debug_map()
+            .entries(Self::items(v).iter().map(|kvp| (&kvp.key, &kvp.value)))
+            .finish()
     }
     fn destructure(&self, v: IValue) -> Destructured {
         Destructured::Object(IObject(v))
@@ -444,11 +462,7 @@ impl ValueRepr for ObjectStore {
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
         DestructuredMut::Object(v.as_object_unchecked_mut())
     }
-}
-
-impl ObjectRepr for ObjectStore {
-    /// The number of entries. Safety: `v` must be an object.
-    unsafe fn len(&self, v: &IValue) -> usize {
-        v.as_object_unchecked().len()
+    unsafe fn len(&self, v: &IValue) -> Option<usize> {
+        Some(Self::len(v))
     }
 }

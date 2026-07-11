@@ -58,7 +58,7 @@ impl IString {
     /// Returns the length (in bytes) of this string.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.0.string_len()
+        self.as_str().len()
     }
 
     /// Returns `true` if this is the empty string "".
@@ -70,13 +70,14 @@ impl IString {
     /// Obtains a `&str` from this `IString`. This is a cheap operation.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        self.0.string_as_str()
+        // Safety: an `IString` always wraps a string, so `string_repr()` matches it.
+        unsafe { self.0.string_repr().as_str(&self.0) }
     }
 
     /// Obtains a byte slice from this `IString`. This is a cheap operation.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        self.0.string_bytes()
+        self.as_str().as_bytes()
     }
 
     /// Returns the empty string.

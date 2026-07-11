@@ -31,7 +31,7 @@ use indexmap::IndexMap;
 // A JSON *number* or *string* spans two representations, so `new_*` construction
 // picks one as early as possible, and comparing two of them — the one place that
 // has to resolve the *other* operand's representation — reaches it through the same
-// `repr()` dispatch (`IValue::num_val`/`string_as_str`), not a second decoder. The
+// `repr()` dispatch (`IValue::num_val`/`string_repr`), not a second decoder. The
 // public wrapper types (`IArray`, `INumber`, `IObject`, `IString`) live in the
 // top-level modules and delegate down through `IValue`.
 pub(crate) mod array;
@@ -208,14 +208,14 @@ impl Deref for BoolMut<'_> {
 const ALIGNMENT: usize = 8;
 
 // All heap allocations pointed to by an `IValue` are aligned to `ALIGNMENT`, so
-// the low 3 bits of the pointer are free to hold the `TypeTag`. Every non-inline
+// the low 3 bits of the pointer are free to hold the `ReprTag`. Every non-inline
 // tag therefore corresponds to a pointer; the `Inline` tag (0) instead stores
 // the whole value inline. The inline family's bit layout, flags, and constant
 // bit patterns live in the `inline` module.
 
 #[repr(usize)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum TypeTag {
+enum ReprTag {
     /// A value stored entirely inline (null, bool, small number, short string).
     Inline = 0,
     /// Pointer to a heap `i64` payload.
@@ -235,7 +235,7 @@ enum TypeTag {
     Object = 7,
 }
 
-impl From<usize> for TypeTag {
+impl From<usize> for ReprTag {
     fn from(other: usize) -> Self {
         // Safety: `% ALIGNMENT` (== 8) can only return valid variants 0..=7
         unsafe { mem::transmute(other % ALIGNMENT) }
@@ -266,48 +266,66 @@ unsafe impl Send for IValue {}
 unsafe impl Sync for IValue {}
 
 impl IValue {
-    // Safety: `payload` must leave the low 3 tag bits clear (so it does not
-    // corrupt the tag when ORed in) and, together with the tag, must not be
-    // all-zero (reserved as the niche). Used to build inline values; `tag` is
-    // normally `Inline`, with the payload carrying the sub-family and data.
-    const unsafe fn new_inline(tag: TypeTag, payload: usize) -> Self {
+    // Builds a value whose entire word is `tag | payload`, with no heap pointer.
+    // Two things carry their whole value in the word: an inline value (`tag` is
+    // `Inline`, `payload` holds the sub-family and data) and an empty collection
+    // (`tag` is `Array`/`Object`, `payload` is `0` — the non-zero tag alone keeps
+    // the word non-null, so it needs neither an allocation nor a shared header).
+    //
+    // Safety: `payload` must leave the low 3 tag bits clear (so it does not corrupt
+    // the tag when ORed in) and, together with the tag, must not be all-zero
+    // (reserved as the niche).
+    const unsafe fn new_usize(tag: ReprTag, payload: usize) -> Self {
         Self {
             ptr: NonNull::new_unchecked((tag as usize | payload) as *mut u8),
         }
     }
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
-    unsafe fn new_ptr(p: NonNull<u8>, tag: TypeTag) -> Self {
+    unsafe fn new_ptr(tag: ReprTag, p: NonNull<u8>) -> Self {
         Self {
             ptr: p.add(tag as usize),
         }
     }
-    // Safety: Reference must be aligned to at least ALIGNMENT
-    unsafe fn new_ref<T>(r: &T, tag: TypeTag) -> Self {
-        Self::new_ptr(NonNull::from_ref(r).cast(), tag)
-    }
 
     /// JSON `null`.
-    pub const NULL: Self = unsafe { Self::new_inline(TypeTag::Inline, inline::NULL) };
+    pub const NULL: Self = unsafe { Self::new_usize(ReprTag::Inline, inline::NULL) };
     /// JSON `false`.
-    pub const FALSE: Self = unsafe { Self::new_inline(TypeTag::Inline, inline::FALSE) };
+    pub const FALSE: Self = unsafe { Self::new_usize(ReprTag::Inline, inline::FALSE) };
     /// JSON `true`.
-    pub const TRUE: Self = unsafe { Self::new_inline(TypeTag::Inline, inline::TRUE) };
+    pub const TRUE: Self = unsafe { Self::new_usize(ReprTag::Inline, inline::TRUE) };
 
-    fn ptr_usize(&self) -> usize {
-        self.ptr.as_ptr() as usize
+    // The value word with the tag bits masked off: an inline value's data (whose
+    // tag is `Inline == 0`, so nothing is lost) or a heap value's pointer as an
+    // integer. A collection with no allocation — the empty form, `new_usize(tag, 0)`
+    // — reads back as `0` here, so `usize_() == 0` tests for it; the non-zero tag
+    // alone keeps the actual word non-null.
+    fn usize_(&self) -> usize {
+        self.ptr.as_ptr() as usize & !(ALIGNMENT - 1)
     }
-    // Safety: Must only be called on non-inline types
+    // The heap allocation this value points at, with the tag stripped.
+    //
+    // Safety: must be a heap value with a live allocation — not an inline value, and
+    // not the empty (unallocated) form of a collection, whose pointer bits are zero
+    // (`self.usize_() == 0`); either would make the returned pointer null.
     unsafe fn ptr(&self) -> NonNull<u8> {
-        self.ptr.offset(-((self.ptr_usize() % ALIGNMENT) as isize))
+        self.ptr.offset(-(self.type_tag() as usize as isize))
     }
+    // Sets the pointer, keeping the current tag.
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
     unsafe fn set_ptr(&mut self, ptr: NonNull<u8>) {
         let tag = self.type_tag();
         self.ptr = ptr.add(tag as usize);
     }
-    // Safety: Reference must be aligned to at least ALIGNMENT
-    unsafe fn set_ref<T>(&mut self, r: &T) {
-        self.set_ptr(NonNull::from_ref(r).cast());
+    // Sets the inline payload word (the tag-masked bits `usize_` reads back), keeping
+    // the current tag — the counterpart to `set_ptr` for a value stored in the word
+    // rather than behind a pointer. Used to reset a collection to its empty form,
+    // `v.set_usize(0)`, after its allocation is freed, without running `drop`.
+    //
+    // Safety: `word` must leave the low tag bits clear, the resulting word (`word` |
+    // tag) must be non-zero (the all-zero word is the reserved niche), and any
+    // storage the value previously owned must already have been released.
+    unsafe fn set_usize(&mut self, word: usize) {
+        self.ptr = NonNull::new_unchecked((word | self.type_tag() as usize) as *mut u8);
     }
     unsafe fn raw_copy(&self) -> Self {
         Self { ptr: self.ptr }
@@ -318,8 +336,9 @@ impl IValue {
     pub(crate) fn raw_hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.ptr.hash(state);
     }
-    fn type_tag(&self) -> TypeTag {
-        self.ptr_usize().into()
+    fn type_tag(&self) -> ReprTag {
+        // The raw word — not `usize_()`, which has masked the tag off.
+        (self.ptr.as_ptr() as usize).into()
     }
 
     /// Whether this value is stored inline (tag `Inline`) rather than behind a
@@ -328,7 +347,7 @@ impl IValue {
     /// through `repr()`.
     #[cfg(test)]
     pub(crate) fn is_inline(&self) -> bool {
-        self.type_tag() == TypeTag::Inline
+        self.type_tag() == ReprTag::Inline
     }
 
     /// Returns the type of this value.
@@ -395,12 +414,8 @@ impl IValue {
     /// Returns `None` for other types.
     #[must_use]
     pub fn len(&self) -> Option<usize> {
-        // Safety: each arm's `*_repr()` matches the type just checked.
-        match self.type_() {
-            ValueType::Array => Some(unsafe { self.array_repr().len(self) }),
-            ValueType::Object => Some(unsafe { self.object_repr().len(self) }),
-            _ => None,
-        }
+        // Safety: `repr()` selects this value's own representation.
+        unsafe { self.repr().len(self) }
     }
 
     /// Returns whether this value is empty if it is an array or object.
@@ -414,27 +429,27 @@ impl IValue {
     /// Returns `true` if this is the `null` value.
     #[must_use]
     pub fn is_null(&self) -> bool {
-        self.ptr_usize() == inline::NULL
+        self.usize_() == inline::NULL
     }
 
     // # Bool methods
     /// Returns `true` if this is a boolean.
     #[must_use]
     pub fn is_bool(&self) -> bool {
-        let bits = self.ptr_usize();
+        let bits = self.usize_();
         bits == inline::TRUE || bits == inline::FALSE
     }
 
     /// Returns `true` if this is the `true` value.
     #[must_use]
     pub fn is_true(&self) -> bool {
-        self.ptr_usize() == inline::TRUE
+        self.usize_() == inline::TRUE
     }
 
     /// Returns `true` if this is the `false` value.
     #[must_use]
     pub fn is_false(&self) -> bool {
-        self.ptr_usize() == inline::FALSE
+        self.usize_() == inline::FALSE
     }
 
     /// Converts this value to a `bool`.
@@ -630,7 +645,7 @@ impl IValue {
     /// Returns `true` if this is an array.
     #[must_use]
     pub fn is_array(&self) -> bool {
-        self.type_tag() == TypeTag::Array
+        self.type_tag() == ReprTag::Array
     }
 
     // Safety: Must be an array
@@ -683,7 +698,7 @@ impl IValue {
     /// Returns `true` if this is an object.
     #[must_use]
     pub fn is_object(&self) -> bool {
-        self.type_tag() == TypeTag::Object
+        self.type_tag() == ReprTag::Object
     }
 
     // Safety: Must be an object
@@ -752,13 +767,15 @@ pub(crate) fn string_cmp(a: &IValue, b: &IValue) -> Ordering {
     if a.raw_eq(b) {
         Ordering::Equal
     } else {
-        a.string_as_str().cmp(b.string_as_str())
+        // Safety: both are strings, so `string_repr()` matches each.
+        unsafe { a.string_repr().as_str(a).cmp(b.string_repr().as_str(b)) }
     }
 }
 
 /// Formats a string of either representation.
 pub(crate) fn string_debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-    Debug::fmt(v.string_as_str(), f)
+    // Safety: `v` is a string, so `string_repr()` matches it.
+    Debug::fmt(unsafe { v.string_repr().as_str(v) }, f)
 }
 
 // Number-type dispatch. A JSON number is stored either inline (`inline::number`) or
@@ -788,7 +805,7 @@ impl IValue {
     /// e.g. when `INumber::from_str` stores a parsed number inline.
     pub(crate) fn new_inline_number(bits: usize) -> Self {
         // Safety: `bits` is a valid inline number encoding from the representation.
-        unsafe { Self::new_inline(TypeTag::Inline, bits) }
+        unsafe { Self::new_usize(ReprTag::Inline, bits) }
     }
 
     /// Whether this number was written with a decimal point (`1.0` vs `1`).
@@ -817,25 +834,10 @@ impl IValue {
     pub(crate) fn new_string(s: &str) -> Self {
         match inline::string::try_encode(s) {
             // Safety: `try_encode` returns valid inline-string bits.
-            Some(bits) => unsafe { Self::new_inline(TypeTag::Inline, bits) },
+            Some(bits) => unsafe { Self::new_usize(ReprTag::Inline, bits) },
             // Safety: `intern` returns a live, aligned interned header pointer.
-            None => unsafe { Self::new_ptr(interned::intern(s), TypeTag::String) },
+            None => unsafe { Self::new_ptr(ReprTag::String, interned::intern(s)) },
         }
-    }
-
-    pub(crate) fn string_bytes(&self) -> &[u8] {
-        // Safety: only called on a string, so `string_repr()` matches it.
-        unsafe { self.string_repr().as_bytes(self) }
-    }
-
-    pub(crate) fn string_as_str(&self) -> &str {
-        // Safety: only called on a string, so `string_repr()` matches it.
-        unsafe { self.string_repr().as_str(self) }
-    }
-
-    pub(crate) fn string_len(&self) -> usize {
-        // Safety: only called on a string, so `string_repr()` matches it.
-        unsafe { self.string_repr().len(self) }
     }
 }
 
@@ -848,7 +850,7 @@ impl IValue {
     pub(crate) fn number_repr_key(&self) -> (u8, u64) {
         let tag = self.type_tag() as u8;
         if self.is_inline() {
-            (tag, self.ptr_usize() as u64)
+            (tag, self.usize_() as u64)
         } else {
             // Safety: a heap number stores its payload as the 8-byte scalar at
             // `ptr()`; only called on numbers. The raw bits (as `u64`) are the key.
@@ -864,10 +866,11 @@ impl IValue {
 /// hash and compare by their canonical bits), so a representation overrides only
 /// what differs. Every delegation goes downward, found once via [`IValue::repr`].
 ///
-/// The *type-specific* accessors live on the per-type traits [`NumberRepr`],
-/// [`StringRepr`], [`ArrayRepr`] and [`ObjectRepr`], reached through
-/// [`IValue::number_repr`] and its siblings, which the I-types invoke once they know
-/// the type.
+/// This also carries the operations `IValue` exposes *generically*, on any value —
+/// `len` (a public `Option`-returning accessor). The accessors that only make sense
+/// once the type is known live on the per-type traits [`NumberRepr`] and
+/// [`StringRepr`], reached through [`IValue::number_repr`]/[`IValue::string_repr`],
+/// which the I-types invoke once they know the type.
 ///
 /// # Safety
 ///
@@ -881,13 +884,17 @@ pub(crate) trait ValueRepr {
     /// to tell them apart; representations that cover one type ignore it.
     fn value_type(&self, v: &IValue) -> ValueType;
 
-    /// Clone the value. Default: copy the pointer word — correct for the inline
-    /// representations, which own no heap storage. Heap reps override.
-    unsafe fn clone(&self, v: &IValue) -> IValue {
-        IValue { ptr: v.ptr }
-    }
-    /// Release the value's storage. Default: nothing (inline). Heap reps override.
-    unsafe fn drop(&self, _v: &mut IValue) {}
+    /// Clone the value. No default *on purpose*: cloning is ownership-sensitive, and
+    /// the wrong behaviour is a memory-safety bug the compiler cannot catch — a heap
+    /// representation that fell back to bit-copying the pointer word would alias its
+    /// allocation and double-free it. Every representation states it explicitly, even
+    /// the inline bit-copy (see `inline::InlineRepr`).
+    unsafe fn clone(&self, v: &IValue) -> IValue;
+    /// Release the value's storage. No default either, as the counterpart to `clone`:
+    /// a representation that owns an allocation must free it here, and one that owns
+    /// nothing must say so — so ownership is always a deliberate choice, never a
+    /// silently inherited one.
+    unsafe fn drop(&self, v: &mut IValue);
     /// Hash by value. Default: the canonical pointer word — correct for the inline
     /// constants and both string representations (equal values share it). Numbers
     /// hash by their numeric value (so the inline and heap forms of a value agree),
@@ -896,7 +903,7 @@ pub(crate) trait ValueRepr {
     /// `hash` uses `&mut dyn Hasher` because a trait-object method cannot be
     /// generic; `IValue: Hash` erases the concrete hasher once, at the top.
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        state.write_usize(v.ptr_usize());
+        state.write_usize(v.usize_());
     }
     /// Equality within a type. Default: canonical bits — correct for the constants
     /// and strings. Numbers and collections override.
@@ -915,6 +922,13 @@ pub(crate) trait ValueRepr {
     unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a>;
     /// Wrap a mutable reference to this value in the mutable destructuring enum.
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a>;
+
+    /// The length of a collection; `None` for everything else. This stays a general
+    /// operation because `IValue::len` is public and answers for any value — the two
+    /// collection representations override it, every other rep keeps the `None`.
+    unsafe fn len(&self, _v: &IValue) -> Option<usize> {
+        None
+    }
 }
 
 /// The number-specific operations, implemented by every number representation (the
@@ -955,8 +969,12 @@ pub(crate) trait NumberRepr {
 
 /// The string-specific operations, implemented by both string representations
 /// (inline and interned). A representation only has to expose its UTF-8 bytes;
-/// `as_str`/`len` derive from them. Reached through [`IValue::string_repr`], only
-/// invoked on a string.
+/// `as_str` derives from them. Reached through [`IValue::string_repr`], only invoked
+/// on a string.
+///
+/// (Arrays and objects need no such trait: their only representation-level operation
+/// is `len`, which is general and lives on [`ValueRepr`], and their elements are
+/// reached directly through `IArray`/`IObject`.)
 ///
 /// # Safety
 ///
@@ -969,34 +987,6 @@ pub(crate) trait StringRepr {
         // Safety: inline and interned string bytes are both valid UTF-8.
         std::str::from_utf8_unchecked(self.as_bytes(v))
     }
-    /// The byte length of the string.
-    unsafe fn len(&self, v: &IValue) -> usize {
-        self.as_bytes(v).len()
-    }
-}
-
-/// The array-specific operations. A JSON array has a single representation, so this
-/// has one implementor; it exists so array access stays off the universal
-/// [`ValueRepr`], symmetric with [`NumberRepr`]/[`StringRepr`]. Reached through
-/// [`IValue::array_repr`], only invoked on an array.
-///
-/// # Safety
-///
-/// `v` must be an array.
-pub(crate) trait ArrayRepr {
-    /// The number of elements.
-    unsafe fn len(&self, v: &IValue) -> usize;
-}
-
-/// The object-specific operations; the object counterpart to [`ArrayRepr`], reached
-/// through [`IValue::object_repr`], only invoked on an object.
-///
-/// # Safety
-///
-/// `v` must be an object.
-pub(crate) trait ObjectRepr {
-    /// The number of entries.
-    unsafe fn len(&self, v: &IValue) -> usize;
 }
 
 impl IValue {
@@ -1009,14 +999,14 @@ impl IValue {
         match self.type_tag() {
             // One representation covers the whole inline family; it decodes the
             // family bits to dispatch further (see `inline::InlineRepr`).
-            TypeTag::Inline => &inline::InlineRepr,
-            TypeTag::NumberI64 => &scalar::I64Repr,
-            TypeTag::NumberU64 => &scalar::U64Repr,
+            ReprTag::Inline => &inline::InlineRepr,
+            ReprTag::NumberI64 => &scalar::I64Repr,
+            ReprTag::NumberU64 => &scalar::U64Repr,
             // The reserved tag is never produced; it reads back as an `f64`.
-            TypeTag::NumberF64 | TypeTag::NumberReserved => &scalar::F64Repr,
-            TypeTag::String => &interned::InternedRepr,
-            TypeTag::Array => &array::ArrayStore,
-            TypeTag::Object => &object::ObjectStore,
+            ReprTag::NumberF64 | ReprTag::NumberReserved => &scalar::F64Repr,
+            ReprTag::String => &interned::InternedRepr,
+            ReprTag::Array => &array::ArrayRepr,
+            ReprTag::Object => &object::ObjectRepr,
         }
     }
 
@@ -1028,37 +1018,26 @@ impl IValue {
     /// Only ever called on a number (from a number accessor or an [`INumber`]).
     fn number_repr(&self) -> &'static dyn NumberRepr {
         match self.type_tag() {
-            TypeTag::Inline => &inline::InlineNumberRepr,
-            TypeTag::NumberI64 => &scalar::I64Repr,
-            TypeTag::NumberU64 => &scalar::U64Repr,
+            ReprTag::Inline => &inline::InlineNumberRepr,
+            ReprTag::NumberI64 => &scalar::I64Repr,
+            ReprTag::NumberU64 => &scalar::U64Repr,
             // The reserved tag is never produced; it reads back as an `f64`.
-            TypeTag::NumberF64 | TypeTag::NumberReserved => &scalar::F64Repr,
-            TypeTag::String | TypeTag::Array | TypeTag::Object => {
+            ReprTag::NumberF64 | ReprTag::NumberReserved => &scalar::F64Repr,
+            ReprTag::String | ReprTag::Array | ReprTag::Object => {
                 unreachable!("number_repr called on a non-number value")
             }
         }
     }
 
     /// This string's representation, for the string-specific operations — the inline
-    /// string sub-representation or the interned one. Only ever called on a string.
-    fn string_repr(&self) -> &'static dyn StringRepr {
+    /// string sub-representation or the interned one. Only ever called on a string
+    /// (by an [`IString`] or the string comparison/debug helpers).
+    pub(crate) fn string_repr(&self) -> &'static dyn StringRepr {
         match self.type_tag() {
-            TypeTag::Inline => &inline::string::InlineStringRepr,
-            TypeTag::String => &interned::InternedRepr,
+            ReprTag::Inline => &inline::string::InlineStringRepr,
+            ReprTag::String => &interned::InternedRepr,
             _ => unreachable!("string_repr called on a non-string value"),
         }
-    }
-
-    /// This array's representation. A JSON array has a single representation, so this
-    /// is a fixed marker; it exists for symmetry. Only ever called on an array.
-    fn array_repr(&self) -> &'static dyn ArrayRepr {
-        &array::ArrayStore
-    }
-
-    /// This object's representation; the object counterpart to
-    /// [`array_repr`](IValue::array_repr). Only ever called on an object.
-    fn object_repr(&self) -> &'static dyn ObjectRepr {
-        &object::ObjectStore
     }
 }
 

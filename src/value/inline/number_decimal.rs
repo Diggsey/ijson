@@ -405,17 +405,17 @@ fn num_val(bits: usize) -> NumVal {
 
 impl NumberRepr for InlineNumberRepr {
     unsafe fn num_val(&self, v: &IValue) -> NumVal {
-        num_val(v.ptr_usize())
+        num_val(v.usize_())
     }
     fn has_decimal_point(&self, v: &IValue) -> bool {
-        has_decimal_point(v.ptr_usize())
+        has_decimal_point(v.usize_())
     }
     unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
         // The inline decimal decodes exactly itself.
-        to_f64_exact(v.ptr_usize())
+        to_f64_exact(v.usize_())
     }
     unsafe fn to_f64_lossy(&self, v: &IValue) -> f64 {
-        to_f64_lossy(v.ptr_usize())
+        to_f64_lossy(v.usize_())
     }
     // to_i64/to_u64 use the `NumberRepr` defaults (derived from `num_val`).
 }
@@ -425,16 +425,16 @@ impl InlineValue for InlineNumberRepr {
         ValueType::Number
     }
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        num_val(v.ptr_usize()).hash(state);
+        num_val(v.usize_()).hash(state);
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
-        number_cmp(num_val(a.ptr_usize()), b) == Some(Ordering::Equal)
+        number_cmp(num_val(a.usize_()), b) == Some(Ordering::Equal)
     }
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
-        number_cmp(num_val(a.ptr_usize()), b)
+        number_cmp(num_val(a.usize_()), b)
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", num_val(v.ptr_usize()))
+        write!(f, "{:?}", num_val(v.usize_()))
     }
     fn destructure(&self, v: IValue) -> Destructured {
         Destructured::Number(INumber(v))

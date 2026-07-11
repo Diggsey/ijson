@@ -2,16 +2,17 @@
 //!
 //! An array is a single pointer to a heap allocation whose header stores the
 //! length and capacity inline, followed by the [`IValue`] elements. This module
-//! owns that layout and every operation on it, exposed as free functions that
-//! operate directly on an `&IValue` (or `&mut IValue`) known to be an array. It
-//! never refers to the public [`crate::IArray`] wrapper — `IArray` is a thin
-//! facade that delegates *down* to these functions, as does `IValue` itself.
+//! owns that layout and every operation on it, exposed as associated functions of
+//! the [`ArrayRepr`] representation type that operate on an `&IValue` (or
+//! `&mut IValue`) known to be an array. It never refers to the public
+//! [`crate::IArray`] wrapper — `IArray` is a thin facade that delegates *down* to
+//! these functions, as does `IValue` itself.
 //!
 //! # Safety
 //!
-//! Every `unsafe fn` in this module shares one precondition: the `IValue`
-//! argument must have the `Array` tag. Callers (`IValue`'s trait impls and the
-//! `IArray` facade) uphold this via the type/tag they already checked.
+//! Every `unsafe fn` here shares one precondition: the `IValue` argument must have
+//! the `Array` tag. Callers (`IValue`'s trait impls and the `IArray` facade) uphold
+//! this via the type/tag they already checked.
 
 use std::alloc::{Layout, LayoutError};
 use std::cmp::{self, Ordering};
@@ -24,8 +25,7 @@ use crate::array::IArray;
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 
 use super::{
-    ArrayRepr, Destructured, DestructuredMut, DestructuredRef, IValue, TypeTag, ValueRepr,
-    ValueType,
+    Destructured, DestructuredMut, DestructuredRef, IValue, ReprTag, ValueRepr, ValueType,
 };
 
 #[repr(C)]
@@ -78,252 +78,240 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
 impl<'a, T: ThinRefExt<'a, Header>> HeaderRef<'a> for T {}
 impl<'a, T: ThinMutExt<'a, Header>> HeaderMut<'a> for T {}
 
-static EMPTY_HEADER: Header = Header { len: 0, cap: 0 };
+/// The array representation.
+pub(crate) struct ArrayRepr;
 
-fn layout(cap: usize) -> Result<Layout, LayoutError> {
-    Ok(Layout::new::<Header>()
-        .extend(Layout::array::<usize>(cap)?)?
-        .0
-        .pad_to_align())
-}
-
-fn alloc(cap: usize) -> NonNull<Header> {
-    unsafe {
-        let ptr = alloc_infallible(layout(cap).unwrap()).cast::<Header>();
-        ptr.write(Header { len: 0, cap });
-        ptr
+impl ArrayRepr {
+    fn layout(cap: usize) -> Result<Layout, LayoutError> {
+        Ok(Layout::new::<Header>()
+            .extend(Layout::array::<usize>(cap)?)?
+            .0
+            .pad_to_align())
     }
-}
 
-fn realloc(ptr: NonNull<Header>, new_cap: usize) -> NonNull<Header> {
-    unsafe {
-        let old_layout = layout(ptr.as_ref().cap).unwrap();
-        let new_layout = layout(new_cap).unwrap();
-        let mut ptr = realloc_infallible(ptr.cast(), old_layout, new_layout).cast::<Header>();
-        ptr.as_mut().cap = new_cap;
-        ptr
-    }
-}
-
-fn dealloc(ptr: NonNull<Header>) {
-    unsafe {
-        let layout = layout(ptr.as_ref().cap).unwrap();
-        dealloc_infallible(ptr.cast(), layout);
-    }
-}
-
-// Safety (all header helpers): `v` must be an array.
-unsafe fn header(v: &IValue) -> ThinRef<'_, Header> {
-    ThinRef::new(v.ptr().cast())
-}
-
-// Safety: `v` must be an array and must not be the shared static empty header.
-unsafe fn header_mut(v: &mut IValue) -> ThinMut<'_, Header> {
-    ThinMut::new(v.ptr().cast())
-}
-
-// Safety: `v` must be an array. A static (capacity-0) array shares the immutable
-// `EMPTY_HEADER` and so must never be mutated in place.
-unsafe fn is_static(v: &IValue) -> bool {
-    header(v).cap == 0
-}
-
-// Safety: `v` must be an array.
-unsafe fn resize_internal(v: &mut IValue, cap: usize) {
-    if is_static(v) || cap == 0 {
-        *v = with_capacity(cap);
-    } else {
-        let new_ptr = realloc(v.ptr().cast(), cap);
-        v.set_ptr(new_ptr.cast());
-    }
-}
-
-/// Constructs a new empty array. Does not allocate.
-pub(crate) fn new() -> IValue {
-    // Safety: `EMPTY_HEADER` is a valid, aligned static header.
-    unsafe { IValue::new_ref(&EMPTY_HEADER, TypeTag::Array) }
-}
-
-/// Constructs a new array with the given capacity.
-pub(crate) fn with_capacity(cap: usize) -> IValue {
-    if cap == 0 {
-        new()
-    } else {
-        // Safety: `alloc` returns a freshly allocated, aligned header.
-        unsafe { IValue::new_ptr(alloc(cap).cast(), TypeTag::Array) }
-    }
-}
-
-pub(crate) unsafe fn capacity(v: &IValue) -> usize {
-    header(v).cap
-}
-
-pub(crate) unsafe fn len(v: &IValue) -> usize {
-    header(v).len
-}
-
-pub(crate) unsafe fn as_slice(v: &IValue) -> &[IValue] {
-    header(v).items_slice()
-}
-
-pub(crate) unsafe fn as_mut_slice(v: &mut IValue) -> &mut [IValue] {
-    if is_static(v) {
-        &mut []
-    } else {
-        header_mut(v).items_slice_mut()
-    }
-}
-
-pub(crate) unsafe fn reserve(v: &mut IValue, additional: usize) {
-    let (current_capacity, len) = {
-        let hd = header(v);
-        (hd.cap, hd.len)
-    };
-    let desired_capacity = len.checked_add(additional).unwrap();
-    if current_capacity >= desired_capacity {
-        return;
-    }
-    resize_internal(v, cmp::max(current_capacity * 2, desired_capacity.max(4)));
-}
-
-pub(crate) unsafe fn truncate(v: &mut IValue, len: usize) {
-    if is_static(v) {
-        return;
-    }
-    let mut hd = header_mut(v);
-    while hd.len > len {
-        hd.pop();
-    }
-}
-
-pub(crate) unsafe fn insert(v: &mut IValue, index: usize, item: IValue) {
-    reserve(v, 1);
-
-    // Safety: cannot be static after calling `reserve`
-    let mut hd = header_mut(v);
-    assert!(index <= hd.len);
-
-    // Safety: We just reserved enough space for at least one extra item
-    hd.push(item);
-    if index < hd.len {
-        hd.items_slice_mut()[index..].rotate_right(1);
-    }
-}
-
-pub(crate) unsafe fn remove(v: &mut IValue, index: usize) -> Option<IValue> {
-    if index < len(v) {
-        // Safety: cannot be static if index < len
-        let mut hd = header_mut(v);
-        hd.reborrow().items_slice_mut()[index..].rotate_left(1);
-        hd.pop()
-    } else {
-        None
-    }
-}
-
-pub(crate) unsafe fn swap_remove(v: &mut IValue, index: usize) -> Option<IValue> {
-    if index < len(v) {
-        // Safety: cannot be static if index < len
-        let mut hd = header_mut(v);
-        let last_index = hd.len - 1;
-        hd.reborrow().items_slice_mut().swap(index, last_index);
-        hd.pop()
-    } else {
-        None
-    }
-}
-
-pub(crate) unsafe fn push(v: &mut IValue, item: IValue) {
-    reserve(v, 1);
-    // Safety: We just reserved enough space for at least one extra item
-    header_mut(v).push(item);
-}
-
-pub(crate) unsafe fn pop(v: &mut IValue) -> Option<IValue> {
-    if is_static(v) {
-        None
-    } else {
-        header_mut(v).pop()
-    }
-}
-
-pub(crate) unsafe fn shrink_to_fit(v: &mut IValue) {
-    resize_internal(v, len(v));
-}
-
-pub(crate) unsafe fn clone(v: &IValue) -> IValue {
-    let src = header(v).items_slice();
-    let l = src.len();
-    let mut res = with_capacity(l);
-
-    if l > 0 {
-        // Safety: we cannot be static if len > 0
-        let mut hd = header_mut(&mut res);
-        for item in src {
-            // Safety: we reserved enough space at the start
-            hd.push(item.clone());
+    fn alloc(cap: usize) -> NonNull<Header> {
+        unsafe {
+            let ptr = alloc_infallible(Self::layout(cap).unwrap()).cast::<Header>();
+            ptr.write(Header { len: 0, cap });
+            ptr
         }
     }
-    res
-}
 
-pub(crate) unsafe fn drop(v: &mut IValue) {
-    truncate(v, 0);
-    if !is_static(v) {
-        dealloc(v.ptr().cast());
-        v.set_ref(&EMPTY_HEADER);
+    fn realloc(ptr: NonNull<Header>, new_cap: usize) -> NonNull<Header> {
+        unsafe {
+            let old_layout = Self::layout(ptr.as_ref().cap).unwrap();
+            let new_layout = Self::layout(new_cap).unwrap();
+            let mut ptr = realloc_infallible(ptr.cast(), old_layout, new_layout).cast::<Header>();
+            ptr.as_mut().cap = new_cap;
+            ptr
+        }
+    }
+
+    fn dealloc(ptr: NonNull<Header>) {
+        unsafe {
+            let layout = Self::layout(ptr.as_ref().cap).unwrap();
+            dealloc_infallible(ptr.cast(), layout);
+        }
+    }
+
+    // Safety (the header accessors): `v` must be an *allocated* array — never the
+    // empty, unallocated form (`v.usize_() == 0`), whose pointer bits are zero. The
+    // read accessors guard that case; mutators grow the array first.
+    unsafe fn header(v: &IValue) -> ThinRef<'_, Header> {
+        ThinRef::new(v.ptr().cast())
+    }
+
+    // Safety: `v` must be an allocated array (see `header`).
+    unsafe fn header_mut(v: &mut IValue) -> ThinMut<'_, Header> {
+        ThinMut::new(v.ptr().cast())
+    }
+
+    // Safety: `v` must be an array.
+    unsafe fn resize_internal(v: &mut IValue, cap: usize) {
+        if v.usize_() == 0 || cap == 0 {
+            *v = Self::with_capacity(cap);
+        } else {
+            let new_ptr = Self::realloc(v.ptr().cast(), cap);
+            v.set_ptr(new_ptr.cast());
+        }
+    }
+
+    /// Constructs a new empty array. Does not allocate: an empty array is just the
+    /// `Array` tag with no pointer.
+    pub(crate) fn empty() -> IValue {
+        // Safety: `Array` is a non-inline tag, so the tagged word is non-null.
+        unsafe { IValue::new_usize(ReprTag::Array, 0) }
+    }
+
+    /// Constructs a new array with the given capacity.
+    pub(crate) fn with_capacity(cap: usize) -> IValue {
+        if cap == 0 {
+            Self::empty()
+        } else {
+            // Safety: `alloc` returns a freshly allocated, aligned header.
+            unsafe { IValue::new_ptr(ReprTag::Array, Self::alloc(cap).cast()) }
+        }
+    }
+
+    pub(crate) unsafe fn capacity(v: &IValue) -> usize {
+        if v.usize_() == 0 {
+            0
+        } else {
+            Self::header(v).cap
+        }
+    }
+
+    pub(crate) unsafe fn len(v: &IValue) -> usize {
+        if v.usize_() == 0 {
+            0
+        } else {
+            Self::header(v).len
+        }
+    }
+
+    pub(crate) unsafe fn as_slice(v: &IValue) -> &[IValue] {
+        if v.usize_() == 0 {
+            &[]
+        } else {
+            Self::header(v).items_slice()
+        }
+    }
+
+    pub(crate) unsafe fn as_mut_slice(v: &mut IValue) -> &mut [IValue] {
+        if v.usize_() == 0 {
+            &mut []
+        } else {
+            Self::header_mut(v).items_slice_mut()
+        }
+    }
+
+    pub(crate) unsafe fn reserve(v: &mut IValue, additional: usize) {
+        let (current_capacity, len) = if v.usize_() == 0 {
+            (0, 0)
+        } else {
+            let hd = Self::header(v);
+            (hd.cap, hd.len)
+        };
+        let desired_capacity = len.checked_add(additional).unwrap();
+        if current_capacity >= desired_capacity {
+            return;
+        }
+        Self::resize_internal(v, cmp::max(current_capacity * 2, desired_capacity.max(4)));
+    }
+
+    pub(crate) unsafe fn truncate(v: &mut IValue, len: usize) {
+        if v.usize_() == 0 {
+            return;
+        }
+        let mut hd = Self::header_mut(v);
+        while hd.len > len {
+            hd.pop();
+        }
+    }
+
+    pub(crate) unsafe fn insert(v: &mut IValue, index: usize, item: IValue) {
+        Self::reserve(v, 1);
+
+        // Safety: cannot be the empty form after calling `reserve`
+        let mut hd = Self::header_mut(v);
+        assert!(index <= hd.len);
+
+        // Safety: We just reserved enough space for at least one extra item
+        hd.push(item);
+        if index < hd.len {
+            hd.items_slice_mut()[index..].rotate_right(1);
+        }
+    }
+
+    pub(crate) unsafe fn remove(v: &mut IValue, index: usize) -> Option<IValue> {
+        if index < Self::len(v) {
+            // Safety: cannot be the empty form if index < len
+            let mut hd = Self::header_mut(v);
+            hd.reborrow().items_slice_mut()[index..].rotate_left(1);
+            hd.pop()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) unsafe fn swap_remove(v: &mut IValue, index: usize) -> Option<IValue> {
+        if index < Self::len(v) {
+            // Safety: cannot be the empty form if index < len
+            let mut hd = Self::header_mut(v);
+            let last_index = hd.len - 1;
+            hd.reborrow().items_slice_mut().swap(index, last_index);
+            hd.pop()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) unsafe fn push(v: &mut IValue, item: IValue) {
+        Self::reserve(v, 1);
+        // Safety: We just reserved enough space for at least one extra item
+        Self::header_mut(v).push(item);
+    }
+
+    pub(crate) unsafe fn pop(v: &mut IValue) -> Option<IValue> {
+        if v.usize_() == 0 {
+            None
+        } else {
+            Self::header_mut(v).pop()
+        }
+    }
+
+    pub(crate) unsafe fn shrink_to_fit(v: &mut IValue) {
+        Self::resize_internal(v, Self::len(v));
     }
 }
 
-pub(crate) unsafe fn hash(v: &IValue, state: &mut dyn Hasher) {
-    let items = as_slice(v);
-    state.write_usize(items.len());
-    // Order matters for arrays: feed each element in turn, delegating down to its
-    // own representation via `repr()` (elements can be any value type).
-    for item in items {
-        item.repr().hash(item, state);
-    }
-}
-
-pub(crate) unsafe fn eq(a: &IValue, b: &IValue) -> bool {
-    a.raw_eq(b) || as_slice(a) == as_slice(b)
-}
-
-pub(crate) unsafe fn cmp(a: &IValue, b: &IValue) -> Option<Ordering> {
-    if a.raw_eq(b) {
-        Some(Ordering::Equal)
-    } else {
-        as_slice(a).partial_cmp(as_slice(b))
-    }
-}
-
-pub(crate) unsafe fn debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-    Debug::fmt(as_slice(v), f)
-}
-
-/// The array representation.
-pub(crate) struct ArrayStore;
-impl ValueRepr for ArrayStore {
+impl ValueRepr for ArrayRepr {
     fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::Array
     }
     unsafe fn clone(&self, v: &IValue) -> IValue {
-        clone(v)
+        let src = Self::as_slice(v);
+        let l = src.len();
+        let mut res = Self::with_capacity(l);
+
+        if l > 0 {
+            // Safety: `res` has capacity for every element, so it is not the empty form
+            let mut hd = Self::header_mut(&mut res);
+            for item in src {
+                // Safety: we reserved enough space at the start
+                hd.push(item.clone());
+            }
+        }
+        res
     }
     unsafe fn drop(&self, v: &mut IValue) {
-        self::drop(v);
+        Self::truncate(v, 0);
+        if v.usize_() != 0 {
+            Self::dealloc(v.ptr().cast());
+            v.set_usize(0);
+        }
     }
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        hash(v, state);
+        let items = Self::as_slice(v);
+        state.write_usize(items.len());
+        // Order matters for arrays: feed each element in turn, delegating down to its
+        // own representation via `repr()` (elements can be any value type).
+        for item in items {
+            item.repr().hash(item, state);
+        }
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
-        eq(a, b)
+        a.raw_eq(b) || Self::as_slice(a) == Self::as_slice(b)
     }
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
-        cmp(a, b)
+        if a.raw_eq(b) {
+            Some(Ordering::Equal)
+        } else {
+            Self::as_slice(a).partial_cmp(Self::as_slice(b))
+        }
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        debug(v, f)
+        Debug::fmt(Self::as_slice(v), f)
     }
     fn destructure(&self, v: IValue) -> Destructured {
         Destructured::Array(IArray(v))
@@ -334,11 +322,7 @@ impl ValueRepr for ArrayStore {
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
         DestructuredMut::Array(v.as_array_unchecked_mut())
     }
-}
-
-impl ArrayRepr for ArrayStore {
-    /// The number of elements. Safety: `v` must be an array.
-    unsafe fn len(&self, v: &IValue) -> usize {
-        v.as_array_unchecked().len()
+    unsafe fn len(&self, v: &IValue) -> Option<usize> {
+        Some(Self::len(v))
     }
 }
