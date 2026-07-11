@@ -44,17 +44,16 @@ pub(crate) const NULL: usize = encode(Constant::Null);
 pub(crate) const FALSE: usize = encode(Constant::False);
 pub(crate) const TRUE: usize = encode(Constant::True);
 
-/// The JSON type of a constant: `null`, or a `bool` for either boolean.
-pub(crate) fn value_type(bits: usize) -> ValueType {
-    match decode(bits) {
-        Constant::Null => ValueType::Null,
-        Constant::False | Constant::True => ValueType::Bool,
-    }
-}
-
 /// The inline representation of the `null`/`false`/`true` constants.
 pub(crate) struct ConstantRepr;
 impl super::InlineValue for ConstantRepr {
+    fn value_type(&self, v: &IValue) -> ValueType {
+        // A constant is `null`, or a `bool` for either boolean.
+        match decode(v.usize_()) {
+            Constant::Null => ValueType::Null,
+            Constant::False | Constant::True => ValueType::Bool,
+        }
+    }
     // clone/drop/hash/eq use the inline defaults (bit-copy / nothing / pointer word /
     // `raw_eq`), all correct for the fixed constant bit patterns.
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {

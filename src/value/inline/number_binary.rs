@@ -45,6 +45,7 @@ use super::InlineValue;
 use crate::number::INumber;
 use crate::value::{
     number_cmp, Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, NumberRepr,
+    ValueType,
 };
 
 // --- Bit layout -------------------------------------------------------------
@@ -238,6 +239,9 @@ impl NumberRepr for InlineNumberRepr {
 }
 
 impl InlineValue for InlineNumberRepr {
+    fn value_type(&self, _v: &IValue) -> ValueType {
+        ValueType::Number
+    }
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
         num_val(v.usize_()).hash(state);
     }

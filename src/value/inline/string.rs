@@ -18,6 +18,7 @@ use super::{InlineValue, STR_FAMILY};
 use crate::string::IString;
 use crate::value::{
     string_cmp, string_debug, Destructured, DestructuredMut, DestructuredRef, IValue, StringRepr,
+    ValueType,
 };
 
 /// The number of string bytes that fit inline in a pointer-sized value:
@@ -76,6 +77,9 @@ pub(crate) unsafe fn bytes<'a>(storage: NonNull<u8>, bits: usize) -> &'a [u8] {
 /// The inline short-string representation of a JSON string.
 pub(crate) struct InlineStringRepr;
 impl InlineValue for InlineStringRepr {
+    fn value_type(&self, _v: &IValue) -> ValueType {
+        ValueType::String
+    }
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
         Some(string_cmp(a, b))
     }

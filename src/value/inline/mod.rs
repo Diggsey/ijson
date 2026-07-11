@@ -61,18 +61,20 @@ enum InlineKind {
 }
 
 /// The *universal* behaviour of an inline value — the [`ValueRepr`] operations that
-/// [`InlineRepr`] delegates to a sub-representation, minus the ones it supplies
-/// uniformly (`clone`/`drop`: every inline value is a bit-copy with nothing to free,
-/// and `value_type`, which [`InlineRepr`] answers from the bits directly). A single
-/// [`InlineRepr`] implements [`ValueRepr`] for the whole inline family and decodes
-/// the family bits to pick the right one of these; each sub-representation only
-/// overrides what it needs.
+/// [`InlineRepr`] delegates to a sub-representation, minus the `clone`/`drop` it
+/// supplies uniformly (every inline value is a bit-copy with nothing to free). A
+/// single [`InlineRepr`] implements [`ValueRepr`] for the whole inline family and
+/// decodes the family bits to pick the right one of these; each sub-representation
+/// only overrides what it needs.
 ///
 /// The *type-specific* accessors are not here: the inline number and string
 /// sub-representations implement the per-type traits (`NumberRepr` / `StringRepr`)
 /// directly, reached through `IValue::number_repr` / `string_repr`, and inline
 /// `bool`/`null` carry no accessor at all.
 pub(crate) trait InlineValue {
+    /// The JSON type this inline value stores. Takes `v` because one `ConstantRepr`
+    /// serves both `null` and `bool`, decoding which from the bits.
+    fn value_type(&self, v: &IValue) -> ValueType;
     /// Hash by value. Default: the canonical pointer word (correct for the
     /// constants and inline strings). Inline numbers override to hash by value.
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
@@ -97,8 +99,9 @@ pub(crate) trait InlineValue {
 pub(crate) struct InlineRepr;
 
 impl InlineRepr {
-    /// Which inline sub-family the raw bits belong to.
-    fn kind(bits: usize) -> InlineKind {
+    /// Which inline sub-family `v` belongs to.
+    fn kind(v: &IValue) -> InlineKind {
+        let bits = v.usize_();
         if bits & STR_FAMILY == 0 {
             InlineKind::Number
         } else if bits & CONST_FLAG == 0 {
@@ -111,7 +114,7 @@ impl InlineRepr {
     /// Selects the inline sub-representation for `v` from its family bits.
     #[inline]
     fn inner(v: &IValue) -> &'static dyn InlineValue {
-        match Self::kind(v.usize_()) {
+        match Self::kind(v) {
             InlineKind::Number => &InlineNumberRepr,
             InlineKind::String => &string::InlineStringRepr,
             InlineKind::Constant => &constant::ConstantRepr,
@@ -121,12 +124,7 @@ impl InlineRepr {
 
 impl ValueRepr for InlineRepr {
     fn value_type(&self, v: &IValue) -> ValueType {
-        match Self::kind(v.usize_()) {
-            InlineKind::Number => ValueType::Number,
-            InlineKind::String => ValueType::String,
-            // A constant is either `null` or a `bool`; `constant` tells them apart.
-            InlineKind::Constant => constant::value_type(v.usize_()),
-        }
+        Self::inner(v).value_type(v)
     }
     // Every inline value is stored entirely in the pointer word: cloning is a
     // bit-copy of that word, and there is no heap storage to release on drop.
