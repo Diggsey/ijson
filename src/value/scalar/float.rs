@@ -60,7 +60,7 @@ impl ValueRepr for F64Repr {
 impl NumberRepr for F64Repr {
     /// Decodes the payload as an `f64`. Safety: `v` must be a live `NumberF64`.
     unsafe fn num_val(&self, v: &IValue) -> NumVal {
-        NumVal::Float(read::<f64>(v.ptr()))
+        NumVal::from_f64(read::<f64>(v.ptr()))
     }
     fn has_decimal_point(&self, _v: &IValue) -> bool {
         true

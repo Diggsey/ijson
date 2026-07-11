@@ -44,7 +44,7 @@ pub(crate) mod scalar;
 // The numeric value model (`NumVal` and its exact comparison/hash/conversion
 // methods), shared by every number representation. `decimal_to_f64_lossy` is the
 // one scalar helper used outside the module (by the base-10 inline representation).
-pub(crate) use numeric::{decimal_to_f64_lossy, NumVal};
+pub(crate) use numeric::{decimal_to_f64_exact, decimal_to_f64_lossy, NumVal};
 
 // The active inline number representation's static interface (`encode_int`,
 // `encode_f64`, `num_val`, `encode_decimal`), used through `inline::InlineNumberRepr`.

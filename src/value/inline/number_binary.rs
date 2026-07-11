@@ -10,7 +10,7 @@
 //!
 //! The value is a binary float `mantissa * 2^exp` with `exp` in `-7..=7`, so every
 //! inline number is exactly an `f64`; there is no non-`f64` value to represent, so
-//! an inline number never reduces to a `NumVal::Decimal`. A float whose
+//! an inline number never reduces to a `Decimal` [`NumVal`]. A float whose
 //! (trailing-zero-stripped) binary exponent falls outside the inline range spills
 //! to a heap `f64` instead.
 //!
@@ -212,12 +212,12 @@ impl InlineNumber for InlineNumberRepr {
 }
 
 /// Decodes inline bits to a [`NumVal`]. A binary inline float is always an exact
-/// `f64`, so it is either an `Int` or a `Float`, never a `Decimal`.
+/// `f64`, so it reduces to an integer (`Int`/`UInt`) or a `Float`, never a `Decimal`.
 fn num_val(bits: usize) -> NumVal {
     let (m, exp) = decode(bits);
     match to_i64(m, exp) {
-        Some(i) => NumVal::Int(i),
-        None => NumVal::Float(scale_pow2(m as f64, exp)),
+        Some(i) => NumVal::from_i64(i),
+        None => NumVal::from_f64(scale_pow2(m as f64, exp)),
     }
 }
 
@@ -321,13 +321,12 @@ mod tests {
     #[test]
     fn inline_floats_are_always_exact_f64() {
         // The base-2 format holds `mantissa * 2^exp`, which is always an exact
-        // `f64`, so a fractional inline number reduces to `Float`, never
-        // `Decimal`. `1 * 2^-1 == 0.5`.
+        // `f64`, so a fractional inline number is exactly an `f64` (`to_f64` is
+        // `Some`), never a non-`f64` `Decimal`. `1 * 2^-1 == 0.5`.
         let bits = encode(1, exp_code(-1, true));
         assert_eq!(to_f64_exact(bits), Some(0.5));
-        match num_val(bits) {
-            NumVal::Float(f) => assert_eq!(f, 0.5),
-            _ => panic!("expected Float(0.5)"),
-        }
+        let nv = num_val(bits);
+        assert_eq!(nv.to_i64(), None); // a fraction, not an integer
+        assert_eq!(nv.to_f64(), Some(0.5)); // but exactly an f64
     }
 }

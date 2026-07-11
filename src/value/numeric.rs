@@ -12,19 +12,29 @@ use std::convert::TryFrom;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hasher;
 
-// A number reduced to a form suitable for exact numeric comparison. Values that
-// fit `i64` become `Int`; `u64`s above `i64::MAX` become `UInt`; a value that is
-// exactly an `f64` (a fraction or a large integer-valued float) becomes `Float`.
+// A number reduced to a canonical form suitable for exact numeric comparison,
+// hashing, and conversion. Construction — via `from_i64`/`from_u64`/`from_f64`/
+// `from_decimal` — normalises every value into a single variant, so equal numbers
+// are always the same variant:
 //
-// `Decimal` is the residual: an exact `mantissa * 10^exp` that is *not* an `i64`
-// and *not* exactly an `f64` — for example the fraction `0.1`. Only the base-10
-// inline representation (`arbitrary_precision`) produces one; the base-2 binary
-// float is always an exact `f64`, so with that representation active a `Decimal`
-// never occurs at runtime. `NumVal` and its methods always handle it, though, so
-// the base-10 representation compiles and is unit-tested in either configuration.
-// `exp` is always in the inline range `-7..=7`.
+//   - `Int`     : an integer in `i64` range.
+//   - `UInt`    : an integer in `(i64::MAX, u64::MAX]`.
+//   - `Float`   : an exact `f64` that is *not* an integer in `i64`/`u64` range (a
+//                 fraction, or an integer-valued float beyond `u64`); never `±0.0`.
+//   - `Decimal` : the residual — an exact `mantissa * 10^exp` that is neither an
+//                 integer nor an exact `f64` (e.g. the fraction `0.1`), stored with
+//                 trailing zeros removed. Only the base-10 inline representation
+//                 (`arbitrary_precision`) produces one; `exp` is in `-7..=7`.
+//
+// Because the variants are disjoint, equality and hashing reduce to the variant and
+// its fields, and the accessors mostly select a single variant. `Decimal` and its
+// arithmetic are always compiled and unit-tested, even when the active
+// representation never produces one.
 #[derive(Clone, Copy)]
-pub(crate) enum NumVal {
+pub(crate) struct NumVal(Repr);
+
+#[derive(Clone, Copy)]
+enum Repr {
     Int(i64),
     UInt(u64),
     Float(f64),
@@ -32,78 +42,111 @@ pub(crate) enum NumVal {
 }
 
 impl NumVal {
-    /// The exact `i64` value, if it is an integer in range.
-    pub(crate) fn to_i64(self) -> Option<i64> {
-        match self {
-            NumVal::Int(x) => Some(x),
-            NumVal::UInt(x) => i64::try_from(x).ok(),
-            NumVal::Float(x) => (x.fract() == 0.0 && x >= i64::MIN as f64 && x < i64::MAX as f64)
-                .then_some(x as i64),
-            NumVal::Decimal { mantissa, exp } => {
-                decimal_int_value(mantissa, exp).and_then(|v| i64::try_from(v).ok())
+    /// An `i64`.
+    pub(crate) fn from_i64(x: i64) -> NumVal {
+        NumVal(Repr::Int(x))
+    }
+
+    /// A `u64` — stored as `Int` when it also fits `i64`.
+    pub(crate) fn from_u64(x: u64) -> NumVal {
+        match i64::try_from(x) {
+            Ok(i) => NumVal(Repr::Int(i)),
+            Err(_) => NumVal(Repr::UInt(x)),
+        }
+    }
+
+    /// A finite `f64` — reduced to `Int`/`UInt` when it is exactly an integer in
+    /// range (so `1e18` and the integer `10^18` become the same value).
+    pub(crate) fn from_f64(x: f64) -> NumVal {
+        if x.fract() == 0.0 {
+            if x >= i64::MIN as f64 && x < i64::MAX as f64 {
+                return NumVal(Repr::Int(x as i64));
             }
+            if x >= 0.0 && x < u64::MAX as f64 {
+                return NumVal(Repr::UInt(x as u64));
+            }
+        }
+        NumVal(Repr::Float(x))
+    }
+
+    /// An exact `mantissa * 10^exp` — reduced to `Int`/`UInt` when it is an integer
+    /// in range and to `Float` when it is exactly an `f64`; otherwise a canonical
+    /// `Decimal` with trailing zeros removed.
+    pub(crate) fn from_decimal(mantissa: i64, exp: i32) -> NumVal {
+        if let Some(v) = decimal_int_value(mantissa, exp) {
+            if let Ok(i) = i64::try_from(v) {
+                return NumVal(Repr::Int(i));
+            }
+            if let Ok(u) = u64::try_from(v) {
+                return NumVal(Repr::UInt(u));
+            }
+            // A larger integer-valued number; it may still be an exact `f64` below.
+        }
+        if let Some(f) = decimal_to_f64_exact(mantissa, exp) {
+            return NumVal(Repr::Float(f));
+        }
+        let (mantissa, exp) = canonical_decimal(mantissa, exp);
+        NumVal(Repr::Decimal { mantissa, exp })
+    }
+
+    /// The exact `i64` value, if it is one. Only `Int` holds an `i64`-range integer.
+    pub(crate) fn to_i64(self) -> Option<i64> {
+        match self.0 {
+            Repr::Int(x) => Some(x),
+            _ => None,
         }
     }
 
     /// The exact `u64` value, if it is a non-negative integer in range.
     pub(crate) fn to_u64(self) -> Option<u64> {
-        match self {
-            NumVal::Int(x) => u64::try_from(x).ok(),
-            NumVal::UInt(x) => Some(x),
-            NumVal::Float(x) => {
-                (x.fract() == 0.0 && x >= 0.0 && x < u64::MAX as f64).then_some(x as u64)
-            }
-            NumVal::Decimal { mantissa, exp } => {
-                decimal_int_value(mantissa, exp).and_then(|v| u64::try_from(v).ok())
-            }
+        match self.0 {
+            Repr::Int(x) => u64::try_from(x).ok(),
+            Repr::UInt(x) => Some(x),
+            _ => None,
         }
     }
 
-    /// The exact `f64` value, if it is exactly representable. (The inline
-    /// representation has its own decimal-exact path; this covers the heap scalar.)
+    /// The exact `f64` value, if it is exactly representable.
     pub(crate) fn to_f64(self) -> Option<f64> {
-        match self {
-            NumVal::Int(x) => can_represent_as_f64(x.unsigned_abs()).then_some(x as f64),
-            NumVal::UInt(x) => can_represent_as_f64(x).then_some(x as f64),
-            NumVal::Float(x) => Some(x),
+        match self.0 {
+            Repr::Int(x) => can_represent_as_f64(x.unsigned_abs()).then_some(x as f64),
+            Repr::UInt(x) => can_represent_as_f64(x).then_some(x as f64),
+            Repr::Float(x) => Some(x),
             // A `Decimal` is, by construction, not exactly an `f64`.
-            NumVal::Decimal { .. } => None,
+            Repr::Decimal { .. } => None,
         }
     }
 
     /// The (possibly lossy) `f64` value.
     pub(crate) fn to_f64_lossy(self) -> f64 {
-        match self {
-            NumVal::Int(x) => x as f64,
-            NumVal::UInt(x) => x as f64,
-            NumVal::Float(x) => x,
-            NumVal::Decimal { mantissa, exp } => decimal_to_f64_lossy(mantissa, exp),
+        match self.0 {
+            Repr::Int(x) => x as f64,
+            Repr::UInt(x) => x as f64,
+            Repr::Float(x) => x,
+            Repr::Decimal { mantissa, exp } => decimal_to_f64_lossy(mantissa, exp),
         }
     }
 
-    /// Hashes by numeric value, so the inline and heap forms of a value (e.g. the
-    /// float `1e18` and the integer `10^18`, which compare equal) agree.
+    /// Hashes by value. The variants are disjoint (equal numbers share one), and each
+    /// is canonical, so each hashes its own fields directly.
     pub(crate) fn hash(self, state: &mut dyn Hasher) {
-        if let Some(x) = self.to_i64() {
-            state.write_i64(x);
-        } else if let Some(x) = self.to_u64() {
-            state.write_u64(x);
-        } else if let NumVal::Decimal { mantissa, exp } = self {
-            // A non-integer decimal is never equal to an integer or an `f64`, so its
-            // hash only has to agree with equal decimals: hash the canonical form.
-            let (m, e) = canonical_decimal(mantissa, exp);
-            state.write_i64(m);
-            state.write_i32(e);
-        } else {
-            let f = self.to_f64_lossy();
-            state.write_u64(if f == 0.0 { 0 } else { f.to_bits() });
+        match self.0 {
+            Repr::Int(x) => state.write_i64(x),
+            Repr::UInt(x) => state.write_u64(x),
+            // `Float` never holds `±0.0` or an integer in `u64` range (those reduce to
+            // `Int`/`UInt`), so its bit pattern is unique per value.
+            Repr::Float(x) => state.write_u64(x.to_bits()),
+            Repr::Decimal { mantissa, exp } => {
+                state.write_i64(mantissa);
+                state.write_i32(exp);
+            }
         }
     }
 
-    /// The exact total order over two numbers, across `Int`/`UInt`/`Float`/`Decimal`.
+    /// The exact total order over two numbers, across every variant.
     pub(crate) fn cmp(self, other: NumVal) -> Ordering {
-        use NumVal::{Decimal, Float, Int, UInt};
-        match (self, other) {
+        use Repr::{Decimal, Float, Int, UInt};
+        match (self.0, other.0) {
             (Int(x), Int(y)) => x.cmp(&y),
             (UInt(x), UInt(y)) => x.cmp(&y),
             (Int(x), UInt(y)) => {
@@ -221,6 +264,41 @@ fn decimal_int_value(mantissa: i64, exp: i32) -> Option<i128> {
         let div = 10i128.pow((-exp) as u32);
         (i128::from(mantissa) % div == 0).then_some(i128::from(mantissa) / div)
     }
+}
+
+/// The exact `f64` value of `mantissa * 10^exp`, if it is exactly representable.
+/// Used both by [`NumVal::from_decimal`] to classify a decimal and by the base-10
+/// inline representation to decode one that is an `f64`.
+pub(crate) fn decimal_to_f64_exact(mantissa: i64, exp: i32) -> Option<f64> {
+    if mantissa == 0 {
+        return Some(0.0);
+    }
+    if exp >= 0 {
+        // A (possibly large) integer; exact iff it fits the `f64` mantissa.
+        let v = decimal_int_value(mantissa, exp)?;
+        i128_fits_f64(v).then_some(v as f64)
+    } else {
+        // `value == num / 2^k` after dividing out `5^k` from `10^k = 2^k * 5^k`;
+        // exact iff `num` fits `f64` (dividing an exact integer by a power of two is
+        // itself exact). Everything fits `i64` for the inline exponent range.
+        let k = (-exp) as u32;
+        let p5 = 5i64.pow(k);
+        if mantissa % p5 != 0 {
+            return None;
+        }
+        let num = mantissa / p5;
+        i64_fits_f64(num).then_some(num as f64 / (1u64 << k) as f64)
+    }
+}
+
+/// `true` if the `i64` value is exactly representable as an `f64`.
+fn i64_fits_f64(v: i64) -> bool {
+    v == 0 || 64 - v.unsigned_abs().leading_zeros() - v.unsigned_abs().trailing_zeros() <= 53
+}
+
+/// `true` if the (larger) `i128` value is exactly representable as an `f64`.
+fn i128_fits_f64(v: i128) -> bool {
+    v == 0 || 128 - v.unsigned_abs().leading_zeros() - v.unsigned_abs().trailing_zeros() <= 53
 }
 
 /// The nearest `f64` to `mantissa * 10^exp`, correctly rounded — even for a
@@ -392,80 +470,53 @@ mod tests {
 
     #[test]
     fn decimal_extracts_integers_but_not_fractions() {
-        // 0.1 is a fraction: not an integer, not an exact f64.
-        let tenth = NumVal::Decimal {
-            mantissa: 1,
-            exp: -1,
-        };
+        // 0.1 is a fraction: not an integer, not an exact f64 — stays a `Decimal`.
+        let tenth = NumVal::from_decimal(1, -1);
         assert_eq!(tenth.to_i64(), None);
         assert_eq!(tenth.to_u64(), None);
         assert_eq!(tenth.to_f64(), None);
         assert_eq!(tenth.to_f64_lossy(), 0.1);
 
-        // 20 * 10^-1 == 2 is an integer-valued decimal.
-        let two = NumVal::Decimal {
-            mantissa: 20,
-            exp: -1,
-        };
+        // 20 * 10^-1 == 2 is an integer-valued decimal: normalises to `Int`.
+        let two = NumVal::from_decimal(20, -1);
         assert_eq!(two.to_i64(), Some(2));
         assert_eq!(two.to_u64(), Some(2));
     }
 
     #[test]
     fn decimal_compares_exactly_against_decimals_and_integers() {
-        let tenth = NumVal::Decimal {
-            mantissa: 1,
-            exp: -1,
-        }; // 0.1
-        let three_tenths = NumVal::Decimal {
-            mantissa: 3,
-            exp: -1,
-        }; // 0.3
-        let tenth_scaled = NumVal::Decimal {
-            mantissa: 10,
-            exp: -2,
-        }; // 0.10 == 0.1
+        let tenth = NumVal::from_decimal(1, -1); // 0.1
+        let three_tenths = NumVal::from_decimal(3, -1); // 0.3
+        let tenth_scaled = NumVal::from_decimal(10, -2); // 0.10 == 0.1
         assert_eq!(tenth.cmp(three_tenths), Ordering::Less);
         assert_eq!(tenth.cmp(tenth_scaled), Ordering::Equal);
-        assert_eq!(tenth.cmp(NumVal::Int(0)), Ordering::Greater);
-        assert_eq!(tenth.cmp(NumVal::Int(1)), Ordering::Less);
+        assert_eq!(tenth.cmp(NumVal::from_i64(0)), Ordering::Greater);
+        assert_eq!(tenth.cmp(NumVal::from_i64(1)), Ordering::Less);
 
         // An integer-valued decimal orders exactly with the equal integer.
-        let two = NumVal::Decimal {
-            mantissa: 20,
-            exp: -1,
-        };
-        assert_eq!(two.cmp(NumVal::Int(2)), Ordering::Equal);
-        assert_eq!(two.cmp(NumVal::UInt(2)), Ordering::Equal);
-        assert_eq!(NumVal::Int(2).cmp(two), Ordering::Equal);
+        let two = NumVal::from_decimal(20, -1);
+        assert_eq!(two.cmp(NumVal::from_i64(2)), Ordering::Equal);
+        assert_eq!(two.cmp(NumVal::from_u64(2)), Ordering::Equal);
+        assert_eq!(NumVal::from_i64(2).cmp(two), Ordering::Equal);
     }
 
     #[test]
     fn decimal_hash_stays_consistent_with_equality() {
         // An integer-valued decimal hashes like the equal integer.
-        let two_dec = NumVal::Decimal {
-            mantissa: 20,
-            exp: -1,
-        };
-        assert_eq!(hash_of(two_dec), hash_of(NumVal::Int(2)));
-        assert_eq!(hash_of(two_dec), hash_of(NumVal::UInt(2)));
+        let two_dec = NumVal::from_decimal(20, -1);
+        assert_eq!(hash_of(two_dec), hash_of(NumVal::from_i64(2)));
+        assert_eq!(hash_of(two_dec), hash_of(NumVal::from_u64(2)));
 
         // Equal fractions hash alike (canonical form), regardless of how the
         // mantissa/exponent are written.
-        let a = NumVal::Decimal {
-            mantissa: 1,
-            exp: -1,
-        };
-        let b = NumVal::Decimal {
-            mantissa: 10,
-            exp: -2,
-        };
+        let a = NumVal::from_decimal(1, -1);
+        let b = NumVal::from_decimal(10, -2);
         assert_eq!(hash_of(a), hash_of(b));
 
         // The exact decimal 0.1 and the f64 0.1 are *different* numbers, so they
         // are unequal — and hashing them differently is therefore allowed.
-        assert_ne!(a.cmp(NumVal::Float(0.1)), Ordering::Equal);
-        assert_eq!(a.cmp(NumVal::Float(0.1)), Ordering::Less);
+        assert_ne!(a.cmp(NumVal::from_f64(0.1)), Ordering::Equal);
+        assert_eq!(a.cmp(NumVal::from_f64(0.1)), Ordering::Less);
     }
 
     #[test]

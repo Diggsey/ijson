@@ -10,7 +10,7 @@
 //!
 //! The value is an exact decimal `mantissa * 10^exp` with `exp` in `-7..=7`. Unlike
 //! the binary encoding it can represent values that are not exact `f64`s — e.g. the
-//! fraction `0.1 == 1 * 10^-1` — which reduce to a `NumVal::Decimal` holding the
+//! fraction `0.1 == 1 * 10^-1` — which reduce to a `Decimal` [`NumVal`] holding the
 //! exact value. Larger or more precise decimals spill to the heap arbitrary-
 //! precision representation.
 //!
@@ -48,8 +48,8 @@ use super::number::{from_str_with, InlineNumber, InlineNumberError};
 use super::InlineValue;
 use crate::number::INumber;
 use crate::value::{
-    decimal_to_f64_lossy, number_cmp, Destructured, DestructuredMut, DestructuredRef, IValue,
-    NumVal, NumberRepr, ValueType,
+    decimal_to_f64_exact, decimal_to_f64_lossy, number_cmp, Destructured, DestructuredMut,
+    DestructuredRef, IValue, NumVal, NumberRepr, ValueType,
 };
 
 // --- Bit layout -------------------------------------------------------------
@@ -121,11 +121,6 @@ fn integer_decode(value: f64) -> (u64, i32, bool) {
     }
 }
 
-/// `true` if the `i64` value `v` is exactly representable as an `f64`.
-fn i64_fits_f64(v: i64) -> bool {
-    v == 0 || 64 - v.unsigned_abs().leading_zeros() - v.unsigned_abs().trailing_zeros() <= 53
-}
-
 // --- f64 decomposition helpers ----------------------------------------------
 
 const POW5: [u128; 8] = [1, 5, 25, 125, 625, 3125, 15625, 78125];
@@ -141,11 +136,6 @@ fn shl_checked(x: u128, n: u32) -> Option<u128> {
     } else {
         None
     }
-}
-
-/// `true` if the (larger) `i128` value `v` is exactly representable as an `f64`.
-fn i128_fits_f64(v: i128) -> bool {
-    v == 0 || 128 - v.unsigned_abs().leading_zeros() - v.unsigned_abs().trailing_zeros() <= 53
 }
 
 /// If `value` (= `sign * m * 2^e2`) is an exact integer, returns it.
@@ -199,50 +189,8 @@ fn encode_int_float(value: i128) -> Option<usize> {
 
 // --- Decode helpers ---------------------------------------------------------
 
-/// The exact integer value of `mantissa * 10^exp` if it is an integer that fits
-/// `i64`; `None` if it is fractional or out of `i64` range.
-fn decimal_to_i64(m: i64, exp: i32) -> Option<i64> {
-    if exp >= 0 {
-        m.checked_mul(10i64.pow(exp as u32))
-    } else {
-        let div = 10i64.pow((-exp) as u32);
-        (m % div == 0).then_some(m / div)
-    }
-}
-
-/// The exact integer value of `mantissa * 10^exp`, if it is an integer. Used for
-/// the f64-exactness check, where the value can exceed `i64` (a large
-/// integer-valued float, up to ~`3.6e23`).
-fn decimal_to_i128(m: i64, exp: i32) -> Option<i128> {
-    // `exp` is non-negative here (fractional values divide instead); the product
-    // can exceed `i64` but always fits `i128`.
-    i128::from(m).checked_mul(10i128.pow(exp as u32))
-}
-
-/// The exact `f64` value of `mantissa * 10^exp`, if it is exactly representable.
-fn decimal_to_f64_exact(m: i64, exp: i32) -> Option<f64> {
-    if m == 0 {
-        return Some(0.0);
-    }
-    if exp >= 0 {
-        // The value can exceed `i64` here (a large integer-valued float).
-        let v = decimal_to_i128(m, exp)?;
-        i128_fits_f64(v).then_some(v as f64)
-    } else {
-        // Fractional: `value == num / 2^k` after dividing out `5^k`. Everything
-        // fits `i64` (`m` is the mantissa, `5^k <= 5^7`), and dividing an exact
-        // integer by a power of two is itself exact.
-        let k = (-exp) as u32;
-        let p5 = 5i64.pow(k);
-        if m % p5 != 0 {
-            return None;
-        }
-        let num = m / p5;
-        i64_fits_f64(num).then_some(num as f64 / (1u64 << k) as f64)
-    }
-}
-
-/// The exact `f64` value, if exactly representable.
+/// The exact `f64` value, if exactly representable. (`decimal_to_f64_exact` is the
+/// shared numeric helper, also used by [`NumVal::from_decimal`].)
 fn to_f64_exact(bits: usize) -> Option<f64> {
     let (m, exp) = decode(bits);
     decimal_to_f64_exact(m, exp)
@@ -387,20 +335,14 @@ impl InlineNumber for InlineNumberRepr {
     }
 }
 
-/// Decodes inline bits to a [`NumVal`]. An integer that fits `i64` becomes `Int`; a
-/// value that is exactly an `f64` becomes `Float`; anything else — an exact
-/// `mantissa * 10^exp` that is neither (e.g. `0.1`) — becomes the exact `Decimal`.
-/// This covers the whole representable domain, not just what today's constructors
-/// produce.
+/// Decodes inline bits to a [`NumVal`]. `NumVal::from_decimal` does the
+/// classification: an integer becomes `Int`/`UInt`, a value that is exactly an `f64`
+/// becomes `Float`, and anything else — an exact `mantissa * 10^exp` that is neither
+/// (e.g. `0.1`) — becomes the exact `Decimal`. This covers the whole representable
+/// domain, not just what today's constructors produce.
 fn num_val(bits: usize) -> NumVal {
-    let (m, exp) = decode(bits);
-    if let Some(i) = decimal_to_i64(m, exp) {
-        NumVal::Int(i)
-    } else if let Some(f) = decimal_to_f64_exact(m, exp) {
-        NumVal::Float(f)
-    } else {
-        NumVal::Decimal { mantissa: m, exp }
-    }
+    let (mantissa, exp) = decode(bits);
+    NumVal::from_decimal(mantissa, exp)
 }
 
 impl NumberRepr for InlineNumberRepr {
@@ -512,9 +454,11 @@ mod tests {
             to_f64_exact(bits).is_none(),
             "0.1 is not exactly representable as f64"
         );
-        match num_val(bits) {
-            NumVal::Decimal { mantissa, exp } => assert_eq!((mantissa, exp), (1, -1)),
-            _ => panic!("expected an exact Decimal"),
-        }
+        // A non-integer, non-`f64` decimal: neither `to_i64` nor `to_f64` succeeds,
+        // yet the exact value round-trips through the lossy conversion.
+        let nv = num_val(bits);
+        assert_eq!(nv.to_i64(), None);
+        assert_eq!(nv.to_f64(), None);
+        assert_eq!(nv.to_f64_lossy(), 0.1);
     }
 }

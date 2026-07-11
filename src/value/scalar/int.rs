@@ -60,7 +60,7 @@ impl ValueRepr for I64Repr {
 impl NumberRepr for I64Repr {
     /// Decodes the payload as an `i64`. Safety: `v` must be a live `NumberI64`.
     unsafe fn num_val(&self, v: &IValue) -> NumVal {
-        NumVal::Int(read::<i64>(v.ptr()))
+        NumVal::from_i64(read::<i64>(v.ptr()))
     }
     // `has_decimal_point` and the numeric conversions use the `NumberRepr` defaults
     // (an integer, never written with a decimal point; conversions via `num_val`).

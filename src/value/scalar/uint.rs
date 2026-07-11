@@ -61,7 +61,7 @@ impl ValueRepr for U64Repr {
 impl NumberRepr for U64Repr {
     /// Decodes the payload as a `u64`. Safety: `v` must be a live `NumberU64`.
     unsafe fn num_val(&self, v: &IValue) -> NumVal {
-        NumVal::UInt(read::<u64>(v.ptr()))
+        NumVal::from_u64(read::<u64>(v.ptr()))
     }
     // `has_decimal_point` and the numeric conversions use the `NumberRepr` defaults.
 }
