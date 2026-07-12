@@ -52,7 +52,8 @@ pub(crate) trait InlineNumber {
     /// Constructs an inline `IValue` from an `i64`, or `None` if it does not fit
     /// inline (so the caller falls back to a heap scalar).
     fn from_i64(value: i64) -> Option<IValue> {
-        Self::encode_int(value).map(IValue::new_inline_number)
+        // Safety: `encode_int` returns valid inline-number bits.
+        Self::encode_int(value).map(|bits| unsafe { IValue::new_inline_number(bits) })
     }
     /// Constructs an inline `IValue` from a `u64`, or `None` if it does not fit —
     /// the inline form only holds the signed range.
@@ -62,7 +63,8 @@ pub(crate) trait InlineNumber {
     /// Constructs an inline `IValue` from a finite `f64`, or `None` if it does not
     /// fit inline.
     fn from_f64(value: f64) -> Option<IValue> {
-        Self::encode_f64(value).map(IValue::new_inline_number)
+        // Safety: `encode_f64` returns valid inline-number bits.
+        Self::encode_f64(value).map(|bits| unsafe { IValue::new_inline_number(bits) })
     }
 }
 

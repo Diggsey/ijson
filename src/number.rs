@@ -251,7 +251,8 @@ impl FromStr for INumber {
         // spills (a valid number too large for the inline form) do we fall back to
         // a heap representation appropriate to its shape.
         let value = match InlineNumberRepr::from_str(s) {
-            Ok(bits) => IValue::new_inline_number(bits),
+            // Safety: `from_str` returns valid inline-number bits.
+            Ok(bits) => unsafe { IValue::new_inline_number(bits) },
             Err(InlineNumberError::Invalid) => return Err(ParseNumberError(())),
             Err(InlineNumberError::Spill(NumberShape::Integer)) => {
                 if let Ok(v) = s.parse::<i64>() {

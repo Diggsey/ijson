@@ -54,6 +54,12 @@ pub(crate) struct SplitHeader<'a> {
 impl SplitHeader<'_> {
     pub(crate) fn find_bucket(&self, key: &IString) -> Result<usize, usize> {
         let hash_cap = ObjectRepr::hash_capacity(self.cap);
+        // This probes the table (and indexes `items` for occupied slots) with
+        // `get_unchecked`, relying on two structural invariants the caller upholds: the
+        // table is non-empty — an empty object has no table, and `hash_bucket` would
+        // divide by zero — and every occupied table slot holds an `index <
+        // items.len()`. Both are maintained by the insert/remove/shift paths.
+        debug_assert!(hash_cap > 0, "find_bucket on a zero-capacity table");
         let initial_bucket = ObjectRepr::hash_bucket(key, hash_cap);
         unsafe {
             // Linear search from expected bucket
@@ -86,6 +92,11 @@ impl SplitHeader<'_> {
     // Safety: index must be in bounds
     pub(crate) unsafe fn find_bucket_from_index(&self, index: usize) -> usize {
         let hash_cap = ObjectRepr::hash_capacity(self.cap);
+        // As in `find_bucket`, the table must be non-empty (this item is present in it).
+        debug_assert!(
+            hash_cap > 0,
+            "find_bucket_from_index on a zero-capacity table"
+        );
         let key = &self.items.get_unchecked(index).key;
         let mut bucket = ObjectRepr::hash_bucket(key, hash_cap);
 

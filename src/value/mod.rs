@@ -831,12 +831,15 @@ impl IValue {
         })
     }
 
-    /// Wraps already-encoded inline-number bits as an `IValue`. The bits come from
-    /// the active representation's encoder (`InlineNumber::from_str`/`encode_*`),
-    /// e.g. when `INumber::from_str` stores a parsed number inline.
-    pub(crate) fn new_inline_number(bits: usize) -> Self {
-        // Safety: `bits` is a valid inline number encoding from the representation.
-        unsafe { Self::new_usize(ReprTag::Inline, bits) }
+    /// Wraps already-encoded inline-number bits as an `IValue`.
+    ///
+    /// Safety: `bits` must be a valid inline-number encoding produced by the active
+    /// representation's encoder (`InlineNumber::from_str`/`encode_*`). Arbitrary bits
+    /// could set the string/constant family flags or be the all-zero niche, producing
+    /// a mis-tagged value. This is `unsafe` so that obligation is acknowledged at each
+    /// call, matching `new_usize`.
+    pub(crate) unsafe fn new_inline_number(bits: usize) -> Self {
+        Self::new_usize(ReprTag::Inline, bits)
     }
 
     /// Whether this number was written with a decimal point (`1.0` vs `1`).
@@ -1275,12 +1278,20 @@ typed_conversions! {
         IndexMap<K, V> where (K: Into<IString>, V: Into<IValue>);
 }
 
+/// Converts an `f32` to a JSON number. A non-finite value (NaN or infinity) has no
+/// JSON number representation; because this conversion is infallible it yields
+/// [`IValue::NULL`] for such a value, whereas the fallible [`INumber::try_from`]
+/// rejects it.
 impl From<f32> for IValue {
     fn from(v: f32) -> Self {
         INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
     }
 }
 
+/// Converts an `f64` to a JSON number. A non-finite value (NaN or infinity) has no
+/// JSON number representation; because this conversion is infallible it yields
+/// [`IValue::NULL`] for such a value, whereas the fallible [`INumber::try_from`]
+/// rejects it.
 impl From<f64> for IValue {
     fn from(v: f64) -> Self {
         INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
