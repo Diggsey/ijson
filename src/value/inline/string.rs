@@ -1,10 +1,9 @@
 //! The inline short-string representation.
 //!
 //! A string of at most [`CAPACITY`] bytes is packed into the value with the
-//! `Inline` tag and the string sub-family flag. The low byte is the control
-//! byte — the `Inline` tag (bits 0-2), the string sub-family flag (bit 3), the
-//! constant flag clear (bit 4; set only for the `null`/`false`/`true` constants),
-//! and the length (bits 5-7). The remaining bytes hold the UTF-8 data.
+//! `Inline` tag and the string flag. The low byte is the control byte — the
+//! `Inline` tag (bits 0-2), the number flag clear (bit 3), the string flag set
+//! (bit 4), and the length (bits 5-7). The remaining bytes hold the UTF-8 data.
 //!
 //! The encode/decode helpers are associated functions of [`InlineStringRepr`] that
 //! operate on the raw inline bits (and, for the borrowed bytes, a pointer to the
@@ -14,7 +13,7 @@ use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
 use std::ptr::NonNull;
 
-use super::{InlineValue, STR_FAMILY};
+use super::{InlineValue, IS_STRING, TAG_MASK};
 use crate::string::IString;
 use crate::value::{
     string_cmp, string_debug, Destructured, DestructuredMut, DestructuredRef, IValue, StringRepr,
@@ -57,12 +56,18 @@ impl InlineStringRepr {
     fn encode(s: &str) -> usize {
         debug_assert!(s.len() <= CAPACITY);
 
-        // The control byte sets the string sub-family flag and the length (the
-        // `Inline` tag bits are zero), and the remaining bytes carry the characters.
+        // The control byte sets the string flag and the length (the number flag and
+        // the `Inline` tag bits are zero); the remaining bytes carry the characters.
         let mut bytes = [0u8; std::mem::size_of::<usize>()];
-        bytes[CONTROL_OFFSET] = STR_FAMILY as u8 | ((s.len() as u8) << LEN_SHIFT);
+        bytes[CONTROL_OFFSET] = IS_STRING as u8 | ((s.len() as u8) << LEN_SHIFT);
         bytes[CHAR_OFFSET..CHAR_OFFSET + s.len()].copy_from_slice(s.as_bytes());
-        usize::from_ne_bytes(bytes)
+        let bits = usize::from_ne_bytes(bytes);
+        debug_assert_eq!(
+            bits & TAG_MASK,
+            0,
+            "inline string must leave the tag bits clear"
+        );
+        bits
     }
 
     /// The byte length of an inline string, read from the control byte.

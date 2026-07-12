@@ -1,43 +1,51 @@
 //! The inline constant representation: `null` and the two booleans.
 //!
-//! The three constants are the string/constant sub-family with the `CONST_FLAG` bit
-//! set (see [`super`]); the [`Constant`] discriminant is packed into the payload
-//! bits. A single [`ConstantRepr`] handles all three, decoding the discriminant from
-//! the value's own bits. Each is a fixed bit pattern with no payload to free, so it
-//! keeps the inline defaults for everything except comparison, debug formatting and
-//! destructuring.
+//! The three constants are the inline family with both the number bit (`IS_NUMBER`)
+//! and the string bit (`IS_STRING`) clear (see [`super`]); the [`Constant`]
+//! discriminant is packed into the payload bits. Discriminants are numbered from 1 so
+//! that no constant is the all-zero niche word. A single [`ConstantRepr`] handles all
+//! three, decoding the discriminant from the value's own bits. Each is a fixed bit
+//! pattern with no payload to free, so it keeps the inline defaults for everything
+//! except comparison, debug formatting and destructuring.
 
 use std::cmp::Ordering;
 
-use super::{CONST_FLAG, PAYLOAD_SHIFT, STR_FAMILY};
+use super::{PAYLOAD_SHIFT, TAG_MASK};
 use crate::value::{BoolMut, Destructured, DestructuredMut, DestructuredRef, IValue, ValueType};
 
-/// The three inline constants, numbered from zero. The discriminant is stored in the
-/// payload bits and also gives the constants their order (`null` < `false` < `true`;
-/// only the same-type comparisons — two `null`s or two `bool`s — are ever observed).
+/// The three inline constants, numbered from one (zero is the reserved niche word).
+/// The discriminant is stored in the payload bits and also gives the constants their
+/// order (`null` < `false` < `true`; only the same-type comparisons — two `null`s or
+/// two `bool`s — are ever observed).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(usize)]
 pub(crate) enum Constant {
-    Null = 0,
-    False = 1,
-    True = 2,
+    Null = 1,
+    False = 2,
+    True = 3,
 }
 
 /// The inline representation of the `null`/`false`/`true` constants.
 pub(crate) struct ConstantRepr;
 
 impl ConstantRepr {
-    /// The inline bits for a constant.
+    /// The inline bits for a constant: the number and string bits clear (so `kind()`
+    /// classifies it as a constant), with the discriminant in the payload bits.
     const fn encode(c: Constant) -> usize {
-        STR_FAMILY | CONST_FLAG | ((c as usize) << PAYLOAD_SHIFT)
+        let bits = (c as usize) << PAYLOAD_SHIFT;
+        debug_assert!(
+            bits & TAG_MASK == 0,
+            "inline constant must leave the tag bits clear"
+        );
+        bits
     }
 
     /// The constant an inline constant value holds.
     fn decode(bits: usize) -> Constant {
         match (bits >> PAYLOAD_SHIFT) & 0b11 {
-            0 => Constant::Null,
-            1 => Constant::False,
-            2 => Constant::True,
+            1 => Constant::Null,
+            2 => Constant::False,
+            3 => Constant::True,
             _ => unreachable!("only the three constants are ever encoded"),
         }
     }

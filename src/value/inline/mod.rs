@@ -4,16 +4,18 @@
 //! [`IValue`] rather than behind a pointer. The bits just above the tag pick the
 //! sub-family (see [`InlineKind`] and [`InlineRepr::kind`]):
 //!
-//!   - bit 3 clear => number: `mantissa * BASE^exp`, base 10 or 2 (see
+//!   - bit 3 set   => number: `mantissa * BASE^exp`, base 10 or 2 (see
 //!     [`number_decimal`]/[`number_binary`], one selected as [`InlineNumberRepr`]).
-//!   - bit 3 set   => string or constant, distinguished by bit 4 (`CONST_FLAG`,
-//!     adjacent to the family bit):
-//!       - bit 4 clear => string (see [`string`]); bits 5-7 hold its length.
-//!       - bit 4 set   => constant: `null` / `false` / `true` (see [`constant`]);
-//!         bits 5-7 hold the constant's discriminant.
+//!   - bit 3 clear => string or constant, distinguished by bit 4 (`IS_STRING`,
+//!     adjacent to the number bit):
+//!       - bit 4 set   => string (see [`string`]); bits 5-7 hold its length.
+//!       - bit 4 clear => constant: `null` / `false` / `true` (see [`constant`]);
+//!         bits 5-7 hold the constant's discriminant (numbered from 1).
 //!
-//! The all-zero value is never produced (the number exponent is biased so integer
-//! zero is non-zero), reserving it as the `NonNull` niche.
+//! The all-zero word is never produced — a number sets bit 3, a string sets bit 4,
+//! and constant discriminants start at 1 — reserving it as the `NonNull` niche. Each
+//! sub-family is thus non-null on its own, so no representation has to shape its
+//! encoding to dodge the niche.
 
 pub(crate) mod constant;
 pub(crate) mod number;
@@ -42,14 +44,22 @@ use std::hash::Hasher;
 
 use crate::value::{Destructured, DestructuredMut, DestructuredRef, IValue, ValueRepr, ValueType};
 
-// Bit 3: set for the string/constant sub-family, clear for inline numbers.
-const STR_FAMILY: usize = 1 << 3;
-// Bit 4 (adjacent to the family bit): within the string/constant sub-family, set
-// for a constant (`null`/`false`/`true`), clear for an inline string.
-const CONST_FLAG: usize = 1 << 4;
-// Bits 5-7 carry the payload of a string/constant value: an inline string's length
-// or a constant's discriminant (see [`constant::Constant`]).
+// Bit 3: set for an inline number, clear for a string or constant. A single positive
+// predicate ("is a number") — and, because every number sets it, a number word is
+// never all-zero, so the number codec needs no niche-avoidance of its own.
+const IS_NUMBER: usize = 1 << 3;
+// Bit 4 (only meaningful when `IS_NUMBER` is clear): set for an inline string, clear
+// for a constant (`null`/`false`/`true`). A string always sets it, so even the empty
+// inline string is non-zero.
+const IS_STRING: usize = 1 << 4;
+// Bits 5-7 carry the payload of a string or constant: an inline string's length or a
+// constant's discriminant (see [`constant::Constant`]).
 const PAYLOAD_SHIFT: u32 = 5;
+
+// The `Inline` tag occupies the low 3 bits and is all-zero, so an encoded inline
+// payload must leave them clear for the tag to survive `IValue::new_usize`. Every
+// `encode` helper debug-asserts its result against this.
+const TAG_MASK: usize = super::ALIGNMENT - 1;
 
 /// Which of the three inline sub-families a value belongs to — exactly the
 /// distinction the inline bits encode, unlike the six-way [`ValueType`]. (The null
@@ -102,9 +112,9 @@ impl InlineRepr {
     /// Which inline sub-family `v` belongs to.
     fn kind(v: &IValue) -> InlineKind {
         let bits = v.usize_();
-        if bits & STR_FAMILY == 0 {
+        if bits & IS_NUMBER != 0 {
             InlineKind::Number
-        } else if bits & CONST_FLAG == 0 {
+        } else if bits & IS_STRING != 0 {
             InlineKind::String
         } else {
             InlineKind::Constant
@@ -152,5 +162,44 @@ impl ValueRepr for InlineRepr {
     }
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
         Self::inner(v).destructure_mut(v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kinds_classify_and_avoid_the_niche() {
+        // Build each inline sub-family through its real constructors and check that
+        // `kind()` classifies it and that no encoding is the all-zero niche word.
+        // Integer zero is the case the old layout had to bias away from zero; here it
+        // is non-zero structurally, because every number sets `IS_NUMBER`.
+        let numbers = [
+            IValue::new_i64(0),
+            IValue::new_i64(1),
+            IValue::new_i64(-1),
+            IValue::new_f64(0.5),
+            IValue::new_f64(0.0),
+        ];
+        let strings = [IValue::new_string(""), IValue::new_string("inline")];
+        let constants = [IValue::NULL, IValue::TRUE, IValue::FALSE];
+
+        for v in &numbers {
+            assert!(matches!(InlineRepr::kind(v), InlineKind::Number), "{:?}", v);
+        }
+        for v in &strings {
+            assert!(matches!(InlineRepr::kind(v), InlineKind::String), "{:?}", v);
+        }
+        for v in &constants {
+            assert!(
+                matches!(InlineRepr::kind(v), InlineKind::Constant),
+                "{:?}",
+                v
+            );
+        }
+        for v in numbers.iter().chain(&strings).chain(&constants) {
+            assert_ne!(v.usize_(), 0, "{:?} is the reserved all-zero niche", v);
+        }
     }
 }

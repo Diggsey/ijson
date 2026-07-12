@@ -1,10 +1,10 @@
 //! The base-2 inline number representation (used *without* `arbitrary_precision`).
 //!
 //! A small number is packed directly into a pointer-sized [`IValue`] with the
-//! `Inline` tag and the number sub-family (bit 3 clear):
+//! `Inline` tag and the number bit (bit 3) set:
 //!
 //!   bits 0-2 : tag (Inline == 0)
-//!   bit 3    : 0 (number sub-family)
+//!   bit 3    : 1 (the number bit; also keeps the word non-zero)
 //!   bits 4-7 : exponent code (see below)
 //!   bits 8.. : signed mantissa
 //!
@@ -25,8 +25,9 @@
 //!
 //! Every code except the reserved `15` is `exp + 7` ([`EXP_BIAS`]), so the exponent
 //! is a single subtraction and every such value has a decimal point. The reserved
-//! code is the *maximum* so that integer zero (mantissa 0) is never the all-zero
-//! bit pattern, which is reserved as the `NonNull` niche.
+//! code is simply the one 4-bit value left over after the dotted exponents. (Integer
+//! zero is never the all-zero niche word: the number bit at bit 3 keeps every inline
+//! number non-zero.)
 //!
 //! This module is a complete, independent inline number representation, selected by
 //! `arbitrary_precision` being off; the base-10 counterpart is `number_decimal.rs`.
@@ -55,13 +56,18 @@ const MANTISSA_SHIFT: u32 = 8;
 /// Bits available for the signed inline mantissa (56 on 64-bit, 24 on 32-bit).
 const MANTISSA_BITS: u32 = usize::BITS - MANTISSA_SHIFT;
 
+// A number's fields sit strictly above the number bit (`IS_NUMBER`, bit 3): the
+// exponent code at `EXP_SHIFT`, the mantissa at `MANTISSA_SHIFT`. `encode` sets
+// `IS_NUMBER` unconditionally, so classification never depends on the payload — but a
+// field overlapping bit 3 would still corrupt decoding, so pin the boundary here.
+const _: () = assert!(super::IS_NUMBER < (1usize << EXP_SHIFT));
+
 /// Every non-reserved code is `exp + EXP_BIAS`, so the exponent is a single
 /// subtraction. With `EXP_BIAS == 7`, codes `0..=14` cover exp `-7..=7`.
 const EXP_BIAS: i32 = 7;
-/// Reserved (maximum) code for a plain integer at exponent 0 with no decimal
-/// point. It is the max rather than `0` so that integer zero (mantissa 0) never
-/// becomes the all-zero niche pattern. It is also the *only* code without a
-/// decimal point.
+/// Reserved (maximum) code for a plain integer at exponent 0 with no decimal point.
+/// Codes `0..=14` are the dotted exponents `-7..=7`, so this marker takes the one
+/// remaining 4-bit code. It is the *only* code without a decimal point.
 const INT_EXP0_CODE: usize = 15;
 
 fn fits_mantissa(m: i128) -> bool {
@@ -90,7 +96,15 @@ fn code_has_dot(code: usize) -> bool {
 }
 
 fn encode(mantissa: i64, code: usize) -> usize {
-    ((mantissa as usize) << MANTISSA_SHIFT) | (code << EXP_SHIFT)
+    // `IS_NUMBER` (bit 3) marks the word as a number and keeps it non-zero; the
+    // exponent code and mantissa sit above it.
+    let bits = super::IS_NUMBER | ((mantissa as usize) << MANTISSA_SHIFT) | (code << EXP_SHIFT);
+    debug_assert_eq!(
+        bits & super::TAG_MASK,
+        0,
+        "inline number must leave the tag bits clear"
+    );
+    bits
 }
 fn mantissa(bits: usize) -> i64 {
     // Arithmetic shift sign-extends the mantissa from the top bits.
@@ -285,7 +299,8 @@ mod tests {
         assert!(!code_has_dot(INT_EXP0_CODE));
         assert_ne!(exp_code(0, false), exp_code(0, true));
 
-        // Integer zero (and 0.0) must never be the all-zero niche pattern.
+        // Integer zero (and 0.0) are non-zero because every number sets `IS_NUMBER`,
+        // so they are never the all-zero niche.
         assert_eq!(
             BinaryNumberRepr::encode_int(0),
             Some(encode(0, INT_EXP0_CODE))
