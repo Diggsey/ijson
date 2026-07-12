@@ -265,6 +265,22 @@ pub enum ValueType {
 unsafe impl Send for IValue {}
 unsafe impl Sync for IValue {}
 
+/// A `#[repr(transparent)]` newtype whose sole field is an [`IValue`]. Only such a
+/// type may be produced by [`IValue::unchecked_cast_ref`]/[`unchecked_cast_mut`],
+/// which reinterpret an `&IValue` as `&T` — a bit-cast sound only when `T` has
+/// identical layout. The trait is private to this module, so the set of transparent
+/// wrappers is sealed here and the layout half of the cast is compiler-checked; the
+/// caller only has to uphold the runtime-type half.
+///
+/// # Safety
+///
+/// `Self` must be a `#[repr(transparent)]` struct with a single `IValue` field.
+unsafe trait TransparentIValue {}
+unsafe impl TransparentIValue for INumber {}
+unsafe impl TransparentIValue for IString {}
+unsafe impl TransparentIValue for IArray {}
+unsafe impl TransparentIValue for IObject {}
+
 impl IValue {
     // Builds a value whose entire word is `tag | payload`, with no heap pointer.
     // Two things carry their whole value in the word: an inline value (`tag` is
@@ -466,11 +482,18 @@ impl IValue {
         self.type_() == ValueType::Number
     }
 
-    unsafe fn unchecked_cast_ref<T>(&self) -> &T {
+    /// Reinterprets this value as one of its transparent wrappers `T`.
+    ///
+    /// Safety: this value's runtime JSON type must be the one `T` wraps (e.g. `T =
+    /// INumber` requires `self.is_number()`). The layout half — that `T` is a
+    /// transparent newtype over `IValue` — is guaranteed by the `TransparentIValue`
+    /// bound, so it cannot be gotten wrong.
+    unsafe fn unchecked_cast_ref<T: TransparentIValue>(&self) -> &T {
         &*(self as *const Self).cast::<T>()
     }
 
-    unsafe fn unchecked_cast_mut<T>(&mut self) -> &mut T {
+    /// Mutable [`unchecked_cast_ref`](Self::unchecked_cast_ref); same safety contract.
+    unsafe fn unchecked_cast_mut<T: TransparentIValue>(&mut self) -> &mut T {
         &mut *(self as *mut Self).cast::<T>()
     }
 

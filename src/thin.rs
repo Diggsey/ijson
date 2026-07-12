@@ -9,6 +9,9 @@ pub struct ThinRef<'a, T> {
 }
 
 impl<T> ThinRef<'_, T> {
+    /// Safety: `ptr` must point to a valid, initialised `T` that stays valid for `'a`
+    /// and is not mutably aliased for `'a` — a `ThinRef` hands out shared `&T` borrows,
+    /// so a concurrent `&mut T` (or `ThinMut`) to the same `T` would be UB.
     pub unsafe fn new(ptr: NonNull<T>) -> Self {
         Self {
             ptr,
@@ -21,6 +24,7 @@ impl<T> Deref for ThinRef<'_, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
+        // Safety: `ptr` is valid for `'a` and unaliased by `ThinRef::new`'s contract.
         unsafe { &*self.ptr() }
     }
 }
@@ -39,6 +43,10 @@ pub struct ThinMut<'a, T> {
 }
 
 impl<T> ThinMut<'_, T> {
+    /// Safety: `ptr` must point to a valid, initialised `T` that stays valid for `'a`,
+    /// and the referent must be *exclusively* borrowed for `'a` — no other live
+    /// `ThinRef`, `ThinMut`, `&T`, or `&mut T` may alias it. (`ThinMut` hands out
+    /// `&mut T` through `DerefMut`, so a second view of the same `T` would be UB.)
     pub unsafe fn new(ptr: NonNull<T>) -> Self {
         Self {
             ptr,
