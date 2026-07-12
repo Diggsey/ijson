@@ -379,6 +379,43 @@ impl ObjectRepr {
             unsafe { IValue::new_ptr(ReprTag::Object, Self::alloc(cap).cast()) }
         }
     }
+
+    /// Reallocates to hold exactly `cap` entries, rehashing every entry into the new
+    /// table. Safety: `v` must be an object (and `cap >= len`).
+    unsafe fn resize_internal(v: &mut IValue, cap: usize) {
+        let mut old = mem::replace(v, Self::with_capacity(cap));
+        // A zero target capacity is the empty (unallocated) form, so there is no table
+        // to rehash into — `old` is then empty too and the loop does nothing.
+        if Self::capacity(v) != 0 {
+            let mut hd = Self::header_mut(v);
+            // Move each entry out of `old` and re-insert it, rehashing into the new
+            // capacity. Keys are unique, so every `find_bucket` reports a free slot.
+            while Self::len(&old) != 0 {
+                let (key, value) = Self::header_mut(&mut old).pop();
+                if let Err(bucket) = hd.split().find_bucket(&key) {
+                    let index = hd.push(key, value);
+                    hd.reborrow().split_mut().shift(bucket, index);
+                }
+            }
+        }
+        // `old`, now empty, is dropped here — freeing its former allocation.
+    }
+
+    /// Reserves capacity for at least `additional` more entries, matching the array
+    /// growth policy. Safety: `v` must be an object.
+    pub(crate) unsafe fn reserve(v: &mut IValue, additional: usize) {
+        let current_capacity = Self::capacity(v);
+        let desired_capacity = Self::len(v).checked_add(additional).unwrap();
+        if current_capacity >= desired_capacity {
+            return;
+        }
+        Self::resize_internal(v, (current_capacity * 2).max(desired_capacity.max(4)));
+    }
+
+    /// Shrinks the allocation so capacity equals length. Safety: `v` must be an object.
+    pub(crate) unsafe fn shrink_to_fit(v: &mut IValue) {
+        Self::resize_internal(v, Self::len(v));
+    }
 }
 
 impl ValueRepr for ObjectRepr {

@@ -13,7 +13,7 @@
 //! has the `Object` tag, which is the precondition the `value::object` header
 //! accessors require.
 
-use std::cmp::{self, Ordering};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::{Hash, Hasher};
@@ -304,9 +304,6 @@ impl IObject {
         ObjectRepr::header_mut(&mut self.0)
     }
 
-    fn is_static(&self) -> bool {
-        self.capacity() == 0
-    }
     /// Returns the capacity of the object. This is the maximum number of entries the object
     /// can hold without reallocating.
     #[must_use]
@@ -326,29 +323,10 @@ impl IObject {
         self.len() == 0
     }
 
-    fn resize_internal(&mut self, cap: usize) {
-        let old_obj = mem::replace(self, Self::with_capacity(cap));
-        if !self.is_static() {
-            unsafe {
-                let mut hd = self.header_mut();
-                for (k, v) in old_obj {
-                    if let Err(bucket) = hd.split().find_bucket(&k) {
-                        let index = hd.push(k, v);
-                        hd.reborrow().split_mut().shift(bucket, index);
-                    }
-                }
-            }
-        }
-    }
-
     /// Reserves space for at least this many additional entries.
     pub fn reserve(&mut self, additional: usize) {
-        let current_capacity = self.capacity();
-        let desired_capacity = self.len().checked_add(additional).unwrap();
-        if current_capacity >= desired_capacity {
-            return;
-        }
-        self.resize_internal(cmp::max(current_capacity * 2, desired_capacity.max(4)));
+        // Safety: `self.0` is always an object.
+        unsafe { ObjectRepr::reserve(&mut self.0, additional) }
     }
 
     /// Returns a view of an entry within this object.
@@ -460,7 +438,8 @@ impl IObject {
     /// Shrinks the memory allocation used by the object such that its
     /// capacity becomes equal to its length.
     pub fn shrink_to_fit(&mut self) {
-        self.resize_internal(self.len());
+        // Safety: `self.0` is always an object.
+        unsafe { ObjectRepr::shrink_to_fit(&mut self.0) }
     }
 
     /// Calls the specified function for each entry in the object. Each entry
