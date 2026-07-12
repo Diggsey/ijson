@@ -46,8 +46,9 @@ pub(crate) mod scalar;
 // one scalar helper used outside the module (by the base-10 inline representation).
 pub(crate) use numeric::{decimal_to_f64_exact, decimal_to_f64_lossy, NumVal};
 
-// The active inline number representation's static interface (`encode_int`,
-// `encode_f64`, `num_val`, `encode_decimal`), used through `inline::InlineNumberRepr`.
+// The active inline number representation's static construction interface
+// (`encode_int`/`encode_f64`/`from_str`, plus the `from_i64`/`from_u64`/`from_f64`
+// helpers derived from them), used through `inline::InlineNumberRepr`.
 use inline::InlineNumber;
 
 use crate::array::IArray;
