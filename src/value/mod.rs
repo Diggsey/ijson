@@ -836,7 +836,7 @@ impl IValue {
             // Safety: `try_encode` returns valid inline-string bits.
             Some(bits) => unsafe { Self::new_usize(ReprTag::Inline, bits) },
             // Safety: `intern` returns a live, aligned interned header pointer.
-            None => unsafe { Self::new_ptr(ReprTag::String, interned::intern(s)) },
+            None => unsafe { Self::new_ptr(ReprTag::String, interned::InternedRepr::intern(s)) },
         }
     }
 }

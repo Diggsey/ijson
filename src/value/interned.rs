@@ -120,6 +120,8 @@ impl WeakIString {
     }
     // Bumps the reference count and returns the (aligned) header pointer.
     fn upgrade(&self) -> NonNull<u8> {
+        // Safety: `self.ptr` is a live header for as long as this `WeakIString` is in
+        // the cache.
         unsafe {
             self.ptr.as_ref().rc.fetch_add(1, AtomicOrdering::Relaxed);
         }
@@ -127,119 +129,149 @@ impl WeakIString {
     }
 }
 
-fn layout(len: usize) -> Result<Layout, LayoutError> {
-    Ok(Layout::new::<Header>()
-        .extend(Layout::array::<u8>(len)?)?
-        .0
-        .pad_to_align())
-}
+/// The heap interned-string representation of a JSON string.
+///
+/// Every operation on the interned allocation is an associated function here: the
+/// `Header`-plus-bytes layout, allocation, interning, and reference-count management.
+/// The only external entry point is [`InternedRepr::intern`] (called by
+/// `IValue::new_string`); the rest are reached through this type's `ValueRepr` /
+/// `StringRepr` impls. The global cache itself (`STRING_CACHE`, `WeakIString`) is a
+/// module concern, not per-value state, so it stays free-standing above.
+pub(crate) struct InternedRepr;
 
-fn alloc(s: &str, shard_index: usize) -> NonNull<Header> {
-    assert!((s.len() as u64) < (1 << 48));
-    assert!(shard_index < (1 << 16));
-    unsafe {
-        let ptr = alloc_infallible(layout(s.len()).unwrap()).cast::<Header>();
-        ptr.write(Header {
-            len_lower: s.len() as u32,
-            len_upper: ((s.len() as u64) >> 32) as u16,
-            shard_index: shard_index as u16,
-            rc: AtomicUsize::new(0),
-        });
-        let hd = ThinMut::new(ptr);
-        copy_nonoverlapping(s.as_ptr(), hd.str_ptr_mut(), s.len());
-        ptr
+impl InternedRepr {
+    /// The heap layout for an interned string of `len` UTF-8 bytes: the `Header`
+    /// followed by the bytes, padded to the header's alignment.
+    fn layout(len: usize) -> Result<Layout, LayoutError> {
+        Ok(Layout::new::<Header>()
+            .extend(Layout::array::<u8>(len)?)?
+            .0
+            .pad_to_align())
     }
-}
 
-fn dealloc(ptr: NonNull<Header>) {
-    unsafe {
+    /// Allocates and initialises a header-plus-bytes block for `s` (reference count
+    /// zero), returning the aligned header pointer.
+    fn alloc(s: &str, shard_index: usize) -> NonNull<Header> {
+        assert!((s.len() as u64) < (1 << 48));
+        assert!(shard_index < (1 << 16));
+        // Safety: freshly allocated to `Self::layout(s.len())` and written before any
+        // read; `str_ptr_mut` points at the trailing byte array we just sized.
+        unsafe {
+            let ptr = alloc_infallible(Self::layout(s.len()).unwrap()).cast::<Header>();
+            ptr.write(Header {
+                len_lower: s.len() as u32,
+                len_upper: ((s.len() as u64) >> 32) as u16,
+                shard_index: shard_index as u16,
+                rc: AtomicUsize::new(0),
+            });
+            let hd = ThinMut::new(ptr);
+            copy_nonoverlapping(s.as_ptr(), hd.str_ptr_mut(), s.len());
+            ptr
+        }
+    }
+
+    /// Frees an interned allocation. Safety: `ptr` must be a live header allocated by
+    /// [`alloc`](Self::alloc) with no outstanding references.
+    unsafe fn dealloc(ptr: NonNull<Header>) {
         let hd = ThinRef::new(ptr);
-        let layout = layout(hd.len()).unwrap();
+        let layout = Self::layout(hd.len()).unwrap();
         dealloc_infallible(ptr.cast::<u8>(), layout);
     }
-}
 
-/// Interns a string in the global cache, returning the aligned header pointer
-/// (with the reference count already bumped).
-pub(crate) fn intern(s: &str) -> NonNull<u8> {
-    let cache = &*STRING_CACHE;
-    let shard_index = cache.determine_map(s);
+    /// Interns a string in the global cache, returning the aligned header pointer
+    /// (with the reference count already bumped). This is how `IValue::new_string`
+    /// stores a string that is too long to fit inline.
+    pub(crate) fn intern(s: &str) -> NonNull<u8> {
+        let cache = &*STRING_CACHE;
+        let shard_index = cache.determine_map(s);
 
-    // Safety: `determine_map` should only return valid shard indices
-    let shard = unsafe { cache.shards().get_unchecked(shard_index) };
-    let mut guard = shard.write();
-    if let Some((k, _)) = guard.get_key_value(s) {
-        k.upgrade()
-    } else {
-        let k = WeakIString {
-            ptr: alloc(s, shard_index),
-        };
-        let res = k.upgrade();
-        guard.insert(k, SharedValue::new(()));
-        res
-    }
-}
-
-// Safety (all functions): `ptr` must be the aligned header pointer of a live
-// interned string.
-unsafe fn as_header<'a>(ptr: NonNull<u8>) -> ThinRef<'a, Header> {
-    ThinRef::new(ptr.cast())
-}
-
-/// The UTF-8 bytes of an interned string.
-pub(crate) unsafe fn bytes<'a>(ptr: NonNull<u8>) -> &'a [u8] {
-    as_header(ptr).bytes()
-}
-
-/// Clones an interned string by bumping its reference count.
-pub(crate) unsafe fn bump_rc(ptr: NonNull<u8>) {
-    as_header(ptr).rc.fetch_add(1, AtomicOrdering::Relaxed);
-}
-
-/// Releases a reference to an interned string, freeing it when the reference
-/// count reaches zero.
-pub(crate) unsafe fn release(ptr: NonNull<u8>) {
-    let hd = as_header(ptr);
-
-    // If the reference count is greater than 1, we can safely decrement it without
-    // locking the string cache.
-    let mut rc = hd.rc.load(AtomicOrdering::Relaxed);
-    while rc > 1 {
-        match hd.rc.compare_exchange_weak(
-            rc,
-            rc - 1,
-            AtomicOrdering::Relaxed,
-            AtomicOrdering::Relaxed,
-        ) {
-            Ok(_) => return,
-            Err(new_rc) => rc = new_rc,
+        // Safety: `determine_map` should only return valid shard indices
+        let shard = unsafe { cache.shards().get_unchecked(shard_index) };
+        let mut guard = shard.write();
+        if let Some((k, _)) = guard.get_key_value(s) {
+            k.upgrade()
+        } else {
+            let k = WeakIString {
+                ptr: Self::alloc(s, shard_index),
+            };
+            let res = k.upgrade();
+            guard.insert(k, SharedValue::new(()));
+            res
         }
     }
 
-    // Slow path: we observed a reference count of 1, so we need to lock the string cache
-    let cache = &*STRING_CACHE;
-    // Safety: the number of shards is fixed
-    let shard = cache.shards().get_unchecked(hd.shard_index());
-    let mut guard = shard.write();
-    if hd.rc.fetch_sub(1, AtomicOrdering::Relaxed) == 1 {
-        // Reference count reached zero, free the string
-        assert!(guard.remove(hd.str()).is_some());
+    /// Views the interned header behind a tagged value pointer.
+    ///
+    /// Safety: `ptr` must be the aligned header pointer of a live interned string, and
+    /// the returned reference must not outlive it.
+    unsafe fn as_header<'a>(ptr: NonNull<u8>) -> ThinRef<'a, Header> {
+        ThinRef::new(ptr.cast())
+    }
 
-        // Shrink the shard if it's mostly empty.
-        // The second condition is necessary because `HashMap` sometimes
-        // reports a capacity of zero even when it's still backed by an
-        // allocation.
-        if guard.len() * 3 < guard.capacity() || guard.is_empty() {
-            guard.shrink_to_fit();
+    /// The UTF-8 bytes of an interned string.
+    ///
+    /// Safety: `ptr` must be the aligned header pointer of a live interned string; the
+    /// returned slice borrows that allocation and must not outlive it.
+    unsafe fn bytes<'a>(ptr: NonNull<u8>) -> &'a [u8] {
+        Self::as_header(ptr).bytes()
+    }
+
+    /// Clones an interned string by bumping its reference count.
+    ///
+    /// Safety: `ptr` must be the aligned header pointer of a live interned string.
+    unsafe fn bump_rc(ptr: NonNull<u8>) {
+        Self::as_header(ptr)
+            .rc
+            .fetch_add(1, AtomicOrdering::Relaxed);
+    }
+
+    /// Releases a reference to an interned string, freeing it when the reference
+    /// count reaches zero.
+    ///
+    /// Safety: `ptr` must be the aligned header pointer of a live interned string; the
+    /// caller gives up one reference and must not use `ptr` afterwards unless it holds
+    /// another.
+    unsafe fn release(ptr: NonNull<u8>) {
+        let hd = Self::as_header(ptr);
+
+        // If the reference count is greater than 1, we can safely decrement it without
+        // locking the string cache.
+        let mut rc = hd.rc.load(AtomicOrdering::Relaxed);
+        while rc > 1 {
+            match hd.rc.compare_exchange_weak(
+                rc,
+                rc - 1,
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(new_rc) => rc = new_rc,
+            }
         }
-        drop(guard);
 
-        dealloc(ptr.cast());
+        // Slow path: we observed a reference count of 1, so we need to lock the string cache
+        let cache = &*STRING_CACHE;
+        // Safety: the number of shards is fixed
+        let shard = cache.shards().get_unchecked(hd.shard_index());
+        let mut guard = shard.write();
+        if hd.rc.fetch_sub(1, AtomicOrdering::Relaxed) == 1 {
+            // Reference count reached zero, free the string
+            assert!(guard.remove(hd.str()).is_some());
+
+            // Shrink the shard if it's mostly empty.
+            // The second condition is necessary because `HashMap` sometimes
+            // reports a capacity of zero even when it's still backed by an
+            // allocation.
+            if guard.len() * 3 < guard.capacity() || guard.is_empty() {
+                guard.shrink_to_fit();
+            }
+            drop(guard);
+
+            Self::dealloc(ptr.cast());
+        }
     }
 }
 
-/// The heap interned-string representation of a JSON string.
-pub(crate) struct InternedRepr;
 impl ValueRepr for InternedRepr {
     fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::String
@@ -260,11 +292,11 @@ impl ValueRepr for InternedRepr {
         DestructuredMut::String(v.as_string_unchecked_mut())
     }
     unsafe fn clone(&self, v: &IValue) -> IValue {
-        bump_rc(v.ptr());
+        Self::bump_rc(v.ptr());
         v.raw_copy()
     }
     unsafe fn drop(&self, v: &mut IValue) {
-        release(v.ptr());
+        Self::release(v.ptr());
     }
     // hash/eq use the defaults (pointer word / `raw_eq`): interning deduplicates,
     // so equal interned strings share one allocation and compare by pointer.
@@ -273,6 +305,6 @@ impl ValueRepr for InternedRepr {
 impl StringRepr for InternedRepr {
     /// The interned UTF-8 bytes. Safety: `v` must be a live interned string.
     unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> &'a [u8] {
-        bytes(v.ptr())
+        Self::bytes(v.ptr())
     }
 }
