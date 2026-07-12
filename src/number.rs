@@ -173,22 +173,15 @@ impl From<isize> for INumber {
 impl TryFrom<f64> for INumber {
     type Error = ();
     fn try_from(v: f64) -> Result<Self, ()> {
-        if v.is_finite() {
-            Ok(INumber(IValue::new_f64(v)))
-        } else {
-            Err(())
-        }
+        // `new_f64` rejects non-finite input, so finiteness is enforced there.
+        IValue::new_f64(v).map(INumber).ok_or(())
     }
 }
 
 impl TryFrom<f32> for INumber {
     type Error = ();
     fn try_from(v: f32) -> Result<Self, ()> {
-        if v.is_finite() {
-            Ok(INumber(IValue::new_f64(f64::from(v))))
-        } else {
-            Err(())
-        }
+        IValue::new_f64(f64::from(v)).map(INumber).ok_or(())
     }
 }
 
@@ -245,11 +238,13 @@ impl FromStr for INumber {
         };
 
         // A valid JSON float is always accepted by `f64::from_str`; only its
-        // magnitude can be out of range (parsing to an infinity), which we reject
-        // so the `INumber` stays finite.
-        let float_from = |s: &str| match s.parse::<f64>() {
-            Ok(v) if v.is_finite() => Ok(IValue::new_f64(v)),
-            _ => Err(ParseNumberError(())),
+        // magnitude can be out of range (parsing to an infinity). `new_f64` rejects
+        // the infinity, so the `INumber` stays finite.
+        let float_from = |s: &str| {
+            s.parse::<f64>()
+                .ok()
+                .and_then(IValue::new_f64)
+                .ok_or(ParseNumberError(()))
         };
 
         // Ask the active inline representation to store it directly; only if that
@@ -618,6 +613,21 @@ mod tests {
         // A finite JSON float whose magnitude overflows f64 is not representable.
         assert!("1e400".parse::<INumber>().is_err());
         assert!("-1e400".parse::<INumber>().is_err());
+    }
+
+    #[test]
+    fn try_from_rejects_non_finite() {
+        // Finiteness is enforced at the single `new_f64` boundary, so every
+        // construction path that reaches it rejects NaN/Infinity rather than storing
+        // a number that would break `INumber`'s finite-only invariant.
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(INumber::try_from(v).is_err(), "{} should be rejected", v);
+        }
+        for v in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(INumber::try_from(v).is_err(), "{} should be rejected", v);
+        }
+        // A finite value still constructs.
+        assert!(INumber::try_from(1.5_f64).is_ok());
     }
 
     #[test]

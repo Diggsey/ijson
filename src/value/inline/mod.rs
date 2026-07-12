@@ -179,8 +179,8 @@ mod tests {
             IValue::new_i64(0),
             IValue::new_i64(1),
             IValue::new_i64(-1),
-            IValue::new_f64(0.5),
-            IValue::new_f64(0.0),
+            IValue::new_f64(0.5).unwrap(),
+            IValue::new_f64(0.0).unwrap(),
         ];
         let strings = [IValue::new_string(""), IValue::new_string("inline")];
         let constants = [IValue::NULL, IValue::TRUE, IValue::FALSE];

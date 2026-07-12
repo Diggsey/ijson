@@ -819,8 +819,16 @@ impl IValue {
         })
     }
 
-    pub(crate) fn new_f64(value: f64) -> Self {
-        inline::InlineNumberRepr::from_f64(value).unwrap_or_else(|| scalar::F64Repr::store(value))
+    /// Constructs a number from an `f64`, or `None` if `value` is not finite.
+    /// NaN/Infinity have no JSON representation and would break the invariant that
+    /// every stored number is finite (relied on by `INumber`'s `unwrap`/`expect`/`Ord`
+    /// paths). This is the single boundary that enforces finiteness — callers need not
+    /// pre-check.
+    pub(crate) fn new_f64(value: f64) -> Option<Self> {
+        value.is_finite().then(|| {
+            inline::InlineNumberRepr::from_f64(value)
+                .unwrap_or_else(|| scalar::F64Repr::store(value))
+        })
     }
 
     /// Wraps already-encoded inline-number bits as an `IValue`. The bits come from
