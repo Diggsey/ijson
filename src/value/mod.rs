@@ -325,12 +325,12 @@ impl IValue {
     // not the empty (unallocated) form of a collection, whose pointer bits are zero
     // (`self.usize_() == 0`); either would make the returned pointer null.
     unsafe fn ptr(&self) -> NonNull<u8> {
-        self.ptr.offset(-(self.type_tag() as usize as isize))
+        self.ptr.offset(-(self.repr_tag() as usize as isize))
     }
     // Sets the pointer, keeping the current tag.
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
     unsafe fn set_ptr(&mut self, ptr: NonNull<u8>) {
-        let tag = self.type_tag();
+        let tag = self.repr_tag();
         self.ptr = ptr.add(tag as usize);
     }
     // Sets the inline payload word (the tag-masked bits `usize_` reads back), keeping
@@ -342,7 +342,7 @@ impl IValue {
     // tag) must be non-zero (the all-zero word is the reserved niche), and any
     // storage the value previously owned must already have been released.
     unsafe fn set_usize(&mut self, word: usize) {
-        self.ptr = NonNull::new_unchecked((word | self.type_tag() as usize) as *mut u8);
+        self.ptr = NonNull::new_unchecked((word | self.repr_tag() as usize) as *mut u8);
     }
     unsafe fn raw_copy(&self) -> Self {
         Self { ptr: self.ptr }
@@ -353,7 +353,12 @@ impl IValue {
     pub(crate) fn raw_hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.ptr.hash(state);
     }
-    fn type_tag(&self) -> ReprTag {
+    /// The representation tag in the low bits of the pointer word. This is a
+    /// *representation* concept, not the JSON type: it is for the representation
+    /// machinery (dispatch, pointer arithmetic). JSON-type questions go through
+    /// [`type_`](Self::type_)/[`ValueType`] so they stay decoupled from how a value
+    /// happens to be stored.
+    fn repr_tag(&self) -> ReprTag {
         // The raw word — not `usize_()`, which has masked the tag off.
         (self.ptr.as_ptr() as usize).into()
     }
@@ -364,7 +369,7 @@ impl IValue {
     /// through `repr()`.
     #[cfg(test)]
     pub(crate) fn is_inline(&self) -> bool {
-        self.type_tag() == ReprTag::Inline
+        self.repr_tag() == ReprTag::Inline
     }
 
     /// Returns the type of this value.
@@ -446,15 +451,14 @@ impl IValue {
     /// Returns `true` if this is the `null` value.
     #[must_use]
     pub fn is_null(&self) -> bool {
-        self.usize_() == inline::NULL
+        self.type_() == ValueType::Null
     }
 
     // # Bool methods
     /// Returns `true` if this is a boolean.
     #[must_use]
     pub fn is_bool(&self) -> bool {
-        let bits = self.usize_();
-        bits == inline::TRUE || bits == inline::FALSE
+        self.type_() == ValueType::Bool
     }
 
     /// Returns `true` if this is the `true` value.
@@ -669,7 +673,7 @@ impl IValue {
     /// Returns `true` if this is an array.
     #[must_use]
     pub fn is_array(&self) -> bool {
-        self.type_tag() == ReprTag::Array
+        self.type_() == ValueType::Array
     }
 
     // Safety: Must be an array
@@ -722,7 +726,7 @@ impl IValue {
     /// Returns `true` if this is an object.
     #[must_use]
     pub fn is_object(&self) -> bool {
-        self.type_tag() == ReprTag::Object
+        self.type_() == ValueType::Object
     }
 
     // Safety: Must be an object
@@ -883,7 +887,7 @@ impl IValue {
     /// heap scalar payload. Two numbers with equal keys are stored bit-for-bit
     /// identically. Only meaningful when called on a number.
     pub(crate) fn number_repr_key(&self) -> (u8, u64) {
-        let tag = self.type_tag() as u8;
+        let tag = self.repr_tag() as u8;
         if self.is_inline() {
             (tag, self.usize_() as u64)
         } else {
@@ -1031,7 +1035,7 @@ impl IValue {
     /// arm back to a direct call once this is inlined.
     #[inline]
     fn repr(&self) -> &'static dyn ValueRepr {
-        match self.type_tag() {
+        match self.repr_tag() {
             // One representation covers the whole inline family; it decodes the
             // family bits to dispatch further (see `inline::InlineRepr`).
             ReprTag::Inline => &inline::InlineRepr,
@@ -1052,7 +1056,7 @@ impl IValue {
     ///
     /// Only ever called on a number (from a number accessor or an [`INumber`]).
     fn number_repr(&self) -> &'static dyn NumberRepr {
-        match self.type_tag() {
+        match self.repr_tag() {
             ReprTag::Inline => &inline::InlineNumberRepr,
             ReprTag::NumberI64 => &scalar::I64Repr,
             ReprTag::NumberU64 => &scalar::U64Repr,
@@ -1068,7 +1072,7 @@ impl IValue {
     /// string sub-representation or the interned one. Only ever called on a string
     /// (by an [`IString`] or the string comparison/debug helpers).
     pub(crate) fn string_repr(&self) -> &'static dyn StringRepr {
-        match self.type_tag() {
+        match self.repr_tag() {
             ReprTag::Inline => &inline::string::InlineStringRepr,
             ReprTag::String => &interned::InternedRepr,
             _ => unreachable!("string_repr called on a non-string value"),
