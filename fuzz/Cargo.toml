@@ -15,7 +15,12 @@ arbitrary_precision = ["ijson/arbitrary_precision"]
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `float_roundtrip` makes serde_json's float *parser* correctly rounded, so a
+# serialize/parse cycle preserves an `f64` exactly. Without it serde_json's default
+# parser can be off by 1 ULP for large magnitudes (its own `to_string`/`from_str`
+# then fails to round-trip too) — noise that is not ijson's, so the `json` target's
+# round-trip invariant would false-fire on it.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [dependencies.ijson]
 path = ".."
