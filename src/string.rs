@@ -70,8 +70,10 @@ impl IString {
     /// Obtains a `&str` from this `IString`. This is a cheap operation.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        // Safety: an `IString` always wraps a string, so `string_repr()` matches it.
-        unsafe { self.0.string_repr().as_str(&self.0) }
+        // Safety: an `IString` always wraps a string, so `with_string` matches it.
+        self.0
+            .with_string(|s| unsafe { s.as_str(&self.0) })
+            .expect("an IString always wraps a string")
     }
 
     /// Obtains a byte slice from this `IString`. This is a cheap operation.

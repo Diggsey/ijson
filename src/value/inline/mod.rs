@@ -79,7 +79,7 @@ enum InlineKind {
 ///
 /// The *type-specific* accessors are not here: the inline number and string
 /// sub-representations implement the per-type traits (`NumberRepr` / `StringRepr`)
-/// directly, reached through `IValue::number_repr` / `string_repr`, and inline
+/// directly, reached through `IValue::with_number` / `with_string`, and inline
 /// `bool`/`null` carry no accessor at all.
 pub(crate) trait InlineValue {
     /// The JSON type this inline value stores. Takes `v` because one `ConstantRepr`
@@ -120,21 +120,26 @@ impl InlineRepr {
             InlineKind::Constant
         }
     }
+}
 
-    /// Selects the inline sub-representation for `v` from its family bits.
+impl InlineKind {
+    /// Hands the concrete inline sub-representation for this kind to `f` at a per-arm
+    /// call site — so the coercion-to-`dyn` vtable is a compile-time constant the
+    /// optimizer devirtualizes — while, because the kind is a value, the caller keeps
+    /// whatever borrow of the value it needs for `f`.
     #[inline]
-    fn inner(v: &IValue) -> &'static dyn InlineValue {
-        match Self::kind(v) {
-            InlineKind::Number => &InlineNumberRepr,
-            InlineKind::String => &string::InlineStringRepr,
-            InlineKind::Constant => &constant::ConstantRepr,
+    fn with<R>(self, f: impl FnOnce(&'static dyn InlineValue) -> R) -> R {
+        match self {
+            InlineKind::Number => f(&InlineNumberRepr),
+            InlineKind::String => f(&string::InlineStringRepr),
+            InlineKind::Constant => f(&constant::ConstantRepr),
         }
     }
 }
 
 impl ValueRepr for InlineRepr {
     fn value_type(&self, v: &IValue) -> ValueType {
-        Self::inner(v).value_type(v)
+        Self::kind(v).with(|i| i.value_type(v))
     }
     // Every inline value is stored entirely in the pointer word: cloning is a
     // bit-copy of that word, and there is no heap storage to release on drop.
@@ -143,25 +148,25 @@ impl ValueRepr for InlineRepr {
     }
     unsafe fn drop(&self, _v: &mut IValue) {}
     unsafe fn hash(&self, v: &IValue, state: &mut dyn Hasher) {
-        Self::inner(v).hash(v, state);
+        Self::kind(v).with(|i| unsafe { i.hash(v, state) });
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
-        Self::inner(a).eq(a, b)
+        Self::kind(a).with(|i| unsafe { i.eq(a, b) })
     }
     unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
-        Self::inner(a).partial_cmp(a, b)
+        Self::kind(a).with(|i| unsafe { i.partial_cmp(a, b) })
     }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-        Self::inner(v).debug(v, f)
+        Self::kind(v).with(|i| unsafe { i.debug(v, f) })
     }
     fn destructure(&self, v: IValue) -> Destructured {
-        Self::inner(&v).destructure(v)
+        Self::kind(&v).with(move |i| i.destructure(v))
     }
     unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a> {
-        Self::inner(v).destructure_ref(v)
+        Self::kind(v).with(|i| unsafe { i.destructure_ref(v) })
     }
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
-        Self::inner(v).destructure_mut(v)
+        Self::kind(v).with(move |i| unsafe { i.destructure_mut(v) })
     }
 }
 

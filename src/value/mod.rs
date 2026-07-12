@@ -22,8 +22,9 @@ use indexmap::IndexMap;
 // inline family shares a single `ValueRepr` impl, `inline::InlineRepr`, which
 // decodes the family bits and dispatches to an inline sub-representation
 // (`inline::number`/`string`/`constant`) via the inline-only `InlineValue`
-// trait. `IValue` finds a value's representation once, via `repr()`, and every
-// operation delegates down to it; the per-value logic that both number (or both
+// trait. `IValue` dispatches on its `ReprTag` to the matching representation (see
+// `ReprTag::with`), and every operation delegates down to it; the per-value logic
+// that both number (or both
 // string) representations share is factored out — into `NumVal`'s methods in the
 // `numeric` module, and the standalone `string_*` utilities below — never into a
 // representation that reaches back up.
@@ -31,7 +32,7 @@ use indexmap::IndexMap;
 // A JSON *number* or *string* spans two representations, so `new_*` construction
 // picks one as early as possible, and comparing two of them — the one place that
 // has to resolve the *other* operand's representation — reaches it through the same
-// `repr()` dispatch (`IValue::num_val`/`string_repr`), not a second decoder. The
+// tag dispatch (`IValue::num_val`/`with_string`), not a second decoder. The
 // public wrapper types (`IArray`, `INumber`, `IObject`, `IString`) live in the
 // top-level modules and delegate down through `IValue`.
 pub(crate) mod array;
@@ -366,7 +367,7 @@ impl IValue {
     /// Whether this value is stored inline (tag `Inline`) rather than behind a
     /// pointer. What *kind* of inline value it is remains the `inline` module's
     /// concern. Only the tests distinguish the storage; runtime dispatch goes
-    /// through `repr()`.
+    /// through `repr_tag().with(..)`.
     #[cfg(test)]
     pub(crate) fn is_inline(&self) -> bool {
         self.repr_tag() == ReprTag::Inline
@@ -375,26 +376,27 @@ impl IValue {
     /// Returns the type of this value.
     #[must_use]
     pub fn type_(&self) -> ValueType {
-        self.repr().value_type(self)
+        self.repr_tag().with(|r| r.value_type(self))
     }
 
     /// Destructures this value into an enum which can be `match`ed on.
     #[must_use]
     pub fn destructure(self) -> Destructured {
-        self.repr().destructure(self)
+        self.repr_tag().with(move |r| r.destructure(self))
     }
 
     /// Destructures a reference to this value into an enum which can be `match`ed on.
     #[must_use]
     pub fn destructure_ref<'a>(&'a self) -> DestructuredRef<'a> {
-        // Safety: `repr()` selects this value's own representation.
-        unsafe { self.repr().destructure_ref(self) }
+        // Safety: the tag selects this value's own representation.
+        self.repr_tag().with(|r| unsafe { r.destructure_ref(self) })
     }
 
     /// Destructures a mutable reference to this value into an enum which can be `match`ed on.
     pub fn destructure_mut<'a>(&'a mut self) -> DestructuredMut<'a> {
-        // Safety: `repr()` selects this value's own representation.
-        unsafe { self.repr().destructure_mut(self) }
+        // Safety: the tag selects this value's own representation.
+        self.repr_tag()
+            .with(move |r| unsafe { r.destructure_mut(self) })
     }
 
     /// Indexes into this value with a number or string.
@@ -436,8 +438,8 @@ impl IValue {
     /// Returns `None` for other types.
     #[must_use]
     pub fn len(&self) -> Option<usize> {
-        // Safety: `repr()` selects this value's own representation.
-        unsafe { self.repr().len(self) }
+        // Safety: the tag selects this value's own representation.
+        self.repr_tag().with(|r| unsafe { r.len(self) })
     }
 
     /// Returns whether this value is empty if it is an array or object.
@@ -551,26 +553,20 @@ impl IValue {
     /// Converts this value to an i64 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
-        // Safety: guarded on `is_number`, so `number_repr()` matches this number.
-        self.is_number()
-            .then(|| unsafe { self.number_repr().to_i64(self) })
-            .flatten()
+        // Safety: `with_number` runs `f` only on a number, matching its representation.
+        self.with_number(|n| unsafe { n.to_i64(self) }).flatten()
     }
     /// Converts this value to a u64 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_u64(&self) -> Option<u64> {
-        // Safety: guarded on `is_number`, so `number_repr()` matches this number.
-        self.is_number()
-            .then(|| unsafe { self.number_repr().to_u64(self) })
-            .flatten()
+        // Safety: `with_number` runs `f` only on a number, matching its representation.
+        self.with_number(|n| unsafe { n.to_u64(self) }).flatten()
     }
     /// Converts this value to an f64 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_f64(&self) -> Option<f64> {
-        // Safety: guarded on `is_number`, so `number_repr()` matches this number.
-        self.is_number()
-            .then(|| unsafe { self.number_repr().to_f64(self) })
-            .flatten()
+        // Safety: `with_number` runs `f` only on a number, matching its representation.
+        self.with_number(|n| unsafe { n.to_f64(self) }).flatten()
     }
     /// Converts this value to an f32 if it is a number that can be represented exactly.
     #[must_use]
@@ -605,9 +601,8 @@ impl IValue {
     /// in the process.
     #[must_use]
     pub fn to_f64_lossy(&self) -> Option<f64> {
-        // Safety: guarded on `is_number`, so `number_repr()` matches this number.
-        self.is_number()
-            .then(|| unsafe { self.number_repr().to_f64_lossy(self) })
+        // Safety: `with_number` runs `f` only on a number, matching its representation.
+        self.with_number(|n| unsafe { n.to_f64_lossy(self) })
     }
     /// Converts this value to an f32 if it is a number, potentially losing precision
     /// in the process.
@@ -795,15 +790,20 @@ pub(crate) fn string_cmp(a: &IValue, b: &IValue) -> Ordering {
     if a.raw_eq(b) {
         Ordering::Equal
     } else {
-        // Safety: both are strings, so `string_repr()` matches each.
-        unsafe { a.string_repr().as_str(a).cmp(b.string_repr().as_str(b)) }
+        // Safety: both are strings, so `with_string` matches each.
+        let sa = a.with_string(|s| unsafe { s.as_str(a) }).expect("a string");
+        let sb = b.with_string(|s| unsafe { s.as_str(b) }).expect("a string");
+        sa.cmp(sb)
     }
 }
 
 /// Formats a string of either representation.
 pub(crate) fn string_debug(v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
-    // Safety: `v` is a string, so `string_repr()` matches it.
-    Debug::fmt(unsafe { v.string_repr().as_str(v) }, f)
+    // Safety: `v` is a string, so `with_string` matches it.
+    Debug::fmt(
+        v.with_string(|s| unsafe { s.as_str(v) }).expect("a string"),
+        f,
+    )
 }
 
 // Number-type dispatch. A JSON number is stored either inline (`inline::number`) or
@@ -850,8 +850,8 @@ impl IValue {
     /// Whether this number was written with a decimal point (`1.0` vs `1`).
     /// Delegates down to the representation; `false` for non-numbers.
     pub(crate) fn has_decimal_point(&self) -> bool {
-        // `number_repr()` is only meaningful on a number, so guard on the type.
-        self.is_number() && self.number_repr().has_decimal_point(self)
+        self.with_number(|n| n.has_decimal_point(self))
+            .unwrap_or(false)
     }
 
     /// This value reduced to a [`NumVal`] if it is a number, otherwise `None`. Used
@@ -859,9 +859,8 @@ impl IValue {
     /// through its own representation — the caller need not know its type; a
     /// non-number simply yields `None`.
     pub(crate) fn num_val(&self) -> Option<NumVal> {
-        // Safety: guarded on the number type, so `number_repr()` matches this number.
-        self.is_number()
-            .then(|| unsafe { self.number_repr().num_val(self) })
+        // Safety: `with_number` runs `f` only on a number, matching its representation.
+        self.with_number(|n| unsafe { n.num_val(self) })
     }
 }
 
@@ -903,12 +902,12 @@ impl IValue {
 /// `destructure` need *without* knowing the JSON type. Defaults cover the common
 /// case (an inline value is a bit-copy with nothing to free; constants and strings
 /// hash and compare by their canonical bits), so a representation overrides only
-/// what differs. Every delegation goes downward, found once via [`IValue::repr`].
+/// what differs. Every delegation goes downward, dispatched once via [`ReprTag::with`].
 ///
 /// This also carries the operations `IValue` exposes *generically*, on any value —
 /// `len` (a public `Option`-returning accessor). The accessors that only make sense
 /// once the type is known live on the per-type traits [`NumberRepr`] and
-/// [`StringRepr`], reached through [`IValue::number_repr`]/[`IValue::string_repr`],
+/// [`StringRepr`], reached through [`IValue::with_number`]/[`IValue::with_string`],
 /// which the I-types invoke once they know the type.
 ///
 /// # Safety
@@ -975,11 +974,11 @@ pub(crate) trait ValueRepr {
 /// decode its storage to a [`NumVal`] via [`num_val`](NumberRepr::num_val); the
 /// numeric accessors derive from it by default — though the inline representations
 /// override the `f64` conversions with an exact decode of their own bit layout.
-/// Reached through [`IValue::number_repr`], only invoked on a number.
+/// Reached through [`IValue::with_number`], which yields `None` for a non-number.
 ///
 /// `num_val` is also how a number comparison resolves its *other* operand: it decodes
-/// that operand through its own `number_repr()`, the same dispatch, no separate
-/// decoder (see [`number_cmp`]).
+/// that operand through its own [`with_number`](IValue::with_number), the same
+/// dispatch, no separate decoder (see [`number_cmp`]).
 ///
 /// # Safety
 ///
@@ -1008,8 +1007,8 @@ pub(crate) trait NumberRepr {
 
 /// The string-specific operations, implemented by both string representations
 /// (inline and interned). A representation only has to expose its UTF-8 bytes;
-/// `as_str` derives from them. Reached through [`IValue::string_repr`], only invoked
-/// on a string.
+/// `as_str` derives from them. Reached through [`IValue::with_string`], which yields
+/// `None` for a non-string.
 ///
 /// (Arrays and objects need no such trait: their only representation-level operation
 /// is `len`, which is general and lives on [`ValueRepr`], and their elements are
@@ -1028,69 +1027,76 @@ pub(crate) trait StringRepr {
     }
 }
 
-impl IValue {
-    /// The representation this value is stored in — the single dispatch point that
-    /// every method delegates through. Returning a `&'static dyn` built from a
-    /// match of concrete zero-sized markers lets the optimizer devirtualize each
-    /// arm back to a direct call once this is inlined.
+impl ReprTag {
+    /// Hands the concrete representation for this tag to `f`. This is the single
+    /// dispatch point every value operation goes through. Because the tag is a value —
+    /// not a `&dyn` merged from every arm, and not a borrow of the `IValue` — `f` sees
+    /// each arm's *concrete* type at a distinct call site (so the coercion-to-`dyn`
+    /// vtable is a compile-time constant the optimizer devirtualizes), and the caller
+    /// keeps whatever borrow of the value it needs (shared, mutable, or owned) for `f`.
     #[inline]
-    fn repr(&self) -> &'static dyn ValueRepr {
-        match self.repr_tag() {
+    fn with<R>(self, f: impl FnOnce(&'static dyn ValueRepr) -> R) -> R {
+        match self {
             // One representation covers the whole inline family; it decodes the
             // family bits to dispatch further (see `inline::InlineRepr`).
-            ReprTag::Inline => &inline::InlineRepr,
-            ReprTag::NumberI64 => &scalar::I64Repr,
-            ReprTag::NumberU64 => &scalar::U64Repr,
+            ReprTag::Inline => f(&inline::InlineRepr),
+            ReprTag::NumberI64 => f(&scalar::I64Repr),
+            ReprTag::NumberU64 => f(&scalar::U64Repr),
             // The reserved tag is never produced; it reads back as an `f64`.
-            ReprTag::NumberF64 | ReprTag::NumberReserved => &scalar::F64Repr,
-            ReprTag::String => &interned::InternedRepr,
-            ReprTag::Array => &array::ArrayRepr,
-            ReprTag::Object => &object::ObjectRepr,
+            ReprTag::NumberF64 | ReprTag::NumberReserved => f(&scalar::F64Repr),
+            ReprTag::String => f(&interned::InternedRepr),
+            ReprTag::Array => f(&array::ArrayRepr),
+            ReprTag::Object => f(&object::ObjectRepr),
         }
     }
+}
 
-    /// This number's representation, for the number-specific operations. Unlike
-    /// [`repr`](IValue::repr), which covers every type, this narrows to the four
-    /// number representations — and for an inline value returns the inline *number*
-    /// sub-representation directly, since the caller already knows it is a number.
-    ///
-    /// Only ever called on a number (from a number accessor or an [`INumber`]).
-    fn number_repr(&self) -> &'static dyn NumberRepr {
-        match self.repr_tag() {
-            ReprTag::Inline => &inline::InlineNumberRepr,
-            ReprTag::NumberI64 => &scalar::I64Repr,
-            ReprTag::NumberU64 => &scalar::U64Repr,
-            // The reserved tag is never produced; it reads back as an `f64`.
-            ReprTag::NumberF64 | ReprTag::NumberReserved => &scalar::F64Repr,
-            ReprTag::String | ReprTag::Array | ReprTag::Object => {
-                unreachable!("number_repr called on a non-number value")
-            }
-        }
+impl IValue {
+    /// Hands this value's number representation to `f`, or returns `None` if it is not
+    /// a number — so number accessors need no separate `is_number` guard. The inline
+    /// tag alone can't tell a number from a string/constant, so this decodes the full
+    /// type; `f` therefore runs only on an actual number, meeting the precondition of
+    /// the unsafe `NumberRepr` methods it calls. Each arm passes a concrete type, so
+    /// the dispatch devirtualizes just like [`ReprTag::with`].
+    #[inline]
+    fn with_number<R>(&self, f: impl FnOnce(&'static dyn NumberRepr) -> R) -> Option<R> {
+        self.is_number().then(|| match self.repr_tag() {
+            // Guarded by `is_number`, so an `Inline` value here is an inline *number*.
+            ReprTag::Inline => f(&inline::InlineNumberRepr),
+            ReprTag::NumberI64 => f(&scalar::I64Repr),
+            ReprTag::NumberU64 => f(&scalar::U64Repr),
+            ReprTag::NumberF64 | ReprTag::NumberReserved => f(&scalar::F64Repr),
+            // `is_number` ruled the non-number tags out.
+            ReprTag::String | ReprTag::Array | ReprTag::Object => unreachable!(),
+        })
     }
 
-    /// This string's representation, for the string-specific operations — the inline
-    /// string sub-representation or the interned one. Only ever called on a string
-    /// (by an [`IString`] or the string comparison/debug helpers).
-    pub(crate) fn string_repr(&self) -> &'static dyn StringRepr {
-        match self.repr_tag() {
-            ReprTag::Inline => &inline::string::InlineStringRepr,
-            ReprTag::String => &interned::InternedRepr,
-            _ => unreachable!("string_repr called on a non-string value"),
-        }
+    /// Hands this value's string representation to `f`, or returns `None` if it is not
+    /// a string. Like [`with_number`](Self::with_number) it decodes the full type
+    /// (the inline tag is shared with numbers/constants), so `f` runs only on an actual
+    /// string.
+    #[inline]
+    pub(crate) fn with_string<R>(&self, f: impl FnOnce(&'static dyn StringRepr) -> R) -> Option<R> {
+        self.is_string().then(|| match self.repr_tag() {
+            ReprTag::Inline => f(&inline::string::InlineStringRepr),
+            ReprTag::String => f(&interned::InternedRepr),
+            // `is_string` ruled the non-string tags out.
+            _ => unreachable!(),
+        })
     }
 }
 
 impl Clone for IValue {
     fn clone(&self) -> Self {
-        // Safety: `repr()` selects this value's own representation.
-        unsafe { self.repr().clone(self) }
+        // Safety: the tag selects this value's own representation.
+        self.repr_tag().with(|r| unsafe { r.clone(self) })
     }
 }
 
 impl Drop for IValue {
     fn drop(&mut self) {
-        // Safety: `repr()` selects this value's own representation.
-        unsafe { self.repr().drop(self) }
+        // Safety: the tag selects this value's own representation.
+        self.repr_tag().with(|r| unsafe { r.drop(self) })
     }
 }
 
@@ -1098,8 +1104,8 @@ impl Hash for IValue {
     fn hash<H: Hasher>(&self, state: &mut H) {
         // Erase the concrete hasher once, then delegate down to this value's
         // representation — like every other operation.
-        // Safety: `repr()` selects this value's own representation.
-        unsafe { self.repr().hash(self, state) }
+        // Safety: the tag selects this value's own representation.
+        self.repr_tag().with(|r| unsafe { r.hash(self, state) })
     }
 }
 
@@ -1108,7 +1114,7 @@ impl PartialEq for IValue {
         // Different JSON types are never equal. Within a type, the representation
         // handles any cross-representation comparison (e.g. inline vs heap number).
         // Safety: both operands share a type.
-        self.type_() == other.type_() && unsafe { self.repr().eq(self, other) }
+        self.type_() == other.type_() && self.repr_tag().with(|r| unsafe { r.eq(self, other) })
     }
 }
 
@@ -1118,7 +1124,8 @@ impl PartialOrd for IValue {
         let (t1, t2) = (self.type_(), other.type_());
         if t1 == t2 {
             // Safety: both operands share a type.
-            unsafe { self.repr().partial_cmp(self, other) }
+            self.repr_tag()
+                .with(|r| unsafe { r.partial_cmp(self, other) })
         } else {
             // Different types are ordered by the `ValueType` enum.
             t1.partial_cmp(&t2)
@@ -1241,8 +1248,8 @@ impl<I: ValueIndex> IndexMut<I> for IValue {
 
 impl Debug for IValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // Safety: `repr()` selects this value's own representation.
-        unsafe { self.repr().debug(self, f) }
+        // Safety: the tag selects this value's own representation.
+        self.repr_tag().with(|r| unsafe { r.debug(self, f) })
     }
 }
 

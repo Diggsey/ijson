@@ -295,9 +295,9 @@ impl ValueRepr for ArrayRepr {
         let items = Self::as_slice(v);
         state.write_usize(items.len());
         // Order matters for arrays: feed each element in turn, delegating down to its
-        // own representation via `repr()` (elements can be any value type).
+        // own representation (elements can be any value type).
         for item in items {
-            item.repr().hash(item, state);
+            item.repr_tag().with(|r| unsafe { r.hash(item, state) });
         }
     }
     unsafe fn eq(&self, a: &IValue, b: &IValue) -> bool {
