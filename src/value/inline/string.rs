@@ -16,8 +16,7 @@ use std::ptr::NonNull;
 use super::{InlineValue, IS_STRING, TAG_MASK};
 use crate::string::IString;
 use crate::value::{
-    string_cmp, string_debug, Destructured, DestructuredMut, DestructuredRef, IValue, StringRepr,
-    ValueType,
+    string_cmp, string_debug, Destructured, DestructuredMut, DestructuredRef, IValue, ValueType,
 };
 
 /// The number of string bytes that fit inline in a pointer-sized value:
@@ -105,12 +104,9 @@ impl InlineValue for InlineStringRepr {
     }
     // clone/drop/hash/eq use the defaults (bit-copy / nothing / pointer word /
     // `raw_eq`), all correct for an inline string.
-}
-
-impl StringRepr for InlineStringRepr {
     /// The inline UTF-8 bytes, borrowed from `v`'s own storage. Safety: `v` must be
     /// an inline string.
-    unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> &'a [u8] {
-        Self::bytes(NonNull::from(v).cast(), v.usize_())
+    unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> Option<&'a [u8]> {
+        Some(Self::bytes(NonNull::from(v).cast(), v.usize_()))
     }
 }

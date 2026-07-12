@@ -32,7 +32,7 @@ pub(crate) use number::{InlineNumber, InlineNumberError, NumberShape};
 // unit-tests both regardless of features; this alias selects the active
 // representation *type*, whose `InlineNumber` associated functions
 // (`encode_int`/`encode_f64`/`from_str`) are how `IValue` builds inline numbers, and
-// whose `NumberRepr` impl decodes them.
+// whose `InlineValue` impl decodes them.
 #[cfg(not(feature = "arbitrary_precision"))]
 pub(crate) use number_binary::BinaryNumberRepr as InlineNumberRepr;
 #[cfg(feature = "arbitrary_precision")]
@@ -42,7 +42,9 @@ use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
 use std::hash::Hasher;
 
-use crate::value::{Destructured, DestructuredMut, DestructuredRef, IValue, ValueRepr, ValueType};
+use crate::value::{
+    Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, ValueRepr, ValueType,
+};
 
 // Bit 3: set for an inline number, clear for a string or constant. A single positive
 // predicate ("is a number") — and, because every number sets it, a number word is
@@ -77,10 +79,10 @@ enum InlineKind {
 /// decodes the family bits to pick the right one of these; each sub-representation
 /// only overrides what it needs.
 ///
-/// The *type-specific* accessors are not here: the inline number and string
-/// sub-representations implement the per-type traits (`NumberRepr` / `StringRepr`)
-/// directly, reached through `IValue::with_number` / `with_string`, and inline
-/// `bool`/`null` carry no accessor at all.
+/// The number/string accessors *are* here (with `None`/`false` defaults, like
+/// [`ValueRepr`]): the inline number and string sub-representations override them, and
+/// [`InlineRepr`] forwards `ValueRepr`'s versions to them. Inline `bool`/`null` carry
+/// no such accessor and keep the defaults.
 pub(crate) trait InlineValue {
     /// The JSON type this inline value stores. Takes `v` because one `ConstantRepr`
     /// serves both `null` and `bool`, decoding which from the bits.
@@ -102,6 +104,27 @@ pub(crate) trait InlineValue {
     fn destructure(&self, v: IValue) -> Destructured;
     unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a>;
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a>;
+
+    // The number/string operations mirror `ValueRepr`'s, with the same `None`/`false`
+    // defaults; only the inline number and string sub-representations override them,
+    // and `InlineRepr` forwards `ValueRepr`'s versions to these. `to_i64`/`to_u64`/
+    // `as_str` are not here — no sub-representation overrides them, so they derive from
+    // `num_val`/`as_bytes` on `ValueRepr` directly.
+    unsafe fn num_val(&self, _v: &IValue) -> Option<NumVal> {
+        None
+    }
+    fn has_decimal_point(&self, _v: &IValue) -> bool {
+        false
+    }
+    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
+        self.num_val(v).and_then(|n| n.to_f64())
+    }
+    unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
+        self.num_val(v).map(|n| n.to_f64_lossy())
+    }
+    unsafe fn as_bytes<'a>(&self, _v: &'a IValue) -> Option<&'a [u8]> {
+        None
+    }
 }
 
 /// The single representation for the whole inline family. Every operation decodes
@@ -167,6 +190,24 @@ impl ValueRepr for InlineRepr {
     }
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
         Self::kind(v).with(move |i| unsafe { i.destructure_mut(v) })
+    }
+    // Forward the number/string operations to the inline sub-representation. `to_i64`/
+    // `to_u64`/`as_str` are not forwarded: their `ValueRepr` defaults derive from
+    // `num_val`/`as_bytes`, which are forwarded here.
+    unsafe fn num_val(&self, v: &IValue) -> Option<NumVal> {
+        Self::kind(v).with(|i| unsafe { i.num_val(v) })
+    }
+    fn has_decimal_point(&self, v: &IValue) -> bool {
+        Self::kind(v).with(|i| i.has_decimal_point(v))
+    }
+    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
+        Self::kind(v).with(|i| unsafe { i.to_f64(v) })
+    }
+    unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
+        Self::kind(v).with(|i| unsafe { i.to_f64_lossy(v) })
+    }
+    unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> Option<&'a [u8]> {
+        Self::kind(v).with(|i| unsafe { i.as_bytes(v) })
     }
 }
 

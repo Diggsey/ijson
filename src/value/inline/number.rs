@@ -31,7 +31,7 @@ pub(crate) enum InlineNumberError {
 /// a JSON-number string into inline bits. The methods are associated functions (no
 /// `self`) because they operate on raw values and bits, not on a representation
 /// instance. (Decoding bits back to a [`NumVal`] is the job of each representation's
-/// [`NumberRepr`](crate::value::NumberRepr) impl, not this trait.)
+/// `InlineValue`/`ValueRepr` impl, not this trait.)
 ///
 /// This is distinct from [`super::InlineValue`], the dynamically dispatched
 /// per-type behaviour [`super::InlineRepr`] delegates to; this is the statically

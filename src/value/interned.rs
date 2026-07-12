@@ -22,8 +22,8 @@ use crate::alloc::{alloc_infallible, dealloc_infallible};
 use crate::string::IString;
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 use crate::value::{
-    string_cmp, string_debug, Destructured, DestructuredMut, DestructuredRef, IValue, StringRepr,
-    ValueRepr, ValueType,
+    string_cmp, string_debug, Destructured, DestructuredMut, DestructuredRef, IValue, ValueRepr,
+    ValueType,
 };
 
 #[repr(C)]
@@ -134,8 +134,8 @@ impl WeakIString {
 /// Every operation on the interned allocation is an associated function here: the
 /// `Header`-plus-bytes layout, allocation, interning, and reference-count management.
 /// The only external entry point is [`InternedRepr::intern`] (called by
-/// `IValue::new_string`); the rest are reached through this type's `ValueRepr` /
-/// `StringRepr` impls. The global cache itself (`STRING_CACHE`, `WeakIString`) is a
+/// `IValue::new_string`); the rest are reached through this type's `ValueRepr` impl.
+/// The global cache itself (`STRING_CACHE`, `WeakIString`) is a
 /// module concern, not per-value state, so it stays free-standing above.
 pub(crate) struct InternedRepr;
 
@@ -300,11 +300,8 @@ impl ValueRepr for InternedRepr {
     }
     // hash/eq use the defaults (pointer word / `raw_eq`): interning deduplicates,
     // so equal interned strings share one allocation and compare by pointer.
-}
-
-impl StringRepr for InternedRepr {
     /// The interned UTF-8 bytes. Safety: `v` must be a live interned string.
-    unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> &'a [u8] {
-        Self::bytes(v.ptr())
+    unsafe fn as_bytes<'a>(&self, v: &'a IValue) -> Option<&'a [u8]> {
+        Some(Self::bytes(v.ptr()))
     }
 }

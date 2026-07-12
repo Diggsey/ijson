@@ -45,8 +45,7 @@ use super::number::{from_str_with, InlineNumber, InlineNumberError};
 use super::InlineValue;
 use crate::number::INumber;
 use crate::value::{
-    number_cmp, Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, NumberRepr,
-    ValueType,
+    number_cmp, Destructured, DestructuredMut, DestructuredRef, IValue, NumVal, ValueType,
 };
 
 // --- Bit layout -------------------------------------------------------------
@@ -241,23 +240,6 @@ impl InlineNumber for BinaryNumberRepr {
     }
 }
 
-impl NumberRepr for BinaryNumberRepr {
-    unsafe fn num_val(&self, v: &IValue) -> NumVal {
-        Self::num_val(v.usize_())
-    }
-    fn has_decimal_point(&self, v: &IValue) -> bool {
-        Self::has_decimal_point(v.usize_())
-    }
-    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
-        // A binary inline float decodes exactly.
-        Self::to_f64_exact(v.usize_())
-    }
-    unsafe fn to_f64_lossy(&self, v: &IValue) -> f64 {
-        Self::to_f64_lossy(v.usize_())
-    }
-    // to_i64/to_u64 use the `NumberRepr` defaults (derived from `num_val`).
-}
-
 impl InlineValue for BinaryNumberRepr {
     fn value_type(&self, _v: &IValue) -> ValueType {
         ValueType::Number
@@ -283,7 +265,21 @@ impl InlineValue for BinaryNumberRepr {
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a> {
         DestructuredMut::Number(v.as_number_unchecked_mut())
     }
-    // clone/drop use the inline defaults (bit-copy / nothing).
+    // clone/drop use the inline defaults (bit-copy / nothing); to_i64/to_u64/as_bytes
+    // use the `InlineValue` defaults (derived from `num_val`, or `None`).
+    unsafe fn num_val(&self, v: &IValue) -> Option<NumVal> {
+        Some(Self::num_val(v.usize_()))
+    }
+    fn has_decimal_point(&self, v: &IValue) -> bool {
+        Self::has_decimal_point(v.usize_())
+    }
+    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
+        // A binary inline float decodes exactly.
+        Self::to_f64_exact(v.usize_())
+    }
+    unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
+        Some(Self::to_f64_lossy(v.usize_()))
+    }
 }
 
 #[cfg(test)]
