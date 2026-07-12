@@ -520,11 +520,9 @@ impl PartialEq for IObject {
 impl Eq for IObject {}
 impl PartialOrd for IObject {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self == other {
-            Some(Ordering::Equal)
-        } else {
-            None
-        }
+        // Delegate to the object representation, the single owner of the
+        // `a == b => Some(Equal)` invariant (see `ObjectRepr::partial_cmp`).
+        self.0.partial_cmp(&other.0)
     }
 }
 
@@ -824,6 +822,35 @@ mod tests {
         let y = IObject::with_capacity(10);
 
         assert_eq!(x, y);
+    }
+
+    #[mockalloc::test]
+    fn equal_objects_order_equal_through_ivalue() {
+        // Regression: `ObjectRepr::eq` compares objects by value, but
+        // `ObjectRepr::partial_cmp` kept the `None` default. That broke the
+        // `a == b => a.partial_cmp(b) == Some(Equal)` coherence law for objects
+        // compared as values — directly, and nested inside an array, where it
+        // would also panic `sort_by(|a, b| a.partial_cmp(b).unwrap())`.
+        let make = || {
+            let mut o = IObject::new();
+            o.insert("k", IValue::TRUE);
+            IValue::from(o)
+        };
+
+        // Two value-equal objects in distinct allocations, compared as values.
+        let a = make();
+        let b = make();
+        assert_eq!(a, b);
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Equal));
+
+        // The same objects nested inside arrays.
+        let mut arr_a = crate::array::IArray::new();
+        arr_a.push(make());
+        let mut arr_b = crate::array::IArray::new();
+        arr_b.push(make());
+        let (arr_a, arr_b) = (IValue::from(arr_a), IValue::from(arr_b));
+        assert_eq!(arr_a, arr_b);
+        assert_eq!(arr_a.partial_cmp(&arr_b), Some(Ordering::Equal));
     }
 
     #[mockalloc::test]

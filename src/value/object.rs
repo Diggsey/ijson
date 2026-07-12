@@ -15,6 +15,7 @@
 //! machinery exposed here.
 
 use std::alloc::{Layout, LayoutError};
+use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::{Hash, Hasher};
@@ -447,7 +448,19 @@ impl ValueRepr for ObjectRepr {
         }
         true
     }
-    // partial_cmp uses the default (`None`) — objects are unordered.
+    unsafe fn partial_cmp(&self, a: &IValue, b: &IValue) -> Option<Ordering> {
+        // Objects have no ordering, but equal objects must still compare
+        // `Some(Equal)` so `IValue`'s `PartialOrd` stays coherent with `PartialEq`
+        // — including when an object is nested inside an array, whose element-wise
+        // `partial_cmp` bottoms out here. This is the single boundary that owns the
+        // `a == b => Some(Equal)` invariant for objects; the `IObject` wrapper
+        // delegates to it. Mirrors `ArrayRepr::partial_cmp`.
+        if self.eq(a, b) {
+            Some(Ordering::Equal)
+        } else {
+            None
+        }
+    }
     unsafe fn debug(&self, v: &IValue, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_map()
             .entries(Self::items(v).iter().map(|kvp| (&kvp.key, &kvp.value)))
