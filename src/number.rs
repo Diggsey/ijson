@@ -591,6 +591,68 @@ mod tests {
         }
     }
 
+    /// A number is one number, whichever representation happens to hold it.
+    ///
+    /// An integer past `u64` can only be stored as a decimal — the sole integer-capable
+    /// representation with room for one — even when its value is exactly an `f64`. The
+    /// *same* value arriving as a Rust `f64` (`From<f64>`, or serde's `visit_f64`) is
+    /// stored as an `f64`. Nothing about the number differs, so decoding them must not:
+    /// they have to compare equal and hash alike, or a `HashMap` keyed on them would
+    /// hold the same number twice.
+    ///
+    /// This is why reducing to a `NumVal` has to be *complete*, exact-`f64` case
+    /// included, rather than stopping at "the decimal representation holds it, so it
+    /// must need arbitrary precision".
+    #[test]
+    #[cfg(feature = "arbitrary_precision")]
+    fn a_value_is_the_same_number_in_either_representation() {
+        fn hash_of(n: &INumber) -> u64 {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            n.hash(&mut h);
+            h.finish()
+        }
+
+        for (written, exactly_an_f64) in [
+            ("18446744073709551616", 18_446_744_073_709_551_616.0_f64), // 2^64
+            ("100000000000000000000", 1e20),
+            ("10000000000000000000000", 1e22),
+            // 2^100: a single significant bit, so exactly an `f64` despite its size.
+            (
+                "1267650600228229401496703205376",
+                1_267_650_600_228_229_401_496_703_205_376.0_f64,
+            ),
+        ] {
+            // Stored as a decimal (an integer literal beyond `u64`)...
+            let as_integer: INumber = written.parse().unwrap();
+            // ...and as an `f64` (the same value, handed straight in as one).
+            let as_float = INumber::try_from(exactly_an_f64).unwrap();
+
+            assert_eq!(as_integer, as_float, "{} != its own f64", written);
+            assert_eq!(
+                hash_of(&as_integer),
+                hash_of(&as_float),
+                "{} and its f64 are equal but hash differently",
+                written
+            );
+            assert_eq!(as_integer.to_f64(), Some(exactly_an_f64), "{}", written);
+
+            // ...and each still remembers how it was written.
+            assert!(!as_integer.has_decimal_point(), "{}", written);
+            assert!(as_float.has_decimal_point(), "{}", written);
+            assert_eq!(serde_json::to_string(&as_integer).unwrap(), written);
+        }
+
+        // An integer past `u64` that is *not* an exact `f64` stays arbitrary-precision,
+        // and still equals the same value written as a float.
+        let big: INumber = "123456789012345678901234567890".parse().unwrap();
+        let same: INumber = "1.2345678901234567890123456789e29".parse().unwrap();
+        assert_eq!(big, same);
+        assert_eq!(hash_of(&big), hash_of(&same));
+        assert_eq!(big.to_f64(), None);
+        assert!(!big.has_decimal_point() && same.has_decimal_point());
+    }
+
     #[test]
     fn a_plain_integer_beyond_u64_stays_an_integer() {
         // 1e20 is exactly an `f64`, so it is *stored* as one either way. What differs is

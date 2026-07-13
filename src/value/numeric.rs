@@ -560,25 +560,7 @@ pub(crate) fn canonicalise(negative: bool, digits: &[u8], exp: i32) -> Canonical
     }
     let exp = i32::try_from(exp).expect("the parser bounds `exp + digits.len()` to an `i32`");
 
-    // Everything a fixed-width variant can hold, except an exact `f64`...
-    let mut small = reduce_fixed(negative, &magnitude, exp);
-
-    // ...and then the exact `f64` case, which needs the digits: convert with the
-    // correctly-rounded decimal parser and check the result back against the exact
-    // value — far easier to trust than a bit-level exactness analysis, and this is
-    // already the slow path. (`reduce_fixed` goes first, because an integer in range is
-    // an `Int`/`UInt` even when it is also exactly an `f64`.)
-    if small.is_none() {
-        let big = BigDec {
-            negative,
-            magnitude: &magnitude,
-            exp,
-        };
-        let f = big.to_f64_lossy();
-        if f.is_finite() && NumVal(Repr::Big(big)).cmp(NumVal::from_f64(f)) == Ordering::Equal {
-            small = Some(NumVal::from_f64(f));
-        }
-    }
+    let small = reduce_fixed(negative, &magnitude, exp);
 
     Canonical {
         negative,
@@ -589,12 +571,16 @@ pub(crate) fn canonicalise(negative: bool, digits: &[u8], exp: i32) -> Canonical
 }
 
 /// The fixed-width variant the canonical `(-1)^negative * magnitude * 10^exp` reduces
-/// to, apart from the exact-`f64` case (which needs the decimal digits — see
-/// [`canonicalise`]).
+/// to, or `None` if it genuinely needs arbitrary precision.
 ///
-/// Shared by [`canonicalise`] and [`NumVal::from_big`], so the two cannot disagree
-/// about which variant a value belongs to. Deliberately allocation-free: `from_big`
-/// runs it on every comparison and hash of a stored decimal.
+/// This is the *complete* reduction, and the only one. [`canonicalise`] uses it when a
+/// number enters the library, and [`NumVal::from_big`] runs it again on every decode of
+/// a stored decimal — so a number reduces to the same variant no matter which
+/// representation happens to hold it. That has to hold across the *integer* and *float*
+/// representations alike: `2^64` is exactly an `f64`, and is held as one when it is
+/// written `1.8446744073709552e19` but as a decimal when it is written out as an
+/// integer (only that has room to record the absent decimal point). If the two decoded
+/// differently they would be two different numbers.
 fn reduce_fixed(negative: bool, magnitude: &[u64], exp: i32) -> Option<NumVal<'static>> {
     // An integer in `u64` range. (With `exp` negative the value is not an integer at
     // all: the canonical magnitude is not divisible by ten, so dividing it by a power
@@ -610,7 +596,8 @@ fn reduce_fixed(negative: bool, magnitude: &[u64], exp: i32) -> Option<NumVal<'s
     }
 
     // Small enough for the fixed-width `Decimal` arithmetic: hand it to `from_decimal`,
-    // which owns the `Int`/`UInt`/`Float`/`Decimal` split.
+    // which owns the `Int`/`UInt`/`Float`/`Decimal` split within that domain — including
+    // its own exact-`f64` test, so `1e20` comes back a `Float` here.
     if let [mantissa] = *magnitude {
         let signed = if negative {
             i64::try_from(-i128::from(mantissa)).ok()
@@ -621,8 +608,51 @@ fn reduce_fixed(negative: bool, magnitude: &[u64], exp: i32) -> Option<NumVal<'s
             return Some(NumVal::from_decimal(m, exp));
         }
     }
-    None
+
+    // Too big for that domain, but still possibly an exact `f64` — `2^64` and `2^100`
+    // both are, on one significant bit apiece.
+    exact_f64(negative, magnitude, exp).map(NumVal::from_f64)
 }
+
+/// The exact `f64` value of `(-1)^negative * magnitude * 10^exp`, if it is exactly one.
+///
+/// Structured as a cheap rejection followed by an expensive decision, because
+/// [`reduce_fixed`] runs on every comparison and hash of a stored decimal and the answer
+/// is nearly always "no". The decision itself is the correctly-rounded conversion
+/// checked back against the exact value — the same trick as elsewhere, and far easier to
+/// trust than a bespoke bignum-to-binary rounding with its subnormal edge cases.
+fn exact_f64(negative: bool, magnitude: &[u64], exp: i32) -> Option<f64> {
+    if exp >= 0 {
+        // `value == magnitude * 5^exp * 2^exp`. Multiplying by the *odd* `5^exp` leaves
+        // the trailing zeros alone and only lengthens the number, so the significant
+        // bits can only grow: the magnitude's own must already fit an `f64`'s 53. And
+        // `5^exp` adds more than two bits per power, so past 22 nothing can fit.
+        if exp > 22 || bigint::significant_bits(magnitude) > 53 {
+            return None;
+        }
+    } else {
+        // `value == magnitude / (2^k * 5^k)` is exact only if `5^k` divides the
+        // magnitude — which, for a canonical magnitude (never divisible by ten), is
+        // already unusual. Testing as many powers of five as fit a `u64` rejects all but
+        // a few in one pass.
+        let k = (-i64::from(exp)).min(POW5_PROBE_EXP) as u32;
+        if bigint::rem_small(magnitude, 5u64.pow(k)) != 0 {
+            return None;
+        }
+    }
+
+    let big = BigDec {
+        negative,
+        magnitude,
+        exp,
+    };
+    let f = big.to_f64_lossy();
+    (f.is_finite() && NumVal(Repr::Big(big)).cmp(NumVal::from_f64(f)) == Ordering::Equal)
+        .then_some(f)
+}
+
+/// The largest power of five that fits a `u64`, used to probe divisibility above.
+const POW5_PROBE_EXP: i64 = 27;
 
 /// The exact value of `magnitude * 10^exp` if it fits a `u64`.
 fn integer_value(magnitude: &[u64], exp: i32) -> Option<u64> {

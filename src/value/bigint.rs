@@ -127,6 +127,24 @@ pub(crate) fn bit_len(limbs: &[u64]) -> u64 {
     }
 }
 
+/// The number of trailing zero bits; zero has none (by convention — callers check
+/// [`is_zero`] first).
+pub(crate) fn trailing_zeros(limbs: &[u64]) -> u64 {
+    for (index, &limb) in limbs.iter().enumerate() {
+        if limb != 0 {
+            return index as u64 * 64 + u64::from(limb.trailing_zeros());
+        }
+    }
+    0
+}
+
+/// The number of *significant* bits: the width of the magnitude once its factors of two
+/// are divided out. This is the precision the value actually needs, so an `f64` — whose
+/// mantissa is 53 bits — can hold it exactly only if this is at most 53.
+pub(crate) fn significant_bits(limbs: &[u64]) -> u64 {
+    bit_len(limbs) - trailing_zeros(limbs)
+}
+
 /// The magnitude of a `u64`.
 pub(crate) fn from_u64(x: u64) -> Vec<u64> {
     if x == 0 {
@@ -329,6 +347,28 @@ mod tests {
         assert_eq!(bit_len(&mag("255")), 8);
         assert_eq!(bit_len(&mag("18446744073709551615")), 64); // u64::MAX
         assert_eq!(bit_len(&mag("18446744073709551616")), 65); // u64::MAX + 1
+    }
+
+    #[test]
+    fn significant_bits_ignores_factors_of_two() {
+        // The precision a value actually needs: what decides whether an `f64`, with its
+        // 53-bit mantissa, can hold it exactly. A power of two needs one bit however
+        // large it is, which is why `2^100` is an exact `f64` and `10^30` is not.
+        assert_eq!(significant_bits(&mag("1")), 1);
+        assert_eq!(significant_bits(&mag("2")), 1);
+        assert_eq!(significant_bits(&mag("3")), 2);
+        assert_eq!(significant_bits(&mag("18446744073709551616")), 1); // 2^64
+        assert_eq!(
+            significant_bits(&mag("1267650600228229401496703205376")), // 2^100
+            1
+        );
+        // 10^30 == 2^30 * 5^30, and 5^30 needs 70 bits — too many for an `f64`.
+        let mut ten_pow_30 = mag("1");
+        mul_pow10(&mut ten_pow_30, 30);
+        assert_eq!(significant_bits(&ten_pow_30), 70);
+
+        // 2^64 + 1 is odd, so nothing can be divided out.
+        assert_eq!(significant_bits(&mag("18446744073709551617")), 65);
     }
 
     #[test]

@@ -836,12 +836,8 @@ impl IValue {
     /// pre-check.
     pub(crate) fn new_f64(value: f64) -> Option<Self> {
         value.is_finite().then(|| {
-            // An `f64` is a float: there is no other reading of one, so it always has a
-            // decimal point. (The one number that is stored as an `f64` *without* one —
-            // an integer literal beyond `u64` that happens to be exactly representable —
-            // comes from `new_decimal`, which stores it directly.)
             inline::InlineNumberRepr::from_f64(value)
-                .unwrap_or_else(|| scalar::F64Repr::store(value, true))
+                .unwrap_or_else(|| scalar::F64Repr::store(value))
         })
     }
 
@@ -850,21 +846,25 @@ impl IValue {
     /// literal was written as a float.
     ///
     /// This is the arbitrary-precision entry point, and the only source of the
-    /// [`decimal`] representation. [`canonicalise`] decides which `NumVal` variant the
-    /// value belongs to; this then picks the cheapest representation that can hold it
-    /// *and* record the literal's shape:
+    /// [`decimal`] representation.
     ///
-    ///   - An exact `f64` goes to an `f64` representation. Those always report a decimal
-    ///     point, which is what keeps `1e19` a float even though its value is an integer.
-    ///   - An integer literal in `i64`/`u64` range goes to the matching scalar. (Those
-    ///     have no decimal point, which is exactly right for an integer literal.)
-    ///   - Everything else — including a *float* literal whose value is an integer — goes
-    ///     to the heap decimal, the only representation with room for both the exact
-    ///     value and the decimal-point flag.
+    /// A number belongs to one of two *groups* — written with a decimal point, or
+    /// without — and that is not a property of its value: `1e20` and
+    /// `100000000000000000000` are the same number, and only the first is a JSON float.
+    /// So the choice made here is only ever *within* a group: the cheapest representation
+    /// that can hold the value and still report the right group. It never moves a number
+    /// between them. (Reducing across groups — deciding that `1e20`, `100000000000000000000`
+    /// and the `f64` `1e20` are one number — is [`NumVal`]'s job, and `NumVal` has no
+    /// decimal point to preserve.)
     ///
-    /// Because `NumVal::from_big` reduces on the way back out, a value stored as a
-    /// decimal decodes to the same variant it would from any other representation, so
-    /// the choice made here never changes what the number *is*.
+    ///   - *No decimal point*: an integer, so an integer representation. Beyond
+    ///     `i64`/`u64` only the decimal has room, even when the value happens to be
+    ///     exactly an `f64` (`1e20` is) — an `f64` representation would report a decimal
+    ///     point, and turn an integer into a float.
+    ///   - *Decimal point*: an `f64` representation if the value is exactly an `f64`,
+    ///     otherwise the decimal — including for a float whose value is a whole number
+    ///     (`1.2345678901234567891e19`), which an integer representation would strip the
+    ///     decimal point from.
     #[cfg(feature = "arbitrary_precision")]
     pub(crate) fn new_decimal(
         negative: bool,
@@ -874,7 +874,11 @@ impl IValue {
     ) -> Self {
         let c = canonicalise(negative, digits, exp);
         if let Some(nv) = c.small {
-            if !has_decimal_point {
+            if has_decimal_point {
+                if let Some(f) = nv.to_f64() {
+                    return Self::new_f64(f).expect("an exact `f64` is finite");
+                }
+            } else {
                 if let Some(i) = nv.to_i64() {
                     return Self::new_i64(i);
                 }
@@ -882,21 +886,10 @@ impl IValue {
                     return Self::new_u64(u);
                 }
             }
-            if let Some(f) = nv.to_f64() {
-                return if has_decimal_point {
-                    Self::new_f64(f).expect("an exact `f64` is finite")
-                } else {
-                    // An integer literal beyond `u64` that is exactly an `f64`. It goes
-                    // *straight* to the heap scalar, which records that it has no decimal
-                    // point: the inline float encoder has no code for an integer at a
-                    // non-zero exponent, so routing it through `new_f64` would write it
-                    // back out as `1.7592186044416e20` rather than the integer it is.
-                    scalar::F64Repr::store(f, false)
-                };
-            }
         }
-        // Not an exact `f64` (so the magnitude is non-zero and canonical), and either
-        // arbitrary-precision or a float literal whose shape only this can record.
+        // Nothing narrower in this group can hold it. The magnitude is canonical and
+        // non-zero: zero reduces to `Int(0)`, which both groups have a home for (`0` as
+        // an integer, `0.0` as an exact `f64`).
         decimal::DecimalRepr::store(c.negative, &c.magnitude, c.exp, has_decimal_point)
     }
 
