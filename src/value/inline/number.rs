@@ -68,9 +68,62 @@ pub(crate) trait InlineNumber {
     }
 }
 
-/// Validates `s` against the JSON number grammar (see <https://www.json.org/>),
-/// reporting whether it is integer- or float-shaped, or `None` if it is not a
-/// valid JSON number. Shared by both representations' [`InlineNumber::from_str`].
+/// A validated JSON number literal, taken apart.
+///
+/// The digits of the integer and fraction parts, read as one run, are the significand;
+/// the value is `(-1)^negative * <int_digits><frac_digits> * 10^(written_exp -
+/// frac_digits.len())`. Both slices borrow the literal, so validating costs no
+/// allocation — only the arbitrary-precision path, which actually needs the digits,
+/// pays for them.
+///
+/// Only the arbitrary-precision path reads the parts; without it, `from_str_with` uses
+/// nothing but the shape.
+#[cfg_attr(not(feature = "arbitrary_precision"), allow(dead_code))]
+pub(crate) struct JsonNumber<'a> {
+    pub(crate) negative: bool,
+    pub(crate) int_digits: &'a [u8],
+    pub(crate) frac_digits: &'a [u8],
+    /// The exponent as written (zero if the literal had none), saturated — a literal
+    /// long enough to overflow this would have to be gigabytes of exponent digits.
+    pub(crate) written_exp: i64,
+    pub(crate) shape: NumberShape,
+}
+
+#[cfg_attr(not(feature = "arbitrary_precision"), allow(dead_code))]
+impl JsonNumber<'_> {
+    /// The significand's digits and the exponent of the value they scale: the exact
+    /// value is `(-1)^negative * digits * 10^exp`. Allocates, so only the
+    /// arbitrary-precision path calls it.
+    ///
+    /// `None` if the exponent is too extreme to represent — see [`MAX_EXP`].
+    pub(crate) fn significand(&self) -> Option<(Vec<u8>, i32)> {
+        // Moving the fraction's digits into the significand shifts the exponent down by
+        // one per digit, which is the only place the written exponent can grow in
+        // magnitude; `canonicalise` may then raise it again by at most the digit count,
+        // so bounding the result at `MAX_EXP` leaves it room to do so within an `i32`.
+        let exp = self.written_exp - self.frac_digits.len() as i64;
+        if exp.unsigned_abs() > MAX_EXP {
+            return None;
+        }
+        let mut digits = Vec::with_capacity(self.int_digits.len() + self.frac_digits.len());
+        digits.extend_from_slice(self.int_digits);
+        digits.extend_from_slice(self.frac_digits);
+        Some((digits, exp as i32))
+    }
+}
+
+/// The largest exponent magnitude an arbitrary-precision decimal may have, leaving
+/// `canonicalise` room to raise it by the number of digits without overflowing an
+/// `i32`. Numbers beyond it are stored as an `f64` (an infinity or a zero, as they
+/// would be anyway), exactly as they are without `arbitrary_precision`.
+#[cfg_attr(not(feature = "arbitrary_precision"), allow(dead_code))]
+pub(crate) const MAX_EXP: u64 = 1 << 30;
+
+/// Validates `s` against the JSON number grammar (see <https://www.json.org/>) and
+/// takes it apart, or `None` if it is not a valid JSON number. Shared by both inline
+/// representations' [`InlineNumber::from_str`] (which need only the shape) and, with
+/// `arbitrary_precision`, by the heap decimal representation (which needs the digits).
+/// One parser, so the grammar has one home.
 ///
 /// ```text
 /// number   = integer fraction exponent
@@ -80,18 +133,20 @@ pub(crate) trait InlineNumber {
 /// sign     = "" | '+' | '-'
 /// digits   = digit | digit digits
 /// ```
-pub(crate) fn classify_json_number(s: &str) -> Option<NumberShape> {
+pub(crate) fn parse_json_number(s: &str) -> Option<JsonNumber<'_>> {
     let b = s.as_bytes();
     let n = b.len();
     let mut i = 0;
 
     // Optional minus sign (a leading '+' is not permitted).
-    if i < n && b[i] == b'-' {
+    let negative = i < n && b[i] == b'-';
+    if negative {
         i += 1;
     }
 
     // Integer part: a single '0', or a '1'..='9' followed by more digits. This
     // rejects leading zeros such as "01".
+    let int_start = i;
     match b.get(i) {
         Some(b'0') => i += 1,
         Some(&c) if c.is_ascii_digit() => {
@@ -102,8 +157,10 @@ pub(crate) fn classify_json_number(s: &str) -> Option<NumberShape> {
         }
         _ => return None,
     }
+    let int_digits = &b[int_start..i];
 
     let mut is_float = false;
+    let mut frac_digits: &[u8] = &[];
 
     // Fraction: a '.' must be followed by at least one digit.
     if i < n && b[i] == b'.' {
@@ -112,15 +169,19 @@ pub(crate) fn classify_json_number(s: &str) -> Option<NumberShape> {
         if !matches!(b.get(i), Some(c) if c.is_ascii_digit()) {
             return None;
         }
+        let frac_start = i;
         while i < n && b[i].is_ascii_digit() {
             i += 1;
         }
+        frac_digits = &b[frac_start..i];
     }
 
     // Exponent: 'e'/'E', an optional sign, then at least one digit.
+    let mut written_exp: i64 = 0;
     if i < n && (b[i] == b'e' || b[i] == b'E') {
         is_float = true;
         i += 1;
+        let exp_negative = i < n && b[i] == b'-';
         if i < n && (b[i] == b'+' || b[i] == b'-') {
             i += 1;
         }
@@ -128,7 +189,15 @@ pub(crate) fn classify_json_number(s: &str) -> Option<NumberShape> {
             return None;
         }
         while i < n && b[i].is_ascii_digit() {
+            // Saturating, so an absurd exponent is a huge magnitude rather than a wrap
+            // to a small one. `significand` rejects anything past `MAX_EXP` anyway.
+            written_exp = written_exp
+                .saturating_mul(10)
+                .saturating_add(i64::from(b[i] - b'0'));
             i += 1;
+        }
+        if exp_negative {
+            written_exp = -written_exp;
         }
     }
 
@@ -137,10 +206,16 @@ pub(crate) fn classify_json_number(s: &str) -> Option<NumberShape> {
         return None;
     }
 
-    Some(if is_float {
-        NumberShape::Float
-    } else {
-        NumberShape::Integer
+    Some(JsonNumber {
+        negative,
+        int_digits,
+        frac_digits,
+        written_exp,
+        shape: if is_float {
+            NumberShape::Float
+        } else {
+            NumberShape::Integer
+        },
     })
 }
 
@@ -154,7 +229,10 @@ pub(crate) fn from_str_with(
     encode_int: impl FnOnce(i64) -> Option<usize>,
     encode_float: impl FnOnce(&str) -> Option<usize>,
 ) -> Result<usize, InlineNumberError> {
-    match classify_json_number(s).ok_or(InlineNumberError::Invalid)? {
+    match parse_json_number(s)
+        .ok_or(InlineNumberError::Invalid)?
+        .shape
+    {
         // A validated integer that fits `i64` may still exceed the inline mantissa;
         // one beyond `i64` never fits inline. Either way it spills to the heap.
         NumberShape::Integer => s

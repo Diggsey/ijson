@@ -18,7 +18,7 @@ broken-borrow-impl-compat = []
 # arbitrary-precision decimal for larger values) instead of rounding to `f64`.
 # When disabled, the same inline slot holds a binary float (`mantissa * 2^exp`),
 # so every inline number is exactly an `f64`. Mirrors serde_json's feature.
-arbitrary_precision = []
+arbitrary_precision = ["serde_json/raw_value"]
 
 [dependencies]
 dashmap = { version = "5.5", features = ["raw-api"] }

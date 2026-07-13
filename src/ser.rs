@@ -33,16 +33,36 @@ impl Serialize for INumber {
     where
         S: Serializer,
     {
-        if self.has_decimal_point() {
-            // A number written with a decimal point serializes as a float. It is
-            // usually an exact `f64`; an exact decimal that is not (e.g. `0.1`)
-            // falls back to its nearest `f64`, since `serde` takes an `f64`.
-            serializer.serialize_f64(self.to_f64().unwrap_or_else(|| self.to_f64_lossy()))
-        } else if let Some(v) = self.to_i64() {
-            serializer.serialize_i64(v)
-        } else {
-            serializer.serialize_u64(self.to_u64().unwrap())
+        // Whatever `serde` can carry exactly, hand it exactly: an integer literal as an
+        // integer, a float that is an exact `f64` as an `f64`.
+        if !self.has_decimal_point() {
+            if let Some(v) = self.to_i64() {
+                return serializer.serialize_i64(v);
+            }
+            if let Some(v) = self.to_u64() {
+                return serializer.serialize_u64(v);
+            }
+        } else if let Some(v) = self.to_f64() {
+            return serializer.serialize_f64(v);
         }
+
+        // What is left is an exact decimal that is neither — only `arbitrary_precision`
+        // stores one. An `f64` would *change* it (`1e-400` would go out as `0.0`, a
+        // 25-digit fraction would round), so it is written from its own digits instead.
+        // `serde` has no arbitrary-precision primitive, so this goes through
+        // `serde_json`'s raw value, exactly as `serde_json`'s own `arbitrary_precision`
+        // does.
+        #[cfg(feature = "arbitrary_precision")]
+        if let Some(exact) = self.0.exact_json() {
+            return serde_json::value::RawValue::from_string(exact)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(serializer);
+        }
+
+        // Without `arbitrary_precision` every number *is* an integer or an exact `f64`,
+        // so nothing reaches here; with it, the case above has already dealt with the
+        // rest. Rounding is still a better last resort than panicking in a serializer.
+        serializer.serialize_f64(self.to_f64_lossy())
     }
 }
 

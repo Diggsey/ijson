@@ -24,6 +24,8 @@ pub(crate) mod number_decimal;
 pub(crate) mod string;
 
 pub(crate) use constant::{FALSE, NULL, TRUE};
+#[cfg(feature = "arbitrary_precision")]
+pub(crate) use number::parse_json_number;
 pub(crate) use number::{InlineNumber, InlineNumberError, NumberShape};
 
 // The two inline number representations — an exact base-10 decimal and a base-2
@@ -113,7 +115,7 @@ pub(crate) trait InlineValue {
     // rely on the `num_val`-derived `to_f64` — there is nothing to derive here.
     // `to_i64`/`to_u64`/`as_str` are absent: no inline rep overrides them, so they
     // derive from `num_val`/`as_bytes` on `ValueRepr` directly.
-    unsafe fn num_val(&self, _v: &IValue) -> Option<NumVal> {
+    unsafe fn num_val<'a>(&self, _v: &'a IValue) -> Option<NumVal<'a>> {
         None
     }
     fn has_decimal_point(&self, _v: &IValue) -> bool {
@@ -197,7 +199,7 @@ impl ValueRepr for InlineRepr {
     // Forward the number/string operations to the inline sub-representation. `to_i64`/
     // `to_u64`/`as_str` are not forwarded: their `ValueRepr` defaults derive from
     // `num_val`/`as_bytes`, which are forwarded here.
-    unsafe fn num_val(&self, v: &IValue) -> Option<NumVal> {
+    unsafe fn num_val<'a>(&self, v: &'a IValue) -> Option<NumVal<'a>> {
         Self::kind(v).with(|i| unsafe { i.num_val(v) })
     }
     fn has_decimal_point(&self, v: &IValue) -> bool {

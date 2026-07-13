@@ -25,7 +25,7 @@ impl U64Repr {
     }
 
     /// Decodes the payload as a `NumVal`. Safety: `v` must be a live `NumberU64`.
-    unsafe fn num_val(v: &IValue) -> NumVal {
+    unsafe fn num_val(v: &IValue) -> NumVal<'static> {
         NumVal::from_u64(read::<u64>(v.ptr()))
     }
 }
@@ -61,7 +61,7 @@ impl ValueRepr for U64Repr {
     unsafe fn drop(&self, v: &mut IValue) {
         free::<u64>(v.ptr());
     }
-    unsafe fn num_val(&self, v: &IValue) -> Option<NumVal> {
+    unsafe fn num_val<'a>(&self, v: &'a IValue) -> Option<NumVal<'a>> {
         Some(Self::num_val(v))
     }
 }

@@ -315,7 +315,7 @@ impl DecimalNumberRepr {
     /// becomes `Float`, and anything else — an exact `mantissa * 10^exp` that is neither
     /// (e.g. `0.1`) — becomes the exact `Decimal`. This covers the whole representable
     /// domain, not just what today's constructors produce.
-    fn num_val(bits: usize) -> NumVal {
+    fn num_val(bits: usize) -> NumVal<'static> {
         let (mantissa, exp) = Self::decode(bits);
         NumVal::from_decimal(mantissa, exp)
     }
@@ -393,7 +393,7 @@ impl InlineValue for DecimalNumberRepr {
     }
     // clone/drop use the inline defaults (bit-copy / nothing); to_i64/to_u64/as_bytes
     // use the `InlineValue` defaults (derived from `num_val`, or `None`).
-    unsafe fn num_val(&self, v: &IValue) -> Option<NumVal> {
+    unsafe fn num_val<'a>(&self, v: &'a IValue) -> Option<NumVal<'a>> {
         Some(Self::num_val(v.usize_()))
     }
     fn has_decimal_point(&self, v: &IValue) -> bool {

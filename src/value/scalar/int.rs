@@ -24,7 +24,7 @@ impl I64Repr {
     }
 
     /// Decodes the payload as a `NumVal`. Safety: `v` must be a live `NumberI64`.
-    unsafe fn num_val(v: &IValue) -> NumVal {
+    unsafe fn num_val(v: &IValue) -> NumVal<'static> {
         NumVal::from_i64(read::<i64>(v.ptr()))
     }
 }
@@ -62,7 +62,7 @@ impl ValueRepr for I64Repr {
     }
     // An integer is never written with a decimal point; `has_decimal_point` and the
     // numeric conversions use the `ValueRepr` defaults (derived from `num_val`).
-    unsafe fn num_val(&self, v: &IValue) -> Option<NumVal> {
+    unsafe fn num_val<'a>(&self, v: &'a IValue) -> Option<NumVal<'a>> {
         Some(Self::num_val(v))
     }
 }

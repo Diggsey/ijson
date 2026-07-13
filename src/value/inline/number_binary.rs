@@ -194,7 +194,7 @@ impl BinaryNumberRepr {
 
     /// Decodes inline bits to a [`NumVal`]. A binary inline float is always an exact
     /// `f64`, so it reduces to an integer (`Int`/`UInt`) or a `Float`, never a `Decimal`.
-    fn num_val(bits: usize) -> NumVal {
+    fn num_val(bits: usize) -> NumVal<'static> {
         let (m, exp) = Self::decode(bits);
         match Self::to_i64(m, exp) {
             Some(i) => NumVal::from_i64(i),
@@ -267,7 +267,7 @@ impl InlineValue for BinaryNumberRepr {
     }
     // clone/drop use the inline defaults (bit-copy / nothing); to_i64/to_u64/as_bytes
     // use the `InlineValue` defaults (derived from `num_val`, or `None`).
-    unsafe fn num_val(&self, v: &IValue) -> Option<NumVal> {
+    unsafe fn num_val<'a>(&self, v: &'a IValue) -> Option<NumVal<'a>> {
         Some(Self::num_val(v.usize_()))
     }
     fn has_decimal_point(&self, v: &IValue) -> bool {

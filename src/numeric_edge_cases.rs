@@ -434,6 +434,63 @@ mod tests {
         }
     }
 
+    /// Serializing a number must reproduce it: same value, same JSON shape. This is
+    /// what stops an exact decimal from being quietly rounded on the way out — writing
+    /// it through an `f64` would turn `1e-400` into `0.0` and round any long fraction —
+    /// and what stops an integer held as an `f64` from coming back as a float.
+    #[test]
+    fn numbers_round_trip_through_json() {
+        let mut cases = string_number_cases();
+        cases.extend(
+            [
+                // Beyond every fixed-width representation, in both directions.
+                "123456789012345678901234567890123",
+                "-123456789012345678901234567890123",
+                "0.1234567890123456789012345678901234567890",
+                "1e400",
+                "-1e400",
+                "1e-400",
+                // An integer that is exactly an `f64` but past `u64` — the case where
+                // "stored as a float" and "written as a float" come apart.
+                "100000000000000000000",
+                "18446744073709551616",
+                // A float whose value is a whole number, but which must stay a float.
+                "1.2345678901234567891e19",
+                "1e19",
+            ]
+            .map(str::to_owned),
+        );
+
+        for s in &cases {
+            // Only `arbitrary_precision` can hold these exactly; without it the parser
+            // rejects the ones that overflow an `f64` and rounds the rest, so a
+            // round-trip is not expected to be exact.
+            let Ok(n) = s.parse::<crate::INumber>() else {
+                assert!(
+                    !cfg!(feature = "arbitrary_precision"),
+                    "{:?} should be representable",
+                    s
+                );
+                continue;
+            };
+
+            let text = serde_json::to_string(&n).unwrap_or_else(|e| panic!("write {:?}: {}", s, e));
+            let back: crate::INumber = text.parse().unwrap_or_else(|e| {
+                panic!("{:?} wrote {:?}, which does not re-parse: {}", s, text, e)
+            });
+
+            assert_eq!(back, n, "{:?} wrote {:?}, a different value", s, text);
+            assert_eq!(
+                back.has_decimal_point(),
+                n.has_decimal_point(),
+                "{:?} wrote {:?}, which changed integer/float shape",
+                s,
+                text
+            );
+            assert_eq!(hash_of(&back.into()), hash_of(&n.into()), "{:?} hash", s);
+        }
+    }
+
     #[test]
     fn i64_inputs_are_consistent() {
         for &x in &i64_cases() {
@@ -580,18 +637,24 @@ mod tests {
             assert!(v.is_number(), "{:?} not a number", s);
 
             // A number has a decimal point iff it is written as a float: with a
-            // fraction/exponent, or as a bare integer too large for `i64`/`u64`
-            // (stored as a float). Unlike serde_json — which parses "-0" as -0.0
-            // to keep the sign — the string parser treats the integer token "-0"
-            // as the integer `0`, faithfully to the JSON grammar (so no dot).
+            // fraction/exponent, or — without `arbitrary_precision` — as a bare integer
+            // too large for `i64`/`u64`, which then has nowhere to go but an `f64`. With
+            // the feature, such an integer is stored exactly and stays an integer.
+            // Unlike serde_json — which parses "-0" as -0.0 to keep the sign — the
+            // string parser treats the integer token "-0" as the integer `0`, faithfully
+            // to the JSON grammar (so no dot).
+            let exact_big_integers = cfg!(feature = "arbitrary_precision");
             let syntactic_float = s.bytes().any(|b| matches!(b, b'.' | b'e' | b'E'));
             let fits_int = s.parse::<i64>().is_ok() || s.parse::<u64>().is_ok();
-            let expect_dot = syntactic_float || !fits_int;
+            let expect_dot = syntactic_float || (!fits_int && !exact_big_integers);
             let dot = v.as_number().unwrap().has_decimal_point();
             assert_eq!(dot, expect_dot, "{:?} decimal-point", s);
 
-            if !expect_dot {
-                // An exact integer: both parsers agree on the value.
+            if !expect_dot && fits_int {
+                // An exact integer both parsers can hold: they agree on the value.
+                // (An integer beyond `u64` is excluded: only *this* parser holds it
+                // exactly, and serde_json has already rounded it to an `f64`, so the two
+                // legitimately differ.)
                 let js = json(s);
                 assert_eq!(v, js, "{:?} vs serde_json", s);
                 // When serde also stored it as an integer they land on identical
@@ -600,7 +663,7 @@ mod tests {
                 if !js.as_number().unwrap().has_decimal_point() {
                     assert_eq!(v.number_repr_key(), js.number_repr_key(), "{:?} repr", s);
                 }
-            } else {
+            } else if expect_dot {
                 // Stored as a float. With `arbitrary_precision` this may be an
                 // *exact decimal* more precise than any f64 (from_str keeps e.g.
                 // 0.1 as 1*10^-1, unlike serde_json), so it is not equal to the f64

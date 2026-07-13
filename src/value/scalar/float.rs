@@ -1,5 +1,12 @@
-//! The heap `f64` number representation (tag `NumberF64`): the eight payload bytes
-//! are the `f64` bit pattern. This is the only heap scalar with a decimal point.
+//! The heap `f64` number representation (tag `NumberF64`): the payload is an `f64`
+//! together with the shape of the literal it came from.
+//!
+//! The shape is stored, not assumed. Being *held* as an `f64` and having been *written*
+//! as a float are different facts, and only the second is what `has_decimal_point`
+//! reports: with `arbitrary_precision`, an integer literal beyond `u64` — say `2^64` —
+//! is exactly an `f64` and is kept here, but it is still an integer and must serialize
+//! back as one. Assuming the two coincide is what would let an integer silently acquire
+//! a decimal point.
 
 use std::cmp::Ordering;
 use std::fmt::{self, Formatter};
@@ -12,20 +19,40 @@ use crate::value::{
     ValueType,
 };
 
+/// The payload: the value, and whether the literal it came from was a float.
+#[derive(Clone, Copy)]
+struct Payload {
+    value: f64,
+    has_decimal_point: bool,
+}
+
 /// The heap `f64` number representation.
 pub(crate) struct F64Repr;
 
 impl F64Repr {
-    /// Stores an `f64` as a heap scalar. Always succeeds — the heap holds any
-    /// `f64` — so it is the total fallback in construction.
-    pub(crate) fn store(value: f64) -> IValue {
+    /// Stores an `f64` as a heap scalar. Always succeeds — the heap holds any `f64` —
+    /// so it is the total fallback in construction.
+    ///
+    /// `has_decimal_point` is the *literal's* shape: true for every float, and true for
+    /// an `f64` handed in by a Rust `f64` (there is no other reading of one). Only the
+    /// arbitrary-precision parser passes false, for an integer literal too large for
+    /// `i64`/`u64` that happens to be exactly an `f64`.
+    pub(crate) fn store(value: f64, has_decimal_point: bool) -> IValue {
         // Safety: `alloc` returns a fresh, aligned, non-null allocation.
-        unsafe { IValue::new_ptr(ReprTag::NumberF64, alloc::<f64>(value)) }
+        unsafe {
+            IValue::new_ptr(
+                ReprTag::NumberF64,
+                alloc::<Payload>(Payload {
+                    value,
+                    has_decimal_point,
+                }),
+            )
+        }
     }
 
     /// Decodes the payload as a `NumVal`. Safety: `v` must be a live `NumberF64`.
-    unsafe fn num_val(v: &IValue) -> NumVal {
-        NumVal::from_f64(read::<f64>(v.ptr()))
+    unsafe fn num_val(v: &IValue) -> NumVal<'static> {
+        NumVal::from_f64(read::<Payload>(v.ptr()).value)
     }
 }
 
@@ -55,15 +82,18 @@ impl ValueRepr for F64Repr {
         DestructuredMut::Number(v.as_number_unchecked_mut())
     }
     unsafe fn clone(&self, v: &IValue) -> IValue {
-        Self::store(read::<f64>(v.ptr()))
+        let p = read::<Payload>(v.ptr());
+        Self::store(p.value, p.has_decimal_point)
     }
     unsafe fn drop(&self, v: &mut IValue) {
-        free::<f64>(v.ptr());
+        free::<Payload>(v.ptr());
     }
-    unsafe fn num_val(&self, v: &IValue) -> Option<NumVal> {
+    unsafe fn num_val<'a>(&self, v: &'a IValue) -> Option<NumVal<'a>> {
         Some(Self::num_val(v))
     }
-    fn has_decimal_point(&self, _v: &IValue) -> bool {
-        true
+    /// The literal's shape, not the storage's — see the module docs.
+    fn has_decimal_point(&self, v: &IValue) -> bool {
+        // Safety: `v` is a `NumberF64` (the tag selected this representation).
+        unsafe { read::<Payload>(v.ptr()) }.has_decimal_point
     }
 }

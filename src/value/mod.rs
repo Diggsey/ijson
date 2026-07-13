@@ -35,6 +35,9 @@ use indexmap::IndexMap;
 // public wrapper types (`IArray`, `INumber`, `IObject`, `IString`) live in the
 // top-level modules and delegate down through `IValue`.
 pub(crate) mod array;
+mod bigint;
+#[cfg(feature = "arbitrary_precision")]
+pub(crate) mod decimal;
 pub(crate) mod inline;
 pub(crate) mod interned;
 mod numeric;
@@ -43,7 +46,11 @@ pub(crate) mod scalar;
 
 // The numeric value model (`NumVal` and its exact comparison/hash/conversion
 // methods), shared by every number representation. `decimal_to_f64_lossy` is the
-// one scalar helper used outside the module (by the base-10 inline representation).
+// one scalar helper used outside the module (by the base-10 inline representation);
+// `canonicalise` is how an arbitrary-precision decimal enters the library, and decides
+// which representation stores it.
+#[cfg(feature = "arbitrary_precision")]
+pub(crate) use numeric::canonicalise;
 pub(crate) use numeric::{decimal_to_f64_exact, decimal_to_f64_lossy, NumVal};
 
 // The active inline number representation's static construction interface
@@ -225,9 +232,10 @@ enum ReprTag {
     NumberU64 = 2,
     /// Pointer to a heap `f64` payload.
     NumberF64 = 3,
-    /// Reserved for a future arbitrary-precision number representation.
-    #[allow(dead_code)]
-    NumberReserved = 4,
+    /// Pointer to a heap arbitrary-precision decimal header. Only `arbitrary_precision`
+    /// constructs one (see [`decimal`]); without it, no value carries this tag.
+    #[cfg_attr(not(feature = "arbitrary_precision"), allow(dead_code))]
+    NumberDecimal = 4,
     /// Pointer to an interned string header.
     String = 5,
     /// Pointer to an array header.
@@ -776,7 +784,7 @@ impl IValue {
 /// representation ([`IValue::num_val`]). Yields `None` if `b` is not a number, so
 /// the caller need not know `b`'s type. (In a real comparison the type guard makes
 /// `b` the same type, so the result is always `Some`.)
-pub(crate) fn number_cmp(a: NumVal, b: &IValue) -> Option<Ordering> {
+pub(crate) fn number_cmp(a: NumVal<'_>, b: &IValue) -> Option<Ordering> {
     b.num_val().map(|b| a.cmp(b))
 }
 
@@ -828,9 +836,68 @@ impl IValue {
     /// pre-check.
     pub(crate) fn new_f64(value: f64) -> Option<Self> {
         value.is_finite().then(|| {
+            // An `f64` is a float: there is no other reading of one, so it always has a
+            // decimal point. (The one number that is stored as an `f64` *without* one —
+            // an integer literal beyond `u64` that happens to be exactly representable —
+            // comes from `new_decimal`, which stores it directly.)
             inline::InlineNumberRepr::from_f64(value)
-                .unwrap_or_else(|| scalar::F64Repr::store(value))
+                .unwrap_or_else(|| scalar::F64Repr::store(value, true))
         })
+    }
+
+    /// Constructs a number from a parsed JSON decimal literal: the exact value
+    /// `(-1)^negative * digits * 10^exp`, with `has_decimal_point` recording whether the
+    /// literal was written as a float.
+    ///
+    /// This is the arbitrary-precision entry point, and the only source of the
+    /// [`decimal`] representation. [`canonicalise`] decides which `NumVal` variant the
+    /// value belongs to; this then picks the cheapest representation that can hold it
+    /// *and* record the literal's shape:
+    ///
+    ///   - An exact `f64` goes to an `f64` representation. Those always report a decimal
+    ///     point, which is what keeps `1e19` a float even though its value is an integer.
+    ///   - An integer literal in `i64`/`u64` range goes to the matching scalar. (Those
+    ///     have no decimal point, which is exactly right for an integer literal.)
+    ///   - Everything else — including a *float* literal whose value is an integer — goes
+    ///     to the heap decimal, the only representation with room for both the exact
+    ///     value and the decimal-point flag.
+    ///
+    /// Because `NumVal::from_big` reduces on the way back out, a value stored as a
+    /// decimal decodes to the same variant it would from any other representation, so
+    /// the choice made here never changes what the number *is*.
+    #[cfg(feature = "arbitrary_precision")]
+    pub(crate) fn new_decimal(
+        negative: bool,
+        digits: &[u8],
+        exp: i32,
+        has_decimal_point: bool,
+    ) -> Self {
+        let c = canonicalise(negative, digits, exp);
+        if let Some(nv) = c.small {
+            if !has_decimal_point {
+                if let Some(i) = nv.to_i64() {
+                    return Self::new_i64(i);
+                }
+                if let Some(u) = nv.to_u64() {
+                    return Self::new_u64(u);
+                }
+            }
+            if let Some(f) = nv.to_f64() {
+                return if has_decimal_point {
+                    Self::new_f64(f).expect("an exact `f64` is finite")
+                } else {
+                    // An integer literal beyond `u64` that is exactly an `f64`. It goes
+                    // *straight* to the heap scalar, which records that it has no decimal
+                    // point: the inline float encoder has no code for an integer at a
+                    // non-zero exponent, so routing it through `new_f64` would write it
+                    // back out as `1.7592186044416e20` rather than the integer it is.
+                    scalar::F64Repr::store(f, false)
+                };
+            }
+        }
+        // Not an exact `f64` (so the magnitude is non-zero and canonical), and either
+        // arbitrary-precision or a float literal whose shape only this can record.
+        decimal::DecimalRepr::store(c.negative, &c.magnitude, c.exp, has_decimal_point)
     }
 
     /// Wraps already-encoded inline-number bits as an `IValue`.
@@ -854,9 +921,22 @@ impl IValue {
     /// to resolve the *other* operand of a number comparison (see [`number_cmp`])
     /// through its own representation — the caller need not know its type; a
     /// non-number simply yields `None`.
-    pub(crate) fn num_val(&self) -> Option<NumVal> {
+    pub(crate) fn num_val(&self) -> Option<NumVal<'_>> {
         // Safety: the tag selects this value's own representation; `None` for a non-number.
         self.repr_tag().with(|r| unsafe { r.num_val(self) })
+    }
+
+    /// The exact JSON text of this number, when `serde` cannot carry it exactly — that
+    /// is, when it is neither an integer in `i64`/`u64` range nor an exact `f64`.
+    /// `None` otherwise (and for non-numbers), meaning the ordinary `serialize_*` call
+    /// is already lossless.
+    ///
+    /// Only an exact decimal reaches this, and only with `arbitrary_precision`; writing
+    /// one through an `f64` would change it (see [`NumVal::exact_json`]).
+    #[cfg(feature = "arbitrary_precision")]
+    pub(crate) fn exact_json(&self) -> Option<String> {
+        self.num_val()
+            .and_then(|n| n.exact_json(self.has_decimal_point()))
     }
 }
 
@@ -974,7 +1054,10 @@ pub(crate) trait ValueRepr {
     /// number representation overrides it and the numeric accessors below derive from
     /// it; it is also how a number comparison resolves its *other* operand, through the
     /// same dispatch (see [`number_cmp`]).
-    unsafe fn num_val(&self, _v: &IValue) -> Option<NumVal> {
+    ///
+    /// The `NumVal` borrows `v`: an arbitrary-precision mantissa is too large to
+    /// return by value, so it is viewed in place.
+    unsafe fn num_val<'a>(&self, _v: &'a IValue) -> Option<NumVal<'a>> {
         None
     }
     /// Whether a number was written with a decimal point (`1.0` vs `1`); `false` for a
@@ -1023,8 +1106,16 @@ impl ReprTag {
             ReprTag::Inline => f(&inline::InlineRepr),
             ReprTag::NumberI64 => f(&scalar::I64Repr),
             ReprTag::NumberU64 => f(&scalar::U64Repr),
-            // The reserved tag is never produced; it reads back as an `f64`.
-            ReprTag::NumberF64 | ReprTag::NumberReserved => f(&scalar::F64Repr),
+            ReprTag::NumberF64 => f(&scalar::F64Repr),
+            #[cfg(feature = "arbitrary_precision")]
+            ReprTag::NumberDecimal => f(&decimal::DecimalRepr),
+            // Without `arbitrary_precision` the decimal representation does not exist,
+            // and neither does `new_decimal`, its only source — so no value can carry
+            // this tag. Say so, rather than quietly reading it back as something else.
+            #[cfg(not(feature = "arbitrary_precision"))]
+            ReprTag::NumberDecimal => {
+                unreachable!("the decimal representation requires `arbitrary_precision`")
+            }
             ReprTag::String => f(&interned::InternedRepr),
             ReprTag::Array => f(&array::ArrayRepr),
             ReprTag::Object => f(&object::ObjectRepr),

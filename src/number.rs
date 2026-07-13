@@ -247,6 +247,36 @@ impl FromStr for INumber {
                 .ok_or(ParseNumberError(()))
         };
 
+        // What a number that does not fit inline falls back to, once the shape-specific
+        // fast paths below have declined it.
+        //
+        // With `arbitrary_precision` it is stored exactly, in whichever representation
+        // can hold it (see `IValue::new_decimal`) — that is the whole point of the
+        // feature, and the reason the exponent is bounded rather than the value.
+        // Without it, there is nowhere exact to put such a number, so it rounds to the
+        // nearest `f64` as it always has.
+        #[cfg(feature = "arbitrary_precision")]
+        let spill = |s: &str, shape: &NumberShape| -> Result<IValue, ParseNumberError> {
+            use crate::value::inline::parse_json_number;
+
+            // `from_str` already validated the grammar, so this re-parse cannot fail —
+            // it only takes the literal apart. An exponent too extreme for the decimal
+            // representation falls back to an `f64`, which is the infinity or zero it
+            // would round to in any case.
+            let parsed = parse_json_number(s).expect("`from_str` already validated the grammar");
+            match parsed.significand() {
+                Some((digits, exp)) => Ok(IValue::new_decimal(
+                    parsed.negative,
+                    &digits,
+                    exp,
+                    matches!(shape, NumberShape::Float),
+                )),
+                None => float_from(s),
+            }
+        };
+        #[cfg(not(feature = "arbitrary_precision"))]
+        let spill = |s: &str, _shape: &NumberShape| float_from(s);
+
         // Ask the active inline representation to store it directly; only if that
         // spills (a valid number too large for the inline form) do we fall back to
         // a heap representation appropriate to its shape.
@@ -254,17 +284,17 @@ impl FromStr for INumber {
             // Safety: `from_str` returns valid inline-number bits.
             Ok(bits) => unsafe { IValue::new_inline_number(bits) },
             Err(InlineNumberError::Invalid) => return Err(ParseNumberError(())),
-            Err(InlineNumberError::Spill(NumberShape::Integer)) => {
+            Err(InlineNumberError::Spill(shape @ NumberShape::Integer)) => {
+                // A plain integer in range needs nothing cleverer than a heap scalar.
                 if let Ok(v) = s.parse::<i64>() {
                     IValue::new_i64(v)
                 } else if let Ok(v) = s.parse::<u64>() {
                     IValue::new_u64(v)
                 } else {
-                    // An integer beyond `u64`'s range is stored as a float.
-                    float_from(s)?
+                    spill(s, &shape)?
                 }
             }
-            Err(InlineNumberError::Spill(NumberShape::Float)) => float_from(s)?,
+            Err(InlineNumberError::Spill(shape @ NumberShape::Float)) => spill(s, &shape)?,
         };
         Ok(INumber(value))
     }
@@ -562,11 +592,41 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_integer_beyond_u64_becomes_a_float() {
-        // Not exactly representable, so it is stored as a float (like serde_json).
+    fn a_plain_integer_beyond_u64_stays_an_integer() {
+        // 1e20 is exactly an `f64`, so it is *stored* as one either way. What differs is
+        // whether that is allowed to change what it is.
         let n: INumber = "100000000000000000000".parse().unwrap(); // 1e20
         assert_eq!(n.to_f64_lossy(), 1e20);
-        assert!(n.has_decimal_point());
+
+        // Without exact decimals, an integer past `u64` has nowhere to go but a float,
+        // and is reported as one (as serde_json does).
+        #[cfg(not(feature = "arbitrary_precision"))]
+        {
+            assert!(n.has_decimal_point());
+        }
+
+        // With them, being held as an `f64` is an implementation detail: it is still an
+        // integer literal, so it has no decimal point and serializes back as written.
+        // (An integer that is *not* exactly an `f64` is held exactly, and likewise.)
+        #[cfg(feature = "arbitrary_precision")]
+        {
+            assert!(!n.has_decimal_point());
+            assert_eq!(serde_json::to_string(&n).unwrap(), "100000000000000000000");
+
+            let odd: INumber = "123456789012345678901234567890".parse().unwrap();
+            assert!(!odd.has_decimal_point());
+            assert_eq!(odd.to_i64(), None);
+            assert_eq!(
+                serde_json::to_string(&odd).unwrap(),
+                "123456789012345678901234567890"
+            );
+
+            // The same number written as a float is the same *value*, but keeps its
+            // float shape — the two must compare and hash alike all the same.
+            let as_float: INumber = "1.2345678901234567890123456789e29".parse().unwrap();
+            assert_eq!(odd, as_float);
+            assert!(as_float.has_decimal_point());
+        }
     }
 
     #[test]
@@ -610,10 +670,35 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "arbitrary_precision"))]
     fn rejects_out_of_range_magnitude() {
-        // A finite JSON float whose magnitude overflows f64 is not representable.
+        // Without exact decimals there is nowhere to put a JSON float whose magnitude
+        // overflows `f64`, so it is not representable.
         assert!("1e400".parse::<INumber>().is_err());
         assert!("-1e400".parse::<INumber>().is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "arbitrary_precision")]
+    fn holds_magnitudes_beyond_f64() {
+        // ...but an exact decimal has room for them, so they are ordinary numbers: the
+        // exponent, not the `f64` range, is the limit. They are still *finite* — only
+        // their `f64` projection overflows — so ordering and equality stay exact.
+        let big: INumber = "1e400".parse().unwrap();
+        assert!(big.has_decimal_point());
+        assert_eq!(big.to_f64(), None);
+        assert_eq!(big, "10e399".parse::<INumber>().unwrap());
+        assert!(big > "9.9e399".parse::<INumber>().unwrap());
+        assert!(big > INumber::try_from(f64::MAX).unwrap());
+        assert!("-1e400".parse::<INumber>().unwrap() < big);
+
+        // And they round-trip, which serializing through an `f64` (an infinity, written
+        // as `null`) could not do.
+        assert_eq!(serde_json::to_string(&big).unwrap(), "1e400");
+        assert_eq!(
+            serde_json::to_string(&"1e-400".parse::<INumber>().unwrap()).unwrap(),
+            "1e-400"
+        );
     }
 
     #[test]
@@ -679,9 +764,13 @@ mod tests {
         assert_eq!(half, INumber::try_from(0.5_f64).unwrap());
         assert_eq!(half.to_f64(), Some(0.5));
 
-        // Too many fractional digits to hold exactly -> nearest f64 (matches the
-        // f64 constructor).
+        // Too many fractional digits for the *inline* decimal, but the heap decimal
+        // holds it exactly — so, like `0.1`, it is a different number from the `f64`
+        // nearest it, and says so rather than quietly rounding.
         let pi: INumber = "3.141592653589793".parse().unwrap();
-        assert_eq!(pi, INumber::try_from(std::f64::consts::PI).unwrap());
+        assert_ne!(pi, INumber::try_from(std::f64::consts::PI).unwrap());
+        assert_eq!(pi.to_f64(), None);
+        assert_eq!(pi.to_f64_lossy(), std::f64::consts::PI);
+        assert_eq!(serde_json::to_string(&pi).unwrap(), "3.141592653589793");
     }
 }
