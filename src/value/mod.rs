@@ -1101,24 +1101,34 @@ impl ReprTag {
             ReprTag::NumberU64 => f(&scalar::U64Repr),
             #[cfg(feature = "arbitrary_precision")]
             ReprTag::NumberDecimal => f(&decimal::DecimalRepr),
-            // Without `arbitrary_precision` there is no decimal representation, and no
-            // `new_decimal` to build one, so nothing can carry that tag. The arm still has
-            // to *exist* — the tag is three bits, so all eight values are inhabited types
-            // — and what it does is unobservable. It must not, however, be a `panic!`:
-            // this is the single dispatch every value operation goes through, and an
-            // unreachable arm that panics puts a cold panic path, and the `Arguments` it
-            // needs, into every one of them. Folding it into the `f64` arm costs nothing
-            // and generates nothing; a `debug_assert` covers the invariant where checks
-            // are affordable, and the tests and Miri run with those on.
+            // Without `arbitrary_precision` there is no decimal representation to dispatch
+            // to. The arm still has to *exist* — the tag is three bits, so the enum has all
+            // eight — but there is no honest answer to give in it, and a dishonest one is
+            // worse than none: sending it to the `f64` representation, say, would decode
+            // some other representation's allocation as a float and hand back a
+            // plausible-looking number.
+            //
+            // Nor can it `panic!`. This is the single dispatch every value operation goes
+            // through, and an unreachable arm that panics puts a cold panic block — and the
+            // `Arguments` it formats — into every one of them, `is_number` included.
+            //
+            // So state what is true: the tag does not occur.
             #[cfg(not(feature = "arbitrary_precision"))]
-            ReprTag::NumberF64 | ReprTag::NumberDecimal => {
-                debug_assert!(
-                    !matches!(self, ReprTag::NumberDecimal),
-                    "the decimal representation requires `arbitrary_precision`"
-                );
-                f(&scalar::F64Repr)
+            ReprTag::NumberDecimal => {
+                // The `debug_assert` is the check where checks are affordable — the tests
+                // and Miri both run with them on.
+                debug_assert!(false, "the decimal tag requires `arbitrary_precision`");
+
+                // Safety: a value's tag is only ever *named*. `new_usize`/`new_ptr` are the
+                // only things that write one, and they take a `ReprTag` as an argument;
+                // `set_ptr`/`set_usize` keep whatever tag is already there. So every tag in
+                // existence is one that some construction site wrote by name — and the only
+                // site naming `NumberDecimal` is `decimal::DecimalRepr::store`, in a module
+                // compiled out without the feature (as is `IValue::new_decimal`, its only
+                // caller). Nothing left in the build can produce this tag, whatever the
+                // input: it is unreachable, not merely unlikely.
+                unsafe { std::hint::unreachable_unchecked() }
             }
-            #[cfg(feature = "arbitrary_precision")]
             ReprTag::NumberF64 => f(&scalar::F64Repr),
             ReprTag::String => f(&interned::InternedRepr),
             ReprTag::Array => f(&array::ArrayRepr),
