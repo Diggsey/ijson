@@ -224,6 +224,17 @@ fn body_of<'a>(ir: &'a str, name: &str) -> Option<Vec<&'a str>> {
 fn constructing_a_small_value_folds_to_a_constant() {
     let ir = emit_probe_ir();
 
+    // If the nested build was instrumented anyway, every probe begins by bumping a
+    // profiling counter and nothing folds. That is not a regression in the library, so
+    // say so plainly rather than reporting the instrumentation as one.
+    assert!(
+        !common::is_instrumented(&ir),
+        "the probe crate was built with coverage instrumentation, so its IR is not the          library's — every function starts by bumping a profiling counter and nothing          folds. Something is still feeding flags into the nested build:
+
+{}",
+        common::flag_environment()
+    );
+
     let mut failures = Vec::new();
     for (name, word, meaning) in expected() {
         let Some(body) = body_of(&ir, name) else {
