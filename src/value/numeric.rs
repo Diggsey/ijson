@@ -218,6 +218,12 @@ impl<'a> NumVal<'a> {
     }
 
     /// The (possibly lossy) `f64` value.
+    ///
+    /// `#[inline]`, because the `Big` arm — which renders digits and parses them — is
+    /// large enough to put the whole function past the cost model's threshold, and the
+    /// hot arms are a cast apiece. The hint keeps the dispatch inline and leaves the
+    /// arbitrary-precision conversion out of line, where it belongs.
+    #[inline]
     pub(crate) fn to_f64_lossy(self) -> f64 {
         match self.0 {
             Repr::Int(x) => x as f64,

@@ -37,23 +37,6 @@ fn erases_a_hasher(mangled: &str) -> bool {
     (mangled.contains("ValueRepr") || mangled.contains("InlineValue")) && mangled.contains("4hash")
 }
 
-/// Whether an LLVM IR line calls through a function *pointer* (a `%local` callee)
-/// rather than a named `@function`. The callee is the token just before the argument
-/// list, so a direct call reads `... @name(` and an indirect one `... %reg(`.
-///
-/// `invoke` is checked as well as `call`: a call that may unwind is emitted as an
-/// `invoke`, and would otherwise slip through.
-fn is_indirect_call(line: &str) -> bool {
-    let callee_of = |keyword: &str| -> Option<&str> {
-        let rest = &line[line.find(keyword)? + keyword.len()..];
-        let head = &rest[..rest.find('(')?];
-        head.split_whitespace().last()
-    };
-    // " call " also matches "tail call" / "musttail call".
-    let callee = callee_of(" call ").or_else(|| callee_of(" invoke "));
-    callee.is_some_and(|c| c.starts_with('%'))
-}
-
 /// Builds the library in release with LLVM IR emitted, and returns the IR text.
 fn emit_llvm_ir() -> String {
     // A target directory of our own, so the nested build does not contend with the
@@ -118,7 +101,7 @@ fn value_dispatch_is_devirtualized() {
                 }
             }
             function.clear();
-        } else if !function.is_empty() && is_indirect_call(line) {
+        } else if !function.is_empty() && common::is_indirect_call(line) {
             indirect += 1;
         }
     }

@@ -1099,16 +1099,27 @@ impl ReprTag {
             ReprTag::Inline => f(&inline::InlineRepr),
             ReprTag::NumberI64 => f(&scalar::I64Repr),
             ReprTag::NumberU64 => f(&scalar::U64Repr),
-            ReprTag::NumberF64 => f(&scalar::F64Repr),
             #[cfg(feature = "arbitrary_precision")]
             ReprTag::NumberDecimal => f(&decimal::DecimalRepr),
-            // Without `arbitrary_precision` the decimal representation does not exist,
-            // and neither does `new_decimal`, its only source — so no value can carry
-            // this tag. Say so, rather than quietly reading it back as something else.
+            // Without `arbitrary_precision` there is no decimal representation, and no
+            // `new_decimal` to build one, so nothing can carry that tag. The arm still has
+            // to *exist* — the tag is three bits, so all eight values are inhabited types
+            // — and what it does is unobservable. It must not, however, be a `panic!`:
+            // this is the single dispatch every value operation goes through, and an
+            // unreachable arm that panics puts a cold panic path, and the `Arguments` it
+            // needs, into every one of them. Folding it into the `f64` arm costs nothing
+            // and generates nothing; a `debug_assert` covers the invariant where checks
+            // are affordable, and the tests and Miri run with those on.
             #[cfg(not(feature = "arbitrary_precision"))]
-            ReprTag::NumberDecimal => {
-                unreachable!("the decimal representation requires `arbitrary_precision`")
+            ReprTag::NumberF64 | ReprTag::NumberDecimal => {
+                debug_assert!(
+                    !matches!(self, ReprTag::NumberDecimal),
+                    "the decimal representation requires `arbitrary_precision`"
+                );
+                f(&scalar::F64Repr)
             }
+            #[cfg(feature = "arbitrary_precision")]
+            ReprTag::NumberF64 => f(&scalar::F64Repr),
             ReprTag::String => f(&interned::InternedRepr),
             ReprTag::Array => f(&array::ArrayRepr),
             ReprTag::Object => f(&object::ObjectRepr),
@@ -1338,7 +1349,13 @@ typed_conversions! {
 /// rejects it.
 impl From<f32> for IValue {
     fn from(v: f32) -> Self {
-        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
+        // `unwrap_or_else`, not `unwrap_or`: the latter builds the `NULL` whether or not
+        // it is wanted, and then — since an `IValue` owns whatever it points at — has to
+        // *drop* it again on the ordinary path. That is a live temporary, and it stops the
+        // whole conversion folding away for a constant.
+        INumber::try_from(v)
+            .map(Into::into)
+            .unwrap_or_else(|()| IValue::NULL)
     }
 }
 
@@ -1348,7 +1365,13 @@ impl From<f32> for IValue {
 /// rejects it.
 impl From<f64> for IValue {
     fn from(v: f64) -> Self {
-        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
+        // `unwrap_or_else`, not `unwrap_or`: the latter builds the `NULL` whether or not
+        // it is wanted, and then — since an `IValue` owns whatever it points at — has to
+        // *drop* it again on the ordinary path. That is a live temporary, and it stops the
+        // whole conversion folding away for a constant.
+        INumber::try_from(v)
+            .map(Into::into)
+            .unwrap_or_else(|()| IValue::NULL)
     }
 }
 

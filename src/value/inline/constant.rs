@@ -41,12 +41,25 @@ impl ConstantRepr {
     }
 
     /// The constant an inline constant value holds.
+    ///
+    /// Total: the discriminant is one of exactly three values (zero is reserved, which is
+    /// what keeps the all-zero word free as the `NonNull` niche), so the last needs no
+    /// test. Written as a `match` with an `unreachable!()` arm instead, the impossible
+    /// zero would put a panic — and the `Arguments` it formats — into *every* operation
+    /// that reaches an inline constant, [`IValue::type_`] among them. `decode` is on that
+    /// path, so it has to generate nothing.
     fn decode(bits: usize) -> Constant {
-        match (bits >> PAYLOAD_SHIFT) & 0b11 {
-            1 => Constant::Null,
-            2 => Constant::False,
-            3 => Constant::True,
-            _ => unreachable!("only the three constants are ever encoded"),
+        let discriminant = (bits >> PAYLOAD_SHIFT) & 0b11;
+        debug_assert!(
+            (1..=3).contains(&discriminant),
+            "only the three constants are ever encoded"
+        );
+        if discriminant == Constant::Null as usize {
+            Constant::Null
+        } else if discriminant == Constant::False as usize {
+            Constant::False
+        } else {
+            Constant::True
         }
     }
 }

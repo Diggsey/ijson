@@ -72,3 +72,66 @@ pub fn flag_environment() -> String {
 pub fn is_instrumented(ir: &str) -> bool {
     ir.contains("__profc")
 }
+
+/// The callee of an LLVM IR call instruction: `@name` for a direct call, `%reg` for one
+/// through a function pointer. `None` if the line is not a call.
+///
+/// `call` and `invoke` are matched as whole *tokens*, not as the substring `" call "` — a
+/// line may or may not have been trimmed of its indentation, and `call fastcc void @f(..)`
+/// at the start of a line would otherwise be missed entirely. (It was, which made an
+/// earlier version of this quietly blind to every call it was supposed to find.)
+///
+/// The callee is the last token before the argument list, so cutting the line at its first
+/// `(` and taking the final token finds it — for `tail call`, `invoke`, and a plain `call`
+/// alike. Rust's mangled names never contain a literal parenthesis.
+pub fn call_target(line: &str) -> Option<&str> {
+    let head = &line[..line.find('(')?];
+    let mut tokens = head.split_whitespace();
+    tokens
+        .any(|token| token == "call" || token == "invoke")
+        .then(|| tokens.last())?
+}
+
+/// Whether the line calls through a function *pointer* — i.e. a vtable.
+pub fn is_indirect_call(line: &str) -> bool {
+    call_target(line).is_some_and(|callee| callee.starts_with('%'))
+}
+
+/// The instruction lines in the body of `@name`, or `None` if it is not defined. Labels,
+/// comments and blank lines are dropped; what is left is what the function *does*.
+pub fn body_of<'a>(ir: &'a str, name: &str) -> Option<Vec<&'a str>> {
+    let header = format!("@{}(", name);
+    let mut lines = ir
+        .lines()
+        .skip_while(|l| !(l.starts_with("define") && l.contains(&header)))
+        .skip(1);
+
+    let mut body = Vec::new();
+    for line in &mut lines {
+        let line = line.trim();
+        if line == "}" {
+            return Some(body);
+        }
+        if line.is_empty() || line.starts_with(';') || line.ends_with(':') {
+            continue;
+        }
+        body.push(line);
+    }
+    None
+}
+
+/// The names of the functions a body calls, ignoring LLVM's own intrinsics (`llvm.*` is
+/// not a call in any meaningful sense — `llvm.trunc.f64` is an instruction) and the
+/// anonymous constants a call's arguments may point at.
+pub fn called_symbols<'a>(body: &[&'a str]) -> Vec<&'a str> {
+    let mut names: Vec<&str> = body
+        .iter()
+        .filter_map(|line| call_target(line))
+        .filter_map(|callee| callee.strip_prefix('@'))
+        .map(|name| name.trim_matches('"'))
+        .filter(|name| !name.starts_with("llvm.") && !name.starts_with("anon."))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
