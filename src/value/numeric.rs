@@ -17,6 +17,7 @@ use std::cmp::Ordering;
 use std::convert::TryFrom;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hasher;
+use std::num::NonZeroU128;
 
 use super::bigint;
 
@@ -175,7 +176,7 @@ impl<'a> NumVal<'a> {
     /// (an `f64` representation holds those, and records the decimal point besides).
     pub(crate) fn from_big(negative: bool, magnitude: &'a [u64], exp: i32) -> NumVal<'a> {
         debug_assert!(
-            !bigint::is_zero(magnitude) && bigint::rem_small(magnitude, 10) != 0,
+            !bigint::is_zero(magnitude) && bigint::rem_small(magnitude, bigint::TEN) != 0,
             "a stored decimal's magnitude is canonical: non-zero and not divisible by ten"
         );
         if let Some(nv) = reduce_fixed(negative, magnitude, exp) {
@@ -560,8 +561,8 @@ pub(crate) fn canonicalise(negative: bool, digits: &[u8], exp: i32) -> Canonical
     // decimal form of this value — the invariant `Big` compares and hashes on. Each
     // step consumes a digit, so `exp` can grow by at most `digits.len()`.
     let mut exp = i64::from(exp);
-    while bigint::rem_small(&magnitude, 10) == 0 {
-        bigint::div_small(&mut magnitude, 10);
+    while bigint::rem_small(&magnitude, bigint::TEN) == 0 {
+        bigint::div_small(&mut magnitude, bigint::TEN);
         exp += 1;
     }
     let exp = i32::try_from(exp).expect("the parser bounds `exp + digits.len()` to an `i32`");
@@ -642,7 +643,7 @@ fn exact_f64(negative: bool, magnitude: &[u64], exp: i32) -> Option<f64> {
         // already unusual. Testing as many powers of five as fit a `u64` rejects all but
         // a few in one pass.
         let k = (-i64::from(exp)).min(POW5_PROBE_EXP) as u32;
-        if bigint::rem_small(magnitude, 5u64.pow(k)) != 0 {
+        if bigint::rem_small(magnitude, bigint::pow5(k)) != 0 {
             return None;
         }
     }
@@ -735,6 +736,38 @@ fn cmp_u64_f64(a: u64, b: f64) -> Ordering {
 // the domain `fits_decimal` defines so that the fixed-width arithmetic below cannot
 // overflow.
 
+// The divisors the `Decimal` arithmetic uses. A power of ten (or five) is never zero, but
+// the compiler cannot see that through `pow`, so a division by one carries a
+// divide-by-zero check — and drags the panic machinery into `to_f64` and its neighbours,
+// which cannot fail. Stating it in the *type* makes the fact structural, and the check
+// disappears. (`bigint` does the same for the magnitude divisions.)
+//
+// `DECIMAL_MIN_EXP` bounds the exponent at -7, so eight entries cover every divisor a
+// `Decimal` can produce.
+const DIVISORS: usize = 8;
+
+/// `10^n`, as a divisor.
+///
+/// *Unsigned*, deliberately: `Div` for a `NonZero` divisor is only defined on the unsigned
+/// integers, and a signed one would not help anyway — it still admits `-1`, so the
+/// overflow check (`MIN / -1`) and its panic would survive. Dividing unsigned and putting
+/// the sign back afterwards leaves neither check.
+fn pow10_u128(n: u32) -> NonZeroU128 {
+    const TABLE: [NonZeroU128; DIVISORS] = {
+        let mut table = [NonZeroU128::MIN; DIVISORS];
+        let mut i = 0;
+        while i < DIVISORS {
+            table[i] = match NonZeroU128::new(10u128.pow(i as u32)) {
+                Some(d) => d,
+                None => panic!("a power of ten is non-zero"),
+            };
+            i += 1;
+        }
+        table
+    };
+    TABLE[n as usize]
+}
+
 /// The least exponent a `Decimal` may have. The base-10 inline representation's is
 /// `-7`, and canonicalisation (which only divides out factors of ten) can never lower
 /// it, so this covers everything that representation produces.
@@ -820,8 +853,16 @@ fn decimal_int_value(mantissa: i64, exp: i32) -> Option<i128> {
     if exp >= 0 {
         Some(i128::from(mantissa) * 10i128.pow(exp as u32))
     } else {
-        let div = 10i128.pow((-exp) as u32);
-        (i128::from(mantissa) % div == 0).then_some(i128::from(mantissa) / div)
+        let div = pow10_u128((-exp) as u32);
+        let magnitude = i128::from(mantissa).unsigned_abs();
+        (magnitude % div == 0).then(|| {
+            let quotient = (magnitude / div) as i128;
+            if mantissa < 0 {
+                -quotient
+            } else {
+                quotient
+            }
+        })
     }
 }
 
@@ -841,11 +882,15 @@ pub(crate) fn decimal_to_f64_exact(mantissa: i64, exp: i32) -> Option<f64> {
         // exact iff `num` fits `f64` (dividing an exact integer by a power of two is
         // itself exact). Everything fits `i64` for the inline exponent range.
         let k = (-exp) as u32;
-        let p5 = 5i64.pow(k);
-        if mantissa % p5 != 0 {
+        let p5 = bigint::pow5(k);
+        let magnitude = mantissa.unsigned_abs();
+        if magnitude % p5 != 0 {
             return None;
         }
-        let num = mantissa / p5;
+        // The quotient is no larger than the mantissa, so it fits an `i64` with its sign
+        // restored; `try_from` says so without a panic if that ever stops holding.
+        let num = i64::try_from(magnitude / p5).ok()?;
+        let num = if mantissa < 0 { -num } else { num };
         i64_fits_f64(num).then_some(num as f64 / (1u64 << k) as f64)
     }
 }
@@ -869,11 +914,11 @@ pub(crate) fn decimal_to_f64_lossy(mantissa: i64, exp: i32) -> f64 {
         return (i128::from(mantissa) * 10i128.pow(exp as u32)) as f64;
     }
     let m_abs = mantissa.unsigned_abs();
-    let denom = 10u128.pow((-exp) as u32);
+    let denom = pow10_u128((-exp) as u32);
     let v = if m_abs < (1 << 53) {
         // `m_abs` and `10^k` are both exact `f64`s, so one division rounds
         // correctly.
-        m_abs as f64 / denom as f64
+        m_abs as f64 / denom.get() as f64
     } else {
         // `m_abs >= 2^53` means `|value| >= 2^29`, so scaling by `2^64` leaves
         // ample guard bits: integer-divide, fold the remainder into a sticky bit,

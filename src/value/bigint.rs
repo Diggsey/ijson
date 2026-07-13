@@ -17,10 +17,42 @@
 #![cfg_attr(not(feature = "arbitrary_precision"), allow(dead_code))]
 
 use std::cmp::Ordering;
+use std::num::NonZeroU64;
+
+/// A divisor that cannot be zero.
+///
+/// The compiler cannot see through `pow` that a power of a non-zero base is non-zero, so
+/// every division by one would carry a divide-by-zero check — and drag the panic machinery
+/// into the numeric conversions, which cannot fail. Stating it in the *type* makes the fact
+/// structural, and the check disappears.
+const fn nonzero(x: u64) -> NonZeroU64 {
+    match NonZeroU64::new(x) {
+        Some(d) => d,
+        None => panic!("a divisor is non-zero"),
+    }
+}
+
+/// Ten, as a divisor. Dividing a magnitude by ten is how a decimal is canonicalised.
+pub(crate) const TEN: NonZeroU64 = nonzero(10);
+
+/// `5^n` as a divisor, for every power that fits a `u64`. [`POW5_CHUNK_EXP`] is the
+/// largest, so the table covers every `n` a caller can pass.
+pub(crate) fn pow5(n: u32) -> NonZeroU64 {
+    const TABLE: [NonZeroU64; POW5_CHUNK_EXP as usize + 1] = {
+        let mut table = [NonZeroU64::MIN; POW5_CHUNK_EXP as usize + 1];
+        let mut i = 0;
+        while i < table.len() {
+            table[i] = nonzero(5u64.pow(i as u32));
+            i += 1;
+        }
+        table
+    };
+    TABLE[n as usize]
+}
 
 /// The largest power of ten that fits a `u64` (`10^19 < 2^64`), so a magnitude can be
 /// scaled by, and rendered in, 19 decimal digits at a time.
-const POW10_CHUNK: u64 = 10_000_000_000_000_000_000;
+const POW10_CHUNK: NonZeroU64 = nonzero(10_000_000_000_000_000_000);
 const POW10_CHUNK_EXP: u64 = 19;
 
 /// The largest power of five that fits a `u64` (`5^27 < 2^63`).
@@ -73,28 +105,28 @@ pub(crate) fn add_small(limbs: &mut Vec<u64>, a: u64) {
     }
 }
 
-/// `limbs /= d`, returning the remainder. `d` must be non-zero.
-pub(crate) fn div_small(limbs: &mut Vec<u64>, d: u64) -> u64 {
-    debug_assert!(d != 0, "division by zero");
+/// `limbs /= d`, returning the remainder.
+pub(crate) fn div_small(limbs: &mut Vec<u64>, d: NonZeroU64) -> u64 {
+    let d = u128::from(d.get());
     let mut rem: u64 = 0;
     // Most significant limb first: each step divides `rem:limb` (a 128-bit value) by
     // `d`, leaving the quotient limb in place and carrying the remainder down.
     for limb in limbs.iter_mut().rev() {
         let wide = (u128::from(rem) << 64) | u128::from(*limb);
-        *limb = (wide / u128::from(d)) as u64;
-        rem = (wide % u128::from(d)) as u64;
+        *limb = (wide / d) as u64;
+        rem = (wide % d) as u64;
     }
     trim(limbs);
     rem
 }
 
-/// The remainder of `limbs / d`, leaving `limbs` untouched. `d` must be non-zero.
-pub(crate) fn rem_small(limbs: &[u64], d: u64) -> u64 {
-    debug_assert!(d != 0, "division by zero");
+/// The remainder of `limbs / d`, leaving `limbs` untouched.
+pub(crate) fn rem_small(limbs: &[u64], d: NonZeroU64) -> u64 {
+    let d = u128::from(d.get());
     let mut rem: u64 = 0;
     for &limb in limbs.iter().rev() {
         let wide = (u128::from(rem) << 64) | u128::from(limb);
-        rem = (wide % u128::from(d)) as u64;
+        rem = (wide % d) as u64;
     }
     rem
 }
@@ -277,7 +309,7 @@ mod tests {
         assert_normalised(&limbs);
         assert_eq!(to_decimal(&limbs), "1234567890123456789012345678900");
 
-        assert_eq!(div_small(&mut limbs, 10), 0);
+        assert_eq!(div_small(&mut limbs, TEN), 0);
         assert_normalised(&limbs);
         assert_eq!(to_decimal(&limbs), "123456789012345678901234567890");
     }
@@ -285,12 +317,12 @@ mod tests {
     #[test]
     fn div_small_reports_the_remainder() {
         let mut limbs = mag("18446744073709551617"); // u64::MAX + 2
-        assert_eq!(div_small(&mut limbs, 10), 7);
+        assert_eq!(div_small(&mut limbs, TEN), 7);
         assert_eq!(to_decimal(&limbs), "1844674407370955161");
 
         // `rem_small` agrees, without consuming the magnitude.
         let limbs = mag("18446744073709551617");
-        assert_eq!(rem_small(&limbs, 10), 7);
+        assert_eq!(rem_small(&limbs, TEN), 7);
         assert_eq!(to_decimal(&limbs), "18446744073709551617");
     }
 

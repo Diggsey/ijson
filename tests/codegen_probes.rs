@@ -209,45 +209,35 @@ fn fast_paths() -> Vec<FastPath> {
     // default value that would silently paper over the bug.
     const UNWRAP: &str = "unwrap_failed";
 
-    // Without `arbitrary_precision` a number is an inline word or a heap scalar, and every
-    // conversion is a switch and some arithmetic — nothing to call. With it, a value may be
-    // an arbitrary-precision decimal, and *that* arm reduces a bignum: real work, rightly
-    // left out of line. Every such helper lives in `value::numeric`, so the whole allowance
-    // is that one module — and only for the conversions, and only with the feature.
-    const BIGNUM: &str = "numeric";
-    let decimal: &'static [&'static str] = if cfg!(feature = "arbitrary_precision") {
-        &[BIGNUM]
-    } else {
-        &[]
-    };
-    let decimal_and_unwrap: &'static [&'static str] = if cfg!(feature = "arbitrary_precision") {
-        &[BIGNUM, UNWRAP]
-    } else {
-        &[UNWRAP]
-    };
+    // The numeric model. A conversion may call into it: the value work lives there, and
+    // with `arbitrary_precision` an arm of it reduces a bignum — real work, rightly out of
+    // line. Whether the *small* arms are inlined into the caller is LLVM's cost-model call
+    // and differs by platform, so it is not pinned here; what is pinned is that nothing
+    // else is called, and that none of it panics, allocates, or goes through a vtable.
+    const NUMERIC: &str = "numeric";
 
-    let inline_only = |name| FastPath {
+    let dispatch_only = |name| FastPath {
         name,
         allowed: &[],
-        because: "reading a value is a switch on the tag and some arithmetic",
+        because: "asking a value's type is a switch on the tag and nothing more",
     };
     let converts = |name| FastPath {
         name,
-        allowed: decimal,
-        because: "only the arbitrary-precision arm may call out, to reduce a bignum",
+        allowed: &[NUMERIC],
+        because: "a conversion may call into the numeric model, and nothing else",
     };
 
     vec![
-        inline_only("probe_is_number"),
-        inline_only("probe_type"),
-        inline_only("probe_has_decimal_point"),
+        dispatch_only("probe_is_number"),
+        dispatch_only("probe_type"),
+        dispatch_only("probe_has_decimal_point"),
         converts("probe_to_i64"),
         converts("probe_to_u64"),
         converts("probe_to_f64"),
         FastPath {
             name: "probe_to_f64_lossy",
-            allowed: decimal_and_unwrap,
-            because: "`INumber::to_f64_lossy` unwraps, asserting that an `INumber` really                       is a number; and only the arbitrary-precision arm may call out",
+            allowed: &[NUMERIC, UNWRAP],
+            because: "a conversion may call into the numeric model; and                       `INumber::to_f64_lossy` unwraps, asserting that an `INumber` really                       is a number",
         },
     ]
 }

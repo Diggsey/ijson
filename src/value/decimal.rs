@@ -120,7 +120,8 @@ impl DecimalRepr {
     ) -> IValue {
         assert!(magnitude.len() <= MAX_LIMBS, "decimal mantissa too large");
         debug_assert!(
-            !super::bigint::is_zero(magnitude) && super::bigint::rem_small(magnitude, 10) != 0,
+            !super::bigint::is_zero(magnitude)
+                && super::bigint::rem_small(magnitude, super::bigint::TEN) != 0,
             "a stored decimal's magnitude is canonical"
         );
         let meta = magnitude.len() as u32
