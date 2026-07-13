@@ -24,8 +24,16 @@ use std::process::Command;
 
 /// The `hash` impls are the only ijson functions allowed to call through a function
 /// pointer: they dispatch on `&mut dyn Hasher`, by design.
+///
+/// Matched across both symbol manglings, because they differ in how they join the trait
+/// to the method and the compiler picks between them by target and version — the legacy
+/// scheme writes `..ValueRepr$GT$4hash..`, and `v0` writes `..9ValueRepr4hash`. Keying
+/// on either spelling alone silently stops matching on the other, which does not weaken
+/// the test into passing — it turns every legitimate `hash` into a reported offender.
 fn erases_a_hasher(mangled: &str) -> bool {
-    mangled.contains("ValueRepr$GT$4hash") || mangled.contains("InlineValue$GT$4hash")
+    // `4hash` is the length-prefixed method name in `v0`, and also appears in the legacy
+    // scheme (whose own suffix is `17h<hex>`, not `4hash`), so it does not over-match.
+    (mangled.contains("ValueRepr") || mangled.contains("InlineValue")) && mangled.contains("4hash")
 }
 
 /// Whether an LLVM IR line calls through a function *pointer* (a `%local` callee)
@@ -85,6 +93,7 @@ fn value_dispatch_is_devirtualized() {
     let mut indirect = 0usize;
     let mut ijson_functions = 0usize;
     let mut saw_the_clone_dispatch = false;
+    let mut saw_a_hasher_erasure = false;
     let mut offenders: Vec<String> = Vec::new();
 
     for line in ir.lines() {
@@ -102,6 +111,7 @@ fn value_dispatch_is_devirtualized() {
             if function.contains("ijson") {
                 ijson_functions += 1;
                 saw_the_clone_dispatch |= function.contains("IValue") && function.contains("clone");
+                saw_a_hasher_erasure |= erases_a_hasher(&function);
                 if indirect > 0 && !erases_a_hasher(&function) {
                     offenders.push(format!("  {indirect} indirect call(s) in {function}"));
                 }
@@ -125,6 +135,17 @@ fn value_dispatch_is_devirtualized() {
         saw_the_clone_dispatch,
         "did not find `IValue`'s `Clone` impl among the {} ijson functions scanned — \
          the name matching is stale, so this test is not checking the dispatch",
+        ijson_functions
+    );
+
+    // If the exception matcher goes stale (the symbol mangling differs by target and
+    // compiler version), every legitimate `hash` becomes a reported offender. Say so
+    // here, rather than leaving the reader to infer it from a list of false positives.
+    assert!(
+        saw_a_hasher_erasure,
+        "did not recognise a single `hash` impl among the {} ijson functions scanned — \
+         `erases_a_hasher` no longer matches the symbol mangling, so every legitimate \
+         `hash` would be reported as an offender below",
         ijson_functions
     );
 
