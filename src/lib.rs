@@ -30,6 +30,9 @@ pub mod string;
 mod thin;
 mod value;
 
+#[cfg(codegen_probes)]
+pub use value::codegen_probes;
+
 pub use array::IArray;
 pub use number::{INumber, ParseNumberError};
 pub use object::IObject;

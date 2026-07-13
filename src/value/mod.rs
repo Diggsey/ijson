@@ -223,7 +223,7 @@ const ALIGNMENT: usize = 8;
 
 #[repr(usize)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum ReprTag {
+pub(crate) enum ReprTag {
     /// A value stored entirely inline (null, bool, small number, short string).
     Inline = 0,
     /// Pointer to a heap `i64` payload.
@@ -366,7 +366,7 @@ impl IValue {
     /// machinery (dispatch, pointer arithmetic). JSON-type questions go through
     /// [`type_`](Self::type_)/[`ValueType`] so they stay decoupled from how a value
     /// happens to be stored.
-    fn repr_tag(&self) -> ReprTag {
+    pub(crate) fn repr_tag(&self) -> ReprTag {
         // The raw word — not `usize_()`, which has masked the tag off.
         (self.ptr.as_ptr() as usize).into()
     }
@@ -1690,6 +1690,56 @@ mod tests {
             for b in &nums {
                 assert_eq!(a.cmp(b), b.cmp(a).reverse(), "{:?} vs {:?}", a, b);
             }
+        }
+    }
+}
+
+/// Hooks for the codegen tests. Not part of the public API, and not present in an ordinary
+/// build: this module exists only under `--cfg codegen_probes`, which nothing but the
+/// tests' own nested build passes.
+///
+/// A codegen test wants to know what an operation compiles to *on its fast path* — what is
+/// left when the value turns out to be stored inline. From outside the crate that cannot be
+/// asked: the representation is a run-time fact, so the compiler emits the whole dispatch
+/// and every arm's code together, and all a test can say about the result is that nothing
+/// terrible is in it.
+///
+/// These hand the compiler the one fact it is missing, and nothing else — *which
+/// representation* the value uses, never *what value* it holds. The dispatch then folds
+/// away, what remains is exactly the fast path, and it can be asserted instruction by
+/// instruction.
+#[cfg(codegen_probes)]
+pub mod codegen_probes {
+    use super::{inline, ReprTag};
+    use crate::number::INumber;
+
+    /// Tells the compiler this number is stored inline, without telling it which number.
+    ///
+    /// # Safety
+    ///
+    /// `n` must really be stored inline — every number below the inline mantissa is, so
+    /// `INumber::from(1i32)` will do. Lie, and the fast path will run on a heap value's
+    /// pointer as though it were a packed word.
+    #[inline(always)]
+    pub unsafe fn assume_inline(n: &INumber) {
+        unsafe {
+            std::hint::assert_unchecked(n.0.repr_tag() == ReprTag::Inline);
+            std::hint::assert_unchecked(inline::is_inline_number(&n.0));
+        }
+    }
+
+    /// As [`assume_inline`], and further: that the number is a plain *integer*. That is the
+    /// hot case — most numbers in most documents — and it is what collapses a conversion to
+    /// its shortest form, since the exponent no longer has to be decoded.
+    ///
+    /// # Safety
+    ///
+    /// `n` must be a plain inline integer, as `INumber::from(1i32)` produces.
+    #[inline(always)]
+    pub unsafe fn assume_inline_integer(n: &INumber) {
+        unsafe {
+            assume_inline(n);
+            inline::assume_inline_integer(&n.0);
         }
     }
 }

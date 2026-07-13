@@ -10,10 +10,18 @@
 //!     encoding is otherwise only ever asserted by code sharing the very constants it is
 //!     testing, so it could not catch a layout that quietly agreed with itself.
 //!
-//!   - **Reading** a value stays on the fast path. The accessors take a value whose
-//!     representation is not known at compile time, so they cannot fold away; what they
-//!     *can* do is stay free of the costs that would make them slow — a vtable, an
-//!     allocation, a panic path, or a call out of line where the work should be inline.
+//!   - **Reading** a value, when its representation is *not* known, generates the whole
+//!     dispatch — so that is where a cost hiding in any one arm shows up. It cannot fold
+//!     away, and there is no exact shape to demand of it; what it can do is stay free of
+//!     the things that would make it slow: a vtable, an allocation, a panic path.
+//!
+//!   - **Reading** a value on the **fast path** — when the representation *is* known — is
+//!     pinned exactly, instruction by instruction. A probe hands the compiler that one
+//!     fact and nothing else (`assert_unchecked`, via `ijson::codegen_probes`; the value
+//!     itself stays unknown), the dispatch folds away, and what is left is the fast path
+//!     alone. Reading a small integer out of an `INumber` should be the pointer word, a
+//!     shift, and nothing more — and that is asserted, not merely hoped for. The slow
+//!     paths may be anything.
 //!
 //! # Reading the constants
 //!
@@ -45,13 +53,22 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// The operations under test. `#[no_mangle]`, so each survives LTO as an exported root and
-/// appears in the IR under a name we can find.
+/// The operations under test, in two crates.
 ///
-/// The Rust ABI, deliberately: an `extern "C"` function cannot unwind, so rustc wraps its
-/// body in an abort-on-unwind shim and leaves the real work out of line — which would hide
-/// the very code these tests exist to look at.
-const PROBES: &str = r#"
+/// Two, because a function LLVM sees called from *one* place is inlined unconditionally,
+/// and from two it has to weigh the cost — so probes sharing a callee change each other's
+/// codegen. Putting `n.to_i64()` in the same crate twice made it stop inlining into either,
+/// which does not say anything about the library and quietly made the structural test below
+/// vacuous: a probe that merely calls out has nothing in it to object to.
+///
+/// `#[no_mangle]`, so each survives LTO as an exported root and appears in the IR under a
+/// name we can find. The Rust ABI, deliberately: an `extern "C"` function cannot unwind, so
+/// rustc wraps its body in an abort-on-unwind shim and leaves the real work out of line —
+/// which would hide the very code these tests exist to look at.
+mod probes {
+    /// Constructing a value, and reading one whose representation is *not* known: the whole
+    /// dispatch is generated, so this is where a cost hiding in any arm shows up.
+    pub const ANY: &str = r#"
 use ijson::{INumber, IString, IValue, ValueType};
 
 // Constructing, from an input known at compile time.
@@ -65,7 +82,7 @@ use ijson::{INumber, IString, IValue, ValueType};
 #[no_mangle] pub fn probe_negative_int() -> INumber { INumber::from(-1i64) }
 #[no_mangle] pub fn probe_half() -> IValue { IValue::from(0.5f64) }
 
-// Reading, from a value whose representation is not.
+// Reading, from a value whose representation is not known at compile time.
 #[no_mangle] pub fn probe_to_i64(n: &INumber) -> Option<i64> { n.to_i64() }
 #[no_mangle] pub fn probe_to_u64(n: &INumber) -> Option<u64> { n.to_u64() }
 #[no_mangle] pub fn probe_to_f64(n: &INumber) -> Option<f64> { n.to_f64() }
@@ -74,6 +91,42 @@ use ijson::{INumber, IString, IValue, ValueType};
 #[no_mangle] pub fn probe_is_number(v: &IValue) -> bool { v.is_number() }
 #[no_mangle] pub fn probe_type(v: &IValue) -> ValueType { v.type_() }
 "#;
+
+    /// Reading one whose representation *is* known — the fast path, and nothing else.
+    pub const FAST: &str = r#"
+use ijson::codegen_probes::{assume_inline, assume_inline_integer};
+use ijson::{INumber, IValue, ValueType};
+
+#[no_mangle] pub fn probe_fast_is_number(n: &INumber) -> bool {
+    unsafe { assume_inline(n) };
+    AsRef::<IValue>::as_ref(n).is_number()
+}
+#[no_mangle] pub fn probe_fast_type(n: &INumber) -> ValueType {
+    unsafe { assume_inline(n) };
+    AsRef::<IValue>::as_ref(n).type_()
+}
+#[no_mangle] pub fn probe_fast_has_decimal_point(n: &INumber) -> bool {
+    unsafe { assume_inline(n) };
+    n.has_decimal_point()
+}
+#[no_mangle] pub fn probe_int_has_decimal_point(n: &INumber) -> bool {
+    unsafe { assume_inline_integer(n) };
+    n.has_decimal_point()
+}
+#[no_mangle] pub fn probe_int_to_i64(n: &INumber) -> Option<i64> {
+    unsafe { assume_inline_integer(n) };
+    n.to_i64()
+}
+#[no_mangle] pub fn probe_int_to_u64(n: &INumber) -> Option<u64> {
+    unsafe { assume_inline_integer(n) };
+    n.to_u64()
+}
+#[no_mangle] pub fn probe_int_to_f64_lossy(n: &INumber) -> f64 {
+    unsafe { assume_inline_integer(n) };
+    n.to_f64_lossy()
+}
+"#;
+}
 
 // --- Constructing -----------------------------------------------------------
 
@@ -151,7 +204,7 @@ fn constants() -> Vec<(&'static str, i64, &'static str)> {
     ignore = "the pinned constants are the 64-bit little-endian encoding"
 )]
 fn constructing_a_small_value_folds_to_a_constant() {
-    let ir = probe_ir();
+    let ir = any_ir();
 
     let mut failures = Vec::new();
     for (name, word, meaning) in constants() {
@@ -260,7 +313,7 @@ fn cost_of(symbol: &str) -> &'static str {
 #[test]
 #[cfg_attr(miri, ignore = "shells out to a compiler, which Miri cannot run")]
 fn reading_a_value_stays_on_the_fast_path() {
-    let ir = probe_ir();
+    let ir = any_ir();
 
     let mut failures = Vec::new();
     for probe in fast_paths() {
@@ -310,18 +363,127 @@ fn reading_a_value_stays_on_the_fast_path() {
     );
 }
 
+// --- The fast path, exactly -------------------------------------------------
+
+/// What each operation compiles to when the value turns out to be stored inline.
+///
+/// The probe has told the compiler *which representation* the value uses and nothing else
+/// — never which value — so the dispatch folds away and what remains is the fast path
+/// alone. The slow paths are free to be anything; this says exactly what the fast one is.
+///
+/// The opcodes, not the whole instructions: registers are numbered by the compiler, and
+/// attributes and metadata come and go, none of which says anything about what the code
+/// *does*. Exact about the part that matters, indifferent to the part that does not.
+fn fast_paths_exactly() -> Vec<(&'static str, &'static [&'static str], &'static str)> {
+    vec![
+        (
+            "probe_fast_is_number",
+            &["ret"],
+            "an inline number is a number: nothing to compute",
+        ),
+        (
+            "probe_fast_type",
+            &["ret"],
+            "and its type is a constant, for the same reason",
+        ),
+        (
+            "probe_fast_has_decimal_point",
+            &["load", "ptrtoint", "and", "icmp", "ret"],
+            "read the word, and compare the exponent code against the one that means \
+             `integer`",
+        ),
+        (
+            "probe_int_has_decimal_point",
+            &["ret"],
+            "an integer has no decimal point: once the exponent code is known, a constant",
+        ),
+        (
+            "probe_int_to_i64",
+            &["load", "ptrtoint", "ashr", "insertvalue", "ret"],
+            "read the word, shift the mantissa down (an arithmetic shift, so it arrives \
+             sign-extended), and wrap it in `Some`",
+        ),
+        (
+            "probe_int_to_u64",
+            &[
+                "load",
+                "ptrtoint",
+                "ashr",
+                "icmp",
+                "zext",
+                "insertvalue",
+                "insertvalue",
+                "ret",
+            ],
+            "the same, and a sign test — a negative integer is not a `u64`",
+        ),
+        (
+            "probe_int_to_f64_lossy",
+            &["load", "ptrtoint", "ashr", "sitofp", "ret"],
+            "the same shift, and one conversion instruction",
+        ),
+    ]
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "shells out to a compiler, which Miri cannot run")]
+fn the_fast_path_is_exactly_this() {
+    let ir = fast_ir();
+
+    let mut failures = Vec::new();
+    for (name, expected, meaning) in fast_paths_exactly() {
+        let Some(body) = common::fast_path_of(ir, name) else {
+            failures.push(format!("{}: not found in the emitted IR", name));
+            continue;
+        };
+        let actual = common::opcodes(&body);
+        if actual != expected {
+            failures.push(format!(
+                "{} — {}\n    expected: {}\n    got:      {}\n{}",
+                name,
+                meaning,
+                expected.join(", "),
+                actual.join(", "),
+                body.iter()
+                    .map(|line| format!("      {}\n", line))
+                    .collect::<String>(),
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "the fast path is no longer what it was:\n\n{}\n\
+         These are the operations a document walk spends its time in, on the values it \
+         spends its time on — a small integer, held inline. Each should be the pointer \
+         word, a shift, and nothing else. An instruction that has appeared is work every \
+         one of them now pays, and nothing about the behaviour will have changed to show \
+         it: look for a function that stopped being inlined (the numeric model's decode \
+         is the usual one — it is large, and only `#[inline]` keeps its hot branch \
+         folding into the caller), or for a check that is now being made twice.",
+        failures.join("\n\n")
+    );
+}
+
 // --- Building the probes ----------------------------------------------------
 
-/// The probe crate's IR, built once however many tests ask for it.
-fn probe_ir() -> &'static str {
+/// The IR of the probe crate that reads values of *unknown* representation, built once
+/// however many tests ask for it.
+fn any_ir() -> &'static str {
     static IR: OnceLock<String> = OnceLock::new();
-    IR.get_or_init(emit_probe_ir)
+    IR.get_or_init(|| emit_probe_ir("any", probes::ANY))
+}
+
+/// The IR of the probe crate that reads values of *known* representation.
+fn fast_ir() -> &'static str {
+    static IR: OnceLock<String> = OnceLock::new();
+    IR.get_or_init(|| emit_probe_ir("fast", probes::FAST))
 }
 
 /// Writes a crate of probes with a path dependency on this one, builds it with fat LTO,
 /// and returns the emitted LLVM IR.
-fn emit_probe_ir() -> String {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("codegen-probes");
+fn emit_probe_ir(name: &str, source: &str) -> String {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("codegen-probes-{}", name));
     std::fs::create_dir_all(dir.join("src")).expect("create the probe crate");
 
     // A single-quoted TOML string, so a Windows path's backslashes are not escapes. A
@@ -340,9 +502,12 @@ fn emit_probe_ir() -> String {
         },
     );
     write_if_changed(&dir.join("Cargo.toml"), &manifest);
-    write_if_changed(&dir.join("src/lib.rs"), PROBES);
+    write_if_changed(&dir.join("src/lib.rs"), source);
 
     let status = common::nested_cargo()
+        // Exposes `ijson::codegen_probes`, the hooks that let a probe state which
+        // representation a value uses. Nothing but this build ever sets it.
+        .env("RUSTFLAGS", "--cfg codegen_probes")
         .current_dir(&dir)
         .args([
             "rustc",

@@ -20,6 +20,12 @@ broken-borrow-impl-compat = []
 # so every inline number is exactly an `f64`. Mirrors serde_json's feature.
 arbitrary_precision = ["serde_json/raw_value"]
 
+# `codegen_probes` is set only by the codegen tests' nested build (see
+# tests/codegen_probes.rs); it exposes hooks that let a probe tell the compiler which
+# representation a value uses. It is never set for a normal build.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(codegen_probes)'] }
+
 [dependencies]
 dashmap = { version = "5.5", features = ["raw-api"] }
 lazy_static = "1.5.0"

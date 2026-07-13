@@ -185,6 +185,21 @@ impl DecimalNumberRepr {
     fn code(bits: usize) -> usize {
         (bits >> EXP_SHIFT) & 0xf
     }
+    /// Tells the compiler these bits encode a plain integer — the one exponent code with
+    /// no decimal point — without telling it *which* integer.
+    ///
+    /// Only the codegen probes use this; see `crate::codegen_probes`. It is stated here,
+    /// in terms of this representation's own layout, because the two inline number
+    /// representations share none.
+    ///
+    /// # Safety
+    ///
+    /// `bits` must be a plain inline integer, as [`Self::encode_int`] produces.
+    #[cfg(codegen_probes)]
+    pub(crate) unsafe fn assume_integer(bits: usize) {
+        unsafe { std::hint::assert_unchecked(Self::code(bits) == INT_EXP0_CODE) };
+    }
+
     fn decode(bits: usize) -> (i64, i32) {
         (Self::mantissa(bits), Self::code_exp(Self::code(bits)))
     }
@@ -297,12 +312,17 @@ impl DecimalNumberRepr {
         decimal_to_f64_exact(m, exp)
     }
 
-    /// The (possibly lossy) `f64` value. Every inline decimal a constructor can produce
-    /// is exactly an `f64`, so decode it exactly; only a non-`f64` inline decimal falls
-    /// back to the correctly-rounded conversion.
+    /// The (possibly lossy) `f64` value.
+    ///
+    /// Straight to the correctly-rounded conversion — *not* the exact one with that as a
+    /// fallback. Correctly rounded already means the nearest `f64`, which for a value that
+    /// is exactly one *is* that value, so trying `to_f64_exact` first can only reach the
+    /// same answer by a longer road: it is the more expensive of the two (it analyses the
+    /// significant bits of an `i128` to decide exactness), and it runs on every call,
+    /// including the plain integers that are almost all of them.
     fn to_f64_lossy(bits: usize) -> f64 {
         let (m, exp) = Self::decode(bits);
-        decimal_to_f64_exact(m, exp).unwrap_or_else(|| decimal_to_f64_lossy(m, exp))
+        decimal_to_f64_lossy(m, exp)
     }
 
     /// Whether the source of this inline number had a decimal point.

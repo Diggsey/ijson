@@ -139,6 +139,13 @@ impl<'a> NumVal<'a> {
     /// `(mantissa, exp)` must lie in the `Decimal` domain once canonical (see
     /// [`fits_decimal`]); the base-10 inline representation guarantees it, and
     /// [`canonicalise`] routes everything else to `Big`.
+    ///
+    /// `#[inline]`, because this is how the base-10 inline representation decodes *every*
+    /// number it holds, and the hot case — a plain integer, at exponent zero — is a single
+    /// branch of it. Left out of line, reading a small integer costs a call and a 24-byte
+    /// `NumVal` returned through memory; inlined, the exponent is a constant at the call
+    /// site and all of this folds to a shift.
+    #[inline]
     pub(crate) fn from_decimal(mantissa: i64, exp: i32) -> NumVal<'static> {
         if let Some(v) = decimal_int_value(mantissa, exp) {
             if let Ok(i) = i64::try_from(v) {
@@ -908,6 +915,13 @@ fn i128_fits_f64(v: i128) -> bool {
 /// The nearest `f64` to `mantissa * 10^exp`, correctly rounded — even for a
 /// mantissa above `2^53` (reachable via a non-`f64` `Decimal`) — and without
 /// allocating.
+///
+/// `#[inline]`, for the same reason as [`NumVal::from_decimal`]: this is how the base-10
+/// inline representation converts every number it holds, and the hot case — a plain
+/// integer, at exponent zero — is the first branch of it. With the exponent a constant at
+/// the call site, the whole thing folds to a single `sitofp`; left out of line it is a
+/// call, for a conversion that should be one instruction.
+#[inline]
 pub(crate) fn decimal_to_f64_lossy(mantissa: i64, exp: i32) -> f64 {
     if exp >= 0 {
         // An exact integer; the `i128 -> f64` cast rounds correctly.

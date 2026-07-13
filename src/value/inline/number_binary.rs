@@ -153,6 +153,21 @@ impl BinaryNumberRepr {
     fn code(bits: usize) -> usize {
         (bits >> EXP_SHIFT) & 0xf
     }
+    /// Tells the compiler these bits encode a plain integer — the one exponent code with
+    /// no decimal point — without telling it *which* integer.
+    ///
+    /// Only the codegen probes use this; see `crate::codegen_probes`. It is stated here,
+    /// in terms of this representation's own layout, because the two inline number
+    /// representations share none.
+    ///
+    /// # Safety
+    ///
+    /// `bits` must be a plain inline integer, as [`Self::encode_int`] produces.
+    #[cfg(codegen_probes)]
+    pub(crate) unsafe fn assume_integer(bits: usize) {
+        unsafe { std::hint::assert_unchecked(Self::code(bits) == INT_EXP0_CODE) };
+    }
+
     fn decode(bits: usize) -> (i64, i32) {
         (Self::mantissa(bits), Self::code_exp(Self::code(bits)))
     }

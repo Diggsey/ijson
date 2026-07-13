@@ -65,6 +65,25 @@ const PAYLOAD_SHIFT: u32 = 5;
 // `encode` helper debug-asserts its result against this.
 const TAG_MASK: usize = super::ALIGNMENT - 1;
 
+/// Whether an inline value is a number — the `IS_NUMBER` bit, which is the one part of the
+/// number layout the inline family itself owns, so it holds for either representation.
+/// Only the codegen probes need to ask from outside this module.
+#[cfg(codegen_probes)]
+pub(crate) fn is_inline_number(v: &IValue) -> bool {
+    v.usize_() & IS_NUMBER != 0
+}
+
+/// Tells the compiler `v` is a plain inline integer, deferring to the active
+/// representation for what that means in bits. Only the codegen probes use it.
+///
+/// # Safety
+///
+/// `v` must be a plain inline integer.
+#[cfg(codegen_probes)]
+pub(crate) unsafe fn assume_inline_integer(v: &IValue) {
+    unsafe { InlineNumberRepr::assume_integer(v.usize_()) };
+}
+
 /// Which of the three inline sub-families a value belongs to — exactly the
 /// distinction the inline bits encode, unlike the six-way [`ValueType`]. (The null
 /// vs. bool split within `Constant` is a further decode, done by [`constant`].)

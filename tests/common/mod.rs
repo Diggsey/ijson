@@ -112,12 +112,112 @@ pub fn body_of<'a>(ir: &'a str, name: &str) -> Option<Vec<&'a str>> {
         if line == "}" {
             return Some(body);
         }
-        if line.is_empty() || line.starts_with(';') || line.ends_with(':') {
+        if line.is_empty() || line.starts_with(';') || is_label(line) || is_continuation(line) {
             continue;
         }
         body.push(line);
     }
     None
+}
+
+/// Whether a line continues the instruction above rather than starting one. A `switch` lays
+/// its cases out one per line inside brackets, and each of those is part of the `switch`,
+/// not an operation of its own.
+fn is_continuation(line: &str) -> bool {
+    line == "]"
+        || (line.contains(", label %") && !line.contains(" br ") && !line.starts_with("br "))
+}
+
+/// Whether a line is a basic block's label rather than an instruction. A label is a name
+/// followed by a colon — and often a `; preds = ...` comment after it, so it does not
+/// simply end in one.
+fn is_label(line: &str) -> bool {
+    match line.split_once(':') {
+        Some((name, rest)) => {
+            !name.is_empty()
+                && !name.contains(char::is_whitespace)
+                && (rest.is_empty() || rest.trim_start().starts_with(';'))
+        }
+        None => false,
+    }
+}
+
+/// The body of `@name` with the probe's own scaffolding removed: what the machine will
+/// actually run.
+///
+/// A probe tells the compiler which representation a value uses with `assert_unchecked`,
+/// which lowers to `llvm.assume`. That is *not* code — it generates no instruction — but it
+/// and everything computed to feed it are still there in the IR, and would swamp a
+/// three-instruction fast path. So drop the assumptions and then dead-code eliminate:
+/// anything left only to feed one falls away with it, and what remains is exactly the code
+/// that runs.
+pub fn fast_path_of<'a>(ir: &'a str, name: &str) -> Option<Vec<&'a str>> {
+    let mut body: Vec<&str> = body_of(ir, name)?
+        .into_iter()
+        .filter(|line| !line.contains("@llvm.assume"))
+        .collect();
+
+    loop {
+        // Every register read by some instruction. An instruction's reads are everything to
+        // the right of its `=`; one that defines nothing reads its whole line.
+        let mut read: Vec<&str> = Vec::new();
+        for line in &body {
+            let rhs = match line.split_once(" = ") {
+                Some((_, rhs)) => rhs,
+                None => line,
+            };
+            read.extend(registers(rhs));
+        }
+        // An instruction whose result nothing reads is dead — it can only have been feeding
+        // an assumption. (One that defines nothing is a `br`, a `ret` or a call: keep it.)
+        let live: Vec<&str> = body
+            .iter()
+            .copied()
+            .filter(|line| match defined_register(line) {
+                Some(reg) => read.contains(&reg),
+                None => true,
+            })
+            .collect();
+
+        if live.len() == body.len() {
+            return Some(live);
+        }
+        body = live;
+    }
+}
+
+/// The register an instruction defines, if any: the `%x` in `%x = ...`.
+fn defined_register(line: &str) -> Option<&str> {
+    let (lhs, _) = line.split_once(" = ")?;
+    lhs.starts_with('%').then_some(lhs)
+}
+
+/// Every `%register` mentioned in a fragment of IR.
+fn registers(fragment: &str) -> impl Iterator<Item = &str> {
+    fragment
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '%'))
+        .filter(|token| token.starts_with('%') && token.len() > 1)
+}
+
+/// The operations a body performs, in order — `load`, `ashr`, `ret` and so on.
+///
+/// The opcode, not the whole instruction: registers are numbered by the compiler and
+/// attributes and metadata come and go, none of which says anything about what the code
+/// *does*. This is exact about the part that matters and indifferent to the part that does
+/// not.
+pub fn opcodes<'a>(body: &[&'a str]) -> Vec<&'a str> {
+    body.iter()
+        .map(|line| {
+            let instruction = line.split_once(" = ").map_or(*line, |(_, rhs)| rhs);
+            let opcode = instruction.split_whitespace().next().unwrap_or("");
+            // `tail call` / `musttail call` are a `call`; the modifier is a hint about the
+            // stack frame, not a different operation.
+            match opcode {
+                "tail" | "musttail" | "notail" => "call",
+                other => other,
+            }
+        })
+        .collect()
 }
 
 /// The names of the functions a body calls, ignoring LLVM's own intrinsics (`llvm.*` is
