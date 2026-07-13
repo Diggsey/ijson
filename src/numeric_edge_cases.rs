@@ -415,6 +415,25 @@ mod tests {
         pool
     }
 
+    /// `deserialize_any` picks a visitor method from `has_decimal_point`, then has to
+    /// actually produce a number of that shape. The accessors it reaches for are the
+    /// *exact* ones, which are partial by design: with `arbitrary_precision` a number
+    /// need be neither an exact `f64` nor an `i64`/`u64` — `0.1` is exactly a decimal,
+    /// and a 30-digit integer fits nothing — so every one of them can return `None`.
+    ///
+    /// Deserializing must still work for any number the library can hold, so this walks
+    /// the whole edge-case pool through `deserialize_any` (which is what an untyped
+    /// target like `serde_json::Value` uses).
+    #[test]
+    fn deserialize_any_is_total_over_every_number() {
+        for s in string_number_cases() {
+            let v = inum(&s);
+            let back: serde_json::Value = crate::from_value(&v)
+                .unwrap_or_else(|e| panic!("deserialize_any on {:?}: {}", s, e));
+            assert!(back.is_number(), "{:?} did not come back a number", s);
+        }
+    }
+
     #[test]
     fn i64_inputs_are_consistent() {
         for &x in &i64_cases() {

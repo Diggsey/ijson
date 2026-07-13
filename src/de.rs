@@ -477,13 +477,21 @@ impl<'de> Deserializer<'de> for &'de INumber {
     where
         V: Visitor<'de>,
     {
-        if self.has_decimal_point() {
-            visitor.visit_f64(self.to_f64().unwrap())
-        } else if let Some(v) = self.to_i64() {
-            visitor.visit_i64(v)
-        } else {
-            visitor.visit_u64(self.to_u64().unwrap())
+        // `to_i64`/`to_u64`/`to_f64` are the *exact* accessors, and so are partial: a
+        // number need be neither an integer in range nor an exact `f64` (`0.1` is
+        // exactly a decimal; an integer beyond `u64` fits nothing). Serde has no
+        // arbitrary-precision visitor method, so anything the visitor cannot take
+        // exactly is delivered as the nearest `f64` — which is total, and is already
+        // what every inexact number gets.
+        if !self.has_decimal_point() {
+            if let Some(v) = self.to_i64() {
+                return visitor.visit_i64(v);
+            }
+            if let Some(v) = self.to_u64() {
+                return visitor.visit_u64(v);
+            }
         }
+        visitor.visit_f64(self.to_f64_lossy())
     }
 
     #[inline]
@@ -685,13 +693,18 @@ impl<'de> MaybeUnexpected<'de> for DestructuredRef<'de> {
 
 impl<'de> MaybeUnexpected<'de> for &'de INumber {
     fn unexpected(self) -> Unexpected<'de> {
-        if self.has_decimal_point() {
-            Unexpected::Float(self.to_f64().unwrap())
-        } else if let Some(v) = self.to_i64() {
-            Unexpected::Signed(v)
-        } else {
-            Unexpected::Unsigned(self.to_u64().unwrap())
+        // Partial accessors, exactly as in `deserialize_any` above — and the same
+        // fallback, so the number serde reports in an error message is the one it would
+        // have been given.
+        if !self.has_decimal_point() {
+            if let Some(v) = self.to_i64() {
+                return Unexpected::Signed(v);
+            }
+            if let Some(v) = self.to_u64() {
+                return Unexpected::Unsigned(v);
+            }
         }
+        Unexpected::Float(self.to_f64_lossy())
     }
 }
 
