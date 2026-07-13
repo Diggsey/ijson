@@ -1,5 +1,9 @@
 //! Shared by the two codegen tests, both of which work by asking the compiler to emit
 //! the IR for a *fresh* build and reading it back.
+//!
+//! Each integration test compiles this module separately, so anything only one of them
+//! uses is dead code in the other.
+#![allow(dead_code)]
 
 use std::process::Command;
 
