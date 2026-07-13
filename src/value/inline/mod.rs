@@ -233,7 +233,12 @@ mod tests {
             IValue::new_f64(0.5).unwrap(),
             IValue::new_f64(0.0).unwrap(),
         ];
-        let strings = [IValue::new_string(""), IValue::new_string("inline")];
+        // The empty string and the *longest* one that still fits inline — 7 bytes on
+        // 64-bit, 3 on 32-bit. Taken from the representation's own `CAPACITY` rather
+        // than written out, which would silently become an interned string (and so stop
+        // testing the inline classification at all) on a 32-bit target.
+        let longest_inline = &"abcdefg"[..string::CAPACITY];
+        let strings = [IValue::new_string(""), IValue::new_string(longest_inline)];
         let constants = [IValue::NULL, IValue::TRUE, IValue::FALSE];
 
         for v in &numbers {
