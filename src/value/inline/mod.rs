@@ -105,22 +105,25 @@ pub(crate) trait InlineValue {
     unsafe fn destructure_ref<'a>(&self, v: &'a IValue) -> DestructuredRef<'a>;
     unsafe fn destructure_mut<'a>(&self, v: &'a mut IValue) -> DestructuredMut<'a>;
 
-    // The number/string operations mirror `ValueRepr`'s, with the same `None`/`false`
-    // defaults; only the inline number and string sub-representations override them,
-    // and `InlineRepr` forwards `ValueRepr`'s versions to these. `to_i64`/`to_u64`/
-    // `as_str` are not here — no sub-representation overrides them, so they derive from
-    // `num_val`/`as_bytes` on `ValueRepr` directly.
+    // The overridable number/string operations. `InlineRepr` forwards `ValueRepr`'s
+    // versions to these, and the inline number and string sub-representations override
+    // them. All default to `None`/`false`: the only reps that keep a default are the
+    // ones that are not that type (an inline string/constant is not a number, so its
+    // `num_val`/`to_f64` are `None`), so — unlike `ValueRepr`, where the heap scalars
+    // rely on the `num_val`-derived `to_f64` — there is nothing to derive here.
+    // `to_i64`/`to_u64`/`as_str` are absent: no inline rep overrides them, so they
+    // derive from `num_val`/`as_bytes` on `ValueRepr` directly.
     unsafe fn num_val(&self, _v: &IValue) -> Option<NumVal> {
         None
     }
     fn has_decimal_point(&self, _v: &IValue) -> bool {
         false
     }
-    unsafe fn to_f64(&self, v: &IValue) -> Option<f64> {
-        self.num_val(v).and_then(|n| n.to_f64())
+    unsafe fn to_f64(&self, _v: &IValue) -> Option<f64> {
+        None
     }
-    unsafe fn to_f64_lossy(&self, v: &IValue) -> Option<f64> {
-        self.num_val(v).map(|n| n.to_f64_lossy())
+    unsafe fn to_f64_lossy(&self, _v: &IValue) -> Option<f64> {
+        None
     }
     unsafe fn as_bytes<'a>(&self, _v: &'a IValue) -> Option<&'a [u8]> {
         None
