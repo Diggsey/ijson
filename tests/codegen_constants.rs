@@ -38,8 +38,9 @@
 //! Requires fat LTO, because the constructors are not `#[inline]` and so export no MIR:
 //! without it the probe crate can only *call* them, and there is nothing to fold.
 
+mod common;
+
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// The operations whose codegen is pinned. Each is `extern "C"` and `#[no_mangle]`, so it
 /// survives LTO as an exported root and appears in the IR under a name we can find.
@@ -146,7 +147,7 @@ fn emit_probe_ir() -> String {
     write_if_changed(&dir.join("Cargo.toml"), &manifest);
     write_if_changed(&dir.join("src/lib.rs"), PROBES);
 
-    let status = Command::new(env!("CARGO"))
+    let status = common::nested_cargo()
         .current_dir(&dir)
         .args([
             "rustc",

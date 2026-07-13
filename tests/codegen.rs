@@ -19,8 +19,9 @@
 //! Being a codegen test, this is inherently sensitive to the compiler: it asserts only
 //! the coarse property (no indirect calls), not any particular instruction sequence.
 
+mod common;
+
 use std::path::PathBuf;
-use std::process::Command;
 
 /// The `hash` impls are the only ijson functions allowed to call through a function
 /// pointer: they dispatch on `&mut dyn Hasher`, by design.
@@ -58,7 +59,7 @@ fn emit_llvm_ir() -> String {
     // A target directory of our own, so the nested build does not contend with the
     // `cargo test` invocation that is running us.
     let target_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("codegen-ir");
-    let status = Command::new(env!("CARGO"))
+    let status = common::nested_cargo()
         .args(["rustc", "--lib", "--release", "--target-dir"])
         .arg(&target_dir)
         .args(["--", "--emit=llvm-ir", "-Cdebuginfo=0"])
