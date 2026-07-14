@@ -194,14 +194,18 @@ fn constants() -> Vec<(&'static str, i64, &'static str)> {
     ]
 }
 
+// Ignored under Miri, which cannot shell out to a compiler — and anywhere the words would
+// differ. The layout is the same shape elsewhere, but the mantissa and the inline-string
+// capacity are narrower, so the constants below are the 64-bit little-endian encoding and
+// there is nothing to gain from re-deriving them.
+//
+// One `cfg_attr`, not two: on a 32-bit Miri run both conditions hold, and the second
+// `#[ignore]` would then be an attribute that does nothing — which is a warning, and CI
+// denies those.
 #[test]
-#[cfg_attr(miri, ignore = "shells out to a compiler, which Miri cannot run")]
-// The constants are the 64-bit little-endian encoding. The layout is the same shape
-// elsewhere, but the mantissa and the inline-string capacity are narrower, so the words
-// differ and there is nothing to gain from re-deriving them here.
 #[cfg_attr(
-    not(all(target_pointer_width = "64", target_endian = "little")),
-    ignore = "the pinned constants are the 64-bit little-endian encoding"
+    any(miri, not(all(target_pointer_width = "64", target_endian = "little"))),
+    ignore = "needs a compiler to shell out to, and a 64-bit little-endian target to               expect these words of"
 )]
 fn constructing_a_small_value_folds_to_a_constant() {
     let ir = any_ir();
