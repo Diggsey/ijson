@@ -301,8 +301,14 @@ impl IValue {
     // the tag when ORed in) and, together with the tag, must not be all-zero
     // (reserved as the niche).
     const unsafe fn new_usize(tag: ReprTag, payload: usize) -> Self {
+        // `without_provenance_mut`, not an `as` cast. This word is not a pointer — it is an
+        // inline value's bits, or a collection's empty form — and it is never dereferenced,
+        // so it points at nothing and may alias nothing. Casting an integer to a pointer
+        // would claim the opposite: it asks for whatever provenance happens to be lying
+        // around, which is exactly the ambiguity that stops Miri from being able to tell a
+        // real pointer bug from this.
         Self {
-            ptr: NonNull::new_unchecked((tag as usize | payload) as *mut u8),
+            ptr: NonNull::new_unchecked(std::ptr::without_provenance_mut(tag as usize | payload)),
         }
     }
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
@@ -325,7 +331,11 @@ impl IValue {
     // — reads back as `0` here, so `usize_() == 0` tests for it; the non-zero tag
     // alone keeps the actual word non-null.
     fn usize_(&self) -> usize {
-        self.ptr.as_ptr() as usize & !(ALIGNMENT - 1)
+        // `addr`, not an `as` cast: this reads the word's *bits*, and asks for nothing else.
+        // An `as` cast additionally *exposes* the provenance — announcing that some later
+        // integer-to-pointer cast may pick it back up — which is not wanted here and is not
+        // true of an inline value, which has none to expose.
+        self.ptr.as_ptr().addr() & !(ALIGNMENT - 1)
     }
     // The heap allocation this value points at, with the tag stripped.
     //
@@ -350,7 +360,12 @@ impl IValue {
     // tag) must be non-zero (the all-zero word is the reserved niche), and any
     // storage the value previously owned must already have been released.
     unsafe fn set_usize(&mut self, word: usize) {
-        self.ptr = NonNull::new_unchecked((word | self.repr_tag() as usize) as *mut u8);
+        // The result is a bare word with no provenance (see `new_usize`) — which is right,
+        // because the only thing this is used for is the empty form of a collection, whose
+        // allocation has just been released. The value must not be dereferenced afterwards,
+        // and `usize_() == 0` is how every accessor knows not to.
+        let word = word | self.repr_tag() as usize;
+        self.ptr = NonNull::new_unchecked(std::ptr::without_provenance_mut(word));
     }
     unsafe fn raw_copy(&self) -> Self {
         Self { ptr: self.ptr }
@@ -367,8 +382,10 @@ impl IValue {
     /// [`type_`](Self::type_)/[`ValueType`] so they stay decoupled from how a value
     /// happens to be stored.
     pub(crate) fn repr_tag(&self) -> ReprTag {
-        // The raw word — not `usize_()`, which has masked the tag off.
-        (self.ptr.as_ptr() as usize).into()
+        // The raw word — not `usize_()`, which has masked the tag off. `addr` rather than an
+        // `as` cast, for the reason given there: the tag is bits, and reading it exposes
+        // nothing.
+        self.ptr.as_ptr().addr().into()
     }
 
     /// Whether this value is stored inline (tag `Inline`) rather than behind a
