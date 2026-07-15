@@ -80,13 +80,15 @@ pub(crate) trait InlineNumber {
 /// nothing but the shape.
 #[cfg_attr(not(feature = "arbitrary_precision"), allow(dead_code))]
 pub(crate) struct JsonNumber<'a> {
+    // The sign is the one part a caller reads directly; the rest is consumed here, through
+    // `significand`/`shape`, so it stays private.
     pub(crate) negative: bool,
-    pub(crate) int_digits: &'a [u8],
-    pub(crate) frac_digits: &'a [u8],
+    int_digits: &'a [u8],
+    frac_digits: &'a [u8],
     /// The exponent as written (zero if the literal had none), saturated — a literal
     /// long enough to overflow this would have to be gigabytes of exponent digits.
-    pub(crate) written_exp: i64,
-    pub(crate) shape: NumberShape,
+    written_exp: i64,
+    shape: NumberShape,
 }
 
 #[cfg_attr(not(feature = "arbitrary_precision"), allow(dead_code))]

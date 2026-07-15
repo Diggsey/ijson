@@ -100,7 +100,7 @@ impl Serialize for IObject {
     }
 }
 
-pub struct ValueSerializer;
+pub(crate) struct ValueSerializer;
 
 impl Serializer for ValueSerializer {
     type Ok = IValue;
@@ -304,21 +304,21 @@ impl Serializer for ValueSerializer {
     }
 }
 
-pub struct SerializeArray {
+pub(crate) struct SerializeArray {
     array: IArray,
 }
 
-pub struct SerializeArrayVariant {
+pub(crate) struct SerializeArrayVariant {
     name: IString,
     array: IArray,
 }
 
-pub struct SerializeObject {
+pub(crate) struct SerializeObject {
     object: IObject,
     next_key: Option<IString>,
 }
 
-pub struct SerializeObjectVariant {
+pub(crate) struct SerializeObjectVariant {
     name: IString,
     object: IObject,
 }

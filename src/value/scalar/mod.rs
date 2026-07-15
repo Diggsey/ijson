@@ -44,7 +44,11 @@ fn alloc<T>(value: T) -> NonNull<u8> {
 /// Reads the payload as a `T`. Safety: `ptr` must be a live scalar whose 8 bytes
 /// are a valid `T` (each representation reads back the type it stored; the raw bits
 /// may also be read as `u64`).
-pub(crate) unsafe fn read<T>(ptr: NonNull<u8>) -> T {
+///
+/// `pub(super)`, not `pub(crate)`: the scalar reps that use it are child modules (which see
+/// it regardless), and the only other caller is `IValue::number_repr_key`, a test in the
+/// parent `value` module. Its siblings `alloc`/`free`/`layout` are fully private.
+pub(super) unsafe fn read<T>(ptr: NonNull<u8>) -> T {
     ptr.cast::<T>().as_ptr().read()
 }
 

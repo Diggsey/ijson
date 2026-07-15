@@ -12,7 +12,7 @@ use std::{
 /// `layout` is undefined behaviour, not an allocation failure. The returned block is
 /// uninitialised — the caller must write it before reading.
 #[inline]
-pub unsafe fn alloc_infallible(layout: Layout) -> NonNull<u8> {
+pub(crate) unsafe fn alloc_infallible(layout: Layout) -> NonNull<u8> {
     let ptr = alloc(layout);
     if ptr.is_null() {
         handle_alloc_error(layout);
@@ -31,7 +31,7 @@ pub unsafe fn alloc_infallible(layout: Layout) -> NonNull<u8> {
 /// is constant). The returned block holds the old contents up to the smaller of the two
 /// sizes; any growth is uninitialised.
 #[inline]
-pub unsafe fn realloc_infallible(
+pub(crate) unsafe fn realloc_infallible(
     ptr: NonNull<u8>,
     old_layout: Layout,
     new_layout: Layout,
@@ -54,6 +54,6 @@ pub unsafe fn realloc_infallible(
 /// representation recomputes it from the stored capacity, so it matches). After this the
 /// caller must not use `ptr`.
 #[inline]
-pub unsafe fn dealloc_infallible(ptr: NonNull<u8>, layout: Layout) {
+pub(crate) unsafe fn dealloc_infallible(ptr: NonNull<u8>, layout: Layout) {
     std::alloc::dealloc(ptr.as_ptr(), layout);
 }
