@@ -147,6 +147,17 @@ impl<'a> NumVal<'a> {
     /// site and all of this folds to a shift.
     #[inline]
     pub(crate) fn from_decimal(mantissa: i64, exp: i32) -> NumVal<'static> {
+        // Checked *first*, because the arithmetic below is not total outside the domain: an
+        // exponent past `DECIMAL_MIN_EXP` would index a divisor table (`pow10_u128`) out of
+        // bounds, and an over-large magnitude would overflow an `i128` product. The check
+        // holds on the raw input iff it holds on the canonical form (see `fits_decimal`), so
+        // this guards everything that follows.
+        debug_assert!(
+            fits_decimal(mantissa, i64::from(exp)),
+            "{}e{} is outside the `Decimal` domain, so its exact arithmetic may overflow",
+            mantissa,
+            exp
+        );
         if let Some(v) = decimal_int_value(mantissa, exp) {
             if let Ok(i) = i64::try_from(v) {
                 return NumVal(Repr::Int(i));
@@ -160,12 +171,6 @@ impl<'a> NumVal<'a> {
             return NumVal(Repr::Float(f));
         }
         let (mantissa, exp) = canonical_decimal(mantissa, exp);
-        debug_assert!(
-            fits_decimal(mantissa, i64::from(exp)),
-            "{}e{} is outside the `Decimal` domain, so its exact arithmetic may overflow",
-            mantissa,
-            exp
-        );
         NumVal(Repr::Decimal { mantissa, exp })
     }
 
@@ -775,31 +780,35 @@ fn pow10_u128(n: u32) -> NonZeroU128 {
     TABLE[n as usize]
 }
 
-/// The least exponent a `Decimal` may have. The base-10 inline representation's is
-/// `-7`, and canonicalisation (which only divides out factors of ten) can never lower
-/// it, so this covers everything that representation produces.
-const DECIMAL_MIN_EXP: i64 = -7;
-
-/// The greatest *decimal magnitude* — `digits(mantissa) + exp`, the position of the
-/// leading digit — a `Decimal` may have. Canonicalisation preserves this sum (dropping
-/// a trailing zero costs a digit and gains an exponent), and the inline representation
-/// bounds it at `17 + 7 == 24` (a 56-bit signed mantissa at exponent 7), so 26 covers
-/// it with headroom.
-const DECIMAL_MAX_MAGNITUDE: i64 = 26;
-
-/// Whether a *canonical* `mantissa * 10^exp` belongs to the `Decimal` variant.
+/// The least exponent the `Decimal` variant admits. Its fixed-width arithmetic and the
+/// divisor tables above (`pow10_u128`, `DIVISORS == 8`) are sized for exactly this: an
+/// exponent of `-7` needs `10^7`, the eighth table entry, and no less.
 ///
-/// The single boundary between `Decimal` and `Big`: [`NumVal::from_decimal`] asserts
-/// its canonical output satisfies this, and [`canonicalise`] sends anything that does
-/// not to `Big`. Because both consult one predicate they cannot drift apart, so no
-/// number can reach both variants — which is what makes the variants disjoint, and
-/// hashing them structurally sound.
+/// This is the value model's own bound, not the inline representation's. Any producer of
+/// a `Decimal` — today only the base-10 inline representation — must encode nothing outside
+/// it, and that representation carries a `const` assertion proving it does not (see
+/// `number_decimal`), so widening the encoding fails to compile rather than indexing past a
+/// table or overflowing an `i128`.
+pub(crate) const DECIMAL_MIN_EXP: i64 = -7;
+
+/// The greatest *decimal magnitude* — `digits(mantissa) + exp`, the position of the leading
+/// digit — the `Decimal` variant admits. It bounds every `i128` product in this section:
+/// the largest is the rescaling in [`cmp_decimal_decimal`], at `10^(26 + 7) == 10^33`,
+/// comfortably inside `i128::MAX` (about `1.7 * 10^38`). See [`DECIMAL_MIN_EXP`] for who
+/// must stay within it.
+pub(crate) const DECIMAL_MAX_MAGNITUDE: i64 = 26;
+
+/// Whether a `mantissa * 10^exp` belongs to the `Decimal` variant.
 ///
-/// It also bounds every `i128` product in this section. With a magnitude of at most
-/// `10^26` and an exponent of at least `-7`, the largest is the rescaling in
-/// [`cmp_decimal_decimal`], at `10^(26 + 7) == 10^33` — comfortably inside `i128::MAX`
-/// (about `1.7 * 10^38`).
-fn fits_decimal(mantissa: i64, exp: i64) -> bool {
+/// The single boundary between `Decimal` and `Big`: [`NumVal::from_decimal`] asserts its
+/// input satisfies this, and [`canonicalise`] sends anything that does not to `Big`. Because
+/// both consult one predicate they cannot drift apart, so no number can reach both variants
+/// — which is what makes the variants disjoint, and hashing them structurally sound.
+///
+/// Canonicalisation preserves the magnitude sum (dropping a trailing zero costs a digit and
+/// gains an exponent) and only raises the exponent, so a value satisfies this in canonical
+/// form iff it does as written — which is why `from_decimal` may check its raw input.
+pub(crate) fn fits_decimal(mantissa: i64, exp: i64) -> bool {
     exp >= DECIMAL_MIN_EXP
         && i64::from(decimal_digits(mantissa.unsigned_abs())) + exp <= DECIMAL_MAX_MAGNITUDE
 }

@@ -294,12 +294,16 @@ impl IObject {
         IObject(ObjectRepr::with_capacity(cap))
     }
 
-    fn header(&self) -> ThinRef<'_, Header> {
-        // Safety: `self.0` is always an object.
-        unsafe { ObjectRepr::header(&self.0) }
+    // Safety: the object must be *allocated* — not the empty, unallocated form, whose
+    // pointer bits are zero (`is_empty()` is true then). Reading a header off that
+    // dereferences null. `unsafe`, like its `header_mut` sibling, so a caller cannot reach
+    // for it on a possibly-empty object without acknowledging the guard.
+    unsafe fn header(&self) -> ThinRef<'_, Header> {
+        ObjectRepr::header(&self.0)
     }
 
-    // Safety: must not be static
+    // Safety: the object must be allocated (see `header`). A mutator's usual path is to
+    // `reserve`/grow first, which allocates.
     unsafe fn header_mut(&mut self) -> ThinMut<'_, Header> {
         ObjectRepr::header_mut(&mut self.0)
     }
@@ -595,7 +599,8 @@ impl ObjectIndex for &IString {
         if v.is_empty() {
             return None;
         }
-        let hd = v.header().split();
+        // Safety: just checked non-empty, so the object is allocated.
+        let hd = unsafe { v.header() }.split();
         if let Ok(bucket) = hd.find_bucket(self) {
             // Safety: Bucket index is valid
             unsafe {

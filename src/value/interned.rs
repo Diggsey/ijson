@@ -182,6 +182,18 @@ impl InternedRepr {
     /// (with the reference count already bumped). This is how `IValue::new_string`
     /// stores a string that is too long to fit inline.
     pub(crate) fn intern(s: &str) -> NonNull<u8> {
+        // A string this short belongs *inline*, not here. The whole reason `IString`
+        // equality and hashing can be a bare pointer comparison (see `IString::eq`/`hash`,
+        // and `ObjectRepr`'s hash table, which keys on the raw word) is that a given string
+        // has exactly one representation: short ones inline, long ones interned. Intern a
+        // short string as well and there are now two `IString`s spelling it that compare
+        // unequal — objects would miss keys and could hold one twice. `IValue::new_string`
+        // is the boundary that decides inline-vs-interned; nothing should reach past it to
+        // intern a string that fits inline.
+        debug_assert!(
+            s.len() > crate::value::inline::string::CAPACITY,
+            "a string that fits inline must not be interned: it would exist in two forms",
+        );
         let cache = &*STRING_CACHE;
         let shard_index = cache.determine_map(s);
 

@@ -83,8 +83,13 @@ pub(crate) struct ArrayRepr;
 
 impl ArrayRepr {
     fn layout(cap: usize) -> Result<Layout, LayoutError> {
+        // Sized for the elements this actually stores — `IValue`, not `usize`. They are the
+        // same size (an `IValue` is `repr(transparent)` over a `NonNull`, pinned by the
+        // assert at its definition), but writing the element type here means the allocation
+        // cannot silently mis-size if that ever stops holding: it is `IValue`s that
+        // `push`/`items_slice_mut` read and write into this block.
         Ok(Layout::new::<Header>()
-            .extend(Layout::array::<usize>(cap)?)?
+            .extend(Layout::array::<IValue>(cap)?)?
             .0
             .pad_to_align())
     }

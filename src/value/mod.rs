@@ -52,6 +52,9 @@ pub(crate) mod scalar;
 #[cfg(feature = "arbitrary_precision")]
 pub(crate) use numeric::canonicalise;
 pub(crate) use numeric::{decimal_to_f64_exact, decimal_to_f64_lossy, NumVal};
+// The `Decimal` variant's domain, exported so the inline representation that produces such
+// values can prove — at compile time — that it stays inside it.
+pub(crate) use numeric::{DECIMAL_MAX_MAGNITUDE, DECIMAL_MIN_EXP};
 
 // The active inline number representation's static construction interface
 // (`encode_int`/`encode_f64`/`from_str`, plus the `from_i64`/`from_u64`/`from_f64`
@@ -108,6 +111,18 @@ use crate::string::IString;
 pub struct IValue {
     ptr: NonNull<u8>,
 }
+
+// The whole representation rests on an `IValue` being exactly one pointer-sized word: the
+// low bits carry the `ReprTag` (so a heap allocation must be `ALIGNMENT`-aligned), an
+// inline value stores its data in the rest of the word, and the array/string layouts size
+// their storage as words. `repr(transparent)` over a `NonNull` gives that today; pin it, so
+// adding a field turns a heap buffer overflow (an array allocation sized for one type,
+// written as another) and a corrupt inline decode into a compile error instead.
+const _: () = assert!(
+    mem::size_of::<IValue>() == mem::size_of::<usize>()
+        && mem::align_of::<IValue>() == mem::align_of::<usize>(),
+    "IValue must be exactly one pointer-sized, pointer-aligned word",
+);
 
 /// Enum returned by [`IValue::destructure`] to allow matching on the type of
 /// an owned [`IValue`].
@@ -337,6 +352,14 @@ impl IValue {
         // true of an inline value, which has none to expose.
         self.ptr.as_ptr().addr() & !(ALIGNMENT - 1)
     }
+    // The whole value word, tag included — the bits as stored. For an inline value this is
+    // its complete encoding; for a heap value it is the tagged pointer. Comparing against an
+    // inline constant here (rather than the tag-masked `usize_()`) needs no assumption that
+    // no allocation lives at that address: a heap value's tag is non-zero, so its raw word
+    // has a low bit set, and an inline constant never does — the two simply cannot collide.
+    fn raw_word(&self) -> usize {
+        self.ptr.as_ptr().addr()
+    }
     // The heap allocation this value points at, with the tag stripped.
     //
     // Safety: must be a heap value with a live allocation — not an inline value, and
@@ -382,10 +405,8 @@ impl IValue {
     /// [`type_`](Self::type_)/[`ValueType`] so they stay decoupled from how a value
     /// happens to be stored.
     pub(crate) fn repr_tag(&self) -> ReprTag {
-        // The raw word — not `usize_()`, which has masked the tag off. `addr` rather than an
-        // `as` cast, for the reason given there: the tag is bits, and reading it exposes
-        // nothing.
-        self.ptr.as_ptr().addr().into()
+        // The whole word — not `usize_()`, which has masked the tag off.
+        self.raw_word().into()
     }
 
     /// Whether this value is stored inline (tag `Inline`) rather than behind a
@@ -490,13 +511,13 @@ impl IValue {
     /// Returns `true` if this is the `true` value.
     #[must_use]
     pub fn is_true(&self) -> bool {
-        self.usize_() == inline::TRUE
+        self.raw_word() == inline::TRUE
     }
 
     /// Returns `true` if this is the `false` value.
     #[must_use]
     pub fn is_false(&self) -> bool {
-        self.usize_() == inline::FALSE
+        self.raw_word() == inline::FALSE
     }
 
     /// Converts this value to a `bool`.

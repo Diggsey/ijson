@@ -74,6 +74,36 @@ const EXP_BIAS: i32 = 7;
 /// remaining 4-bit code. It is the *only* code without a decimal point.
 const INT_EXP0_CODE: usize = 15;
 
+// This representation feeds every value it holds to `NumVal::from_decimal`, whose
+// fixed-width arithmetic is only defined over the `Decimal` *domain* the value model owns
+// (`DECIMAL_MIN_EXP`/`DECIMAL_MAX_MAGNITUDE`). The domain is declared there because it is a
+// property of that arithmetic's overflow and table sizes, not of this encoding — so pin
+// here that everything this encoding can *produce* fits inside it. Widen the mantissa or the
+// exponent range and this stops compiling, rather than the arithmetic silently indexing a
+// divisor table out of bounds or overflowing an `i128`.
+const _: () = {
+    // The extremes this encoding can reach: exponent codes `0..=14` span `exp` from
+    // `-EXP_BIAS` to `+EXP_BIAS`, and the mantissa is `MANTISSA_BITS` bits *signed*, so its
+    // largest magnitude is `2^(MANTISSA_BITS - 1)`.
+    let min_exp = -(EXP_BIAS as i64);
+    let max_exp = EXP_BIAS as i64;
+    let max_mantissa_digits = decimal_digits_of_pow2(MANTISSA_BITS - 1);
+    assert!(min_exp >= super::super::DECIMAL_MIN_EXP);
+    assert!(max_mantissa_digits + max_exp <= super::super::DECIMAL_MAX_MAGNITUDE);
+};
+
+/// The number of decimal digits in `2^exp2`. A `const` helper for the assertion above; the
+/// value model's magnitude bound is stated in digits, and the mantissa's is stated in bits.
+const fn decimal_digits_of_pow2(exp2: u32) -> i64 {
+    let mut value: u128 = 1 << exp2;
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
 // --- Pure f64 / integer math (no knowledge of the inline bit layout) --------
 
 /// Decomposes a finite, non-zero `f64` into `(mantissa, exp2, negative)` such that
