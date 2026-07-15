@@ -169,6 +169,12 @@ impl Deref for BoolMut<'_> {
 
 pub(crate) const ALIGNMENT: usize = 4;
 
+/// Bit 2 of a `StringOrNull`-tagged value flags an inline string (as opposed to
+/// a pointer to an interned heap string). Heap string headers are 8-aligned, so
+/// this bit is always clear for a heap string pointer, making it a reliable
+/// discriminator. See the `string` module for the full inline layout.
+pub(crate) const INLINE_STRING_FLAG: usize = 0b100;
+
 #[repr(usize)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TypeTag {
@@ -209,10 +215,14 @@ unsafe impl Send for IValue {}
 unsafe impl Sync for IValue {}
 
 impl IValue {
-    // Safety: Tag must not be `Number`
-    const unsafe fn new_inline(tag: TypeTag) -> Self {
+    // Safety: Tag must not be `Number`, and `payload` must leave the tag bits
+    // (the low `ALIGNMENT.trailing_zeros()` bits) clear so it does not corrupt
+    // the tag when ORed in. Used both for the inline singletons (payload `0`)
+    // and for inline strings (payload carries the inline flag, length, and
+    // characters — see the `string` module).
+    pub(crate) const unsafe fn new_inline(tag: TypeTag, payload: usize) -> Self {
         Self {
-            ptr: NonNull::new_unchecked(tag as usize as *mut u8),
+            ptr: NonNull::new_unchecked((tag as usize | payload) as *mut u8),
         }
     }
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
@@ -227,11 +237,11 @@ impl IValue {
     }
 
     /// JSON `null`.
-    pub const NULL: Self = unsafe { Self::new_inline(TypeTag::StringOrNull) };
+    pub const NULL: Self = unsafe { Self::new_inline(TypeTag::StringOrNull, 0) };
     /// JSON `false`.
-    pub const FALSE: Self = unsafe { Self::new_inline(TypeTag::ArrayOrFalse) };
+    pub const FALSE: Self = unsafe { Self::new_inline(TypeTag::ArrayOrFalse, 0) };
     /// JSON `true`.
-    pub const TRUE: Self = unsafe { Self::new_inline(TypeTag::ObjectOrTrue) };
+    pub const TRUE: Self = unsafe { Self::new_inline(TypeTag::ObjectOrTrue, 0) };
 
     pub(crate) fn ptr_usize(&self) -> usize {
         self.ptr.as_ptr() as usize
@@ -263,6 +273,17 @@ impl IValue {
     }
     fn type_tag(&self) -> TypeTag {
         self.ptr_usize().into()
+    }
+
+    /// Returns `true` if this value is a string stored inline rather than as a
+    /// pointer to an interned heap allocation.
+    ///
+    /// Short strings are stored directly inside the pointer-sized value (see the
+    /// `string` module). They carry the `StringOrNull` tag with
+    /// [`INLINE_STRING_FLAG`] set; heap string headers are 8-aligned so that bit
+    /// is always clear for them, and `null` never has it set either.
+    pub(crate) fn is_inline_string(&self) -> bool {
+        self.type_tag() == TypeTag::StringOrNull && self.ptr_usize() & INLINE_STRING_FLAG != 0
     }
 
     /// Returns the type of this value.

@@ -5,6 +5,7 @@
 - Add `FromIterator<T: Into<IValue>>` for `IValue` (collects into an array) and `FromIterator<(K: Into<IString>, V: Into<IValue>)>` for `IValue` (collects into an object), mirroring `serde_json::Value`.
 - Add `From<serde_json::Value> for IValue` and `From<IValue> for serde_json::Value` for smoother interoperability with `serde_json`.
 - Add `From<serde_json::Map<String, serde_json::Value>> for IObject` and the reverse, matching the existing `HashMap`/`BTreeMap`/`IndexMap` conversions.
+- Store very short strings (up to 7 bytes on 64-bit, 3 bytes on 32-bit) inline within the value instead of interning them, avoiding an allocation and a global-cache lookup for the common case of short keys and values. Note: `IString::as_str().as_ptr()` is no longer stable across equal short strings, since they are no longer deduplicated to a shared allocation (value equality via `==` is unaffected).
 
 ## 0.1.6
 
