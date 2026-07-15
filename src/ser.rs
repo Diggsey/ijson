@@ -33,13 +33,35 @@ impl Serialize for INumber {
     where
         S: Serializer,
     {
-        if self.has_decimal_point() {
-            serializer.serialize_f64(self.to_f64().unwrap())
-        } else if let Some(v) = self.to_i64() {
-            serializer.serialize_i64(v)
-        } else {
-            serializer.serialize_u64(self.to_u64().unwrap())
+        // An integer literal in range: serde carries it exactly, as an integer.
+        if !self.has_decimal_point() {
+            if let Some(v) = self.to_i64() {
+                return serializer.serialize_i64(v);
+            }
+            if let Some(v) = self.to_u64() {
+                return serializer.serialize_u64(v);
+            }
         }
+
+        // With `arbitrary_precision`, everything else is written from its own exact digits
+        // and reparsed exactly — a `Decimal`, a `Big`, an integer beyond `u64`, *and* an
+        // exact-`f64` float. A float cannot use `serialize_f64` here: that emits the
+        // shortest decimal rounding back to the same `f64`, which an exact reparse reads as
+        // a different number (see `NumVal::exact_json`). serde has no arbitrary-precision
+        // primitive, so this goes through `serde_json`'s raw value, as its own
+        // `arbitrary_precision` does. Only an integer, handled above, returns `None` here.
+        #[cfg(feature = "arbitrary_precision")]
+        if let Some(exact) = self.0.exact_json() {
+            return serde_json::value::RawValue::from_string(exact)
+                .map_err(serde::ser::Error::custom)?
+                .serialize(serializer);
+        }
+
+        // Without `arbitrary_precision` a float *is* an exact `f64`, and serde_json reparses
+        // through `f64`, so its own shortest formatting round-trips. (With the feature, the
+        // block above handled every float; the lossy call is only an unreachable finite
+        // fallback, better than panicking in a serializer.)
+        serializer.serialize_f64(self.to_f64().unwrap_or_else(|| self.to_f64_lossy()))
     }
 }
 
@@ -78,7 +100,7 @@ impl Serialize for IObject {
     }
 }
 
-pub struct ValueSerializer;
+pub(crate) struct ValueSerializer;
 
 impl Serializer for ValueSerializer {
     type Ok = IValue;
@@ -282,21 +304,21 @@ impl Serializer for ValueSerializer {
     }
 }
 
-pub struct SerializeArray {
+pub(crate) struct SerializeArray {
     array: IArray,
 }
 
-pub struct SerializeArrayVariant {
+pub(crate) struct SerializeArrayVariant {
     name: IString,
     array: IArray,
 }
 
-pub struct SerializeObject {
+pub(crate) struct SerializeObject {
     object: IObject,
     next_key: Option<IString>,
 }
 
-pub struct SerializeObjectVariant {
+pub(crate) struct SerializeObjectVariant {
     name: IString,
     object: IObject,
 }
@@ -397,6 +419,26 @@ impl SerializeMap for SerializeObject {
     }
 
     fn end(self) -> Result<IValue, Self::Error> {
+        // The mirror of the Deserialize side: with `arbitrary_precision`, a
+        // `serde_json::Number` serializes itself as a one-field struct keyed by its private
+        // token, whose value is the raw literal. Serializing such a number *into* ijson must
+        // land as a number, not an object with a magic key — otherwise round-tripping a
+        // `serde_json::Value` through ijson would turn every number into an object. Only a
+        // value that actually parses as a number triggers this, so a genuine object that
+        // happened to use this key with a non-number string is left alone. (serde_json's own
+        // arbitrary-precision format carries the same, unavoidable, ambiguity.)
+        #[cfg(feature = "arbitrary_precision")]
+        if self.object.len() == 1 {
+            if let Some(literal) = self
+                .object
+                .get(crate::de::NUMBER_TOKEN)
+                .and_then(|v| v.as_string())
+            {
+                if let Ok(n) = literal.as_str().parse::<crate::INumber>() {
+                    return Ok(n.into());
+                }
+            }
+        }
         Ok(self.object.into())
     }
 }

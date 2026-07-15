@@ -14,6 +14,23 @@ categories = ["data-structures", "encoding"]
 [features]
 tracing = ["mockalloc/tracing"]
 broken-borrow-impl-compat = []
+# Store JSON numbers as exact decimals (`mantissa * 10^exp` inline, and a heap
+# arbitrary-precision decimal for larger values) instead of rounding to `f64`.
+# When disabled, the same inline slot holds a binary float (`mantissa * 2^exp`),
+# so every inline number is exactly an `f64`. Mirrors serde_json's feature.
+# `serde_json/raw_value` lets us serialize an exact decimal from its own digits.
+# `serde_json/arbitrary_precision` is the matching read side: it makes serde_json hand a
+# number over as its raw literal (via a magic single-entry map) instead of eagerly
+# rounding to `f64`, so deserializing routes through the *same* parser as `INumber::from_str`
+# and a value that is exactly representable stays exact. Without it the two disagree — the
+# whole point of the feature would be undone on the way in.
+arbitrary_precision = ["serde_json/raw_value", "serde_json/arbitrary_precision"]
+
+# `codegen_probes` is set only by the codegen tests' nested build (see
+# tests/codegen_probes.rs); it exposes hooks that let a probe tell the compiler which
+# representation a value uses. It is never set for a normal build.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(codegen_probes)'] }
 
 [dependencies]
 dashmap = { version = "5.5", features = ["raw-api"] }
@@ -27,3 +44,10 @@ indexmap = { version = "2.13.0", optional = true }
 mockalloc = "0.1.2"
 ctor = "0.6.3"
 rand = "0.10.0"
+# `derive` only for tests/examples: it unions onto the normal `serde` dependency for
+# dev builds, so the derive machinery drives `to_value`/`from_value` in the round-trip
+# test without pulling `serde_derive` into the published library's build.
+serde = { version = "1.0.228", features = ["derive"] }
+# Drives the bytes paths of the serde bridge (`serialize_bytes` / `deserialize_bytes`),
+# which JSON never reaches.
+serde_bytes = "0.11"

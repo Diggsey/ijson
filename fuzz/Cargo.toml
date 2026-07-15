@@ -1,0 +1,71 @@
+[package]
+name = "ijson-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2018"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Forwards to ijson's feature so the targets can fuzz the base-10 (exact decimal)
+# inline encoding as well as the default base-2 (binary float) one.
+[features]
+arbitrary_precision = ["ijson/arbitrary_precision"]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+# `derive` for the `serde_roundtrip` target, whose payload type is both `Arbitrary`
+# (so the fuzzer builds it) and `Serialize`/`Deserialize` (so it drives the typed
+# `to_value`/`from_value` machinery).
+serde = { version = "1", features = ["derive"] }
+# `float_roundtrip` makes serde_json's float *parser* correctly rounded, so a
+# serialize/parse cycle preserves an `f64` exactly. Without it serde_json's default
+# parser can be off by 1 ULP for large magnitudes (its own `to_string`/`from_str`
+# then fails to round-trip too) — noise that is not ijson's, so the `json` target's
+# round-trip invariant would false-fire on it.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dependencies.ijson]
+path = ".."
+
+# Keep debug assertions on in the fuzzing profile so the invariant `assert!`s and
+# ijson's own internal checks actually fire.
+[profile.release]
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "number_str"
+path = "fuzz_targets/number_str.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "number_value"
+path = "fuzz_targets/number_value.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "number_ord"
+path = "fuzz_targets/number_ord.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json"
+path = "fuzz_targets/json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "serde_roundtrip"
+path = "fuzz_targets/serde_roundtrip.rs"
+test = false
+doc = false
+bench = false

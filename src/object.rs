@@ -1,299 +1,55 @@
-//! Functionality relating to the JSON object type
+//! Functionality relating to the JSON object type.
+//!
+//! [`IObject`] is the public *type* for JSON objects. It is a thin, transparent
+//! wrapper around an [`IValue`] that is known to be an object. The heap layout
+//! and the low-level header machinery live in the `crate::value::object`
+//! representation module; this module builds the public API (entries, iterators,
+//! indexing) on top of that machinery and delegates the value-level operations
+//! (clone, drop, hash, equality, formatting) *down* to it.
+//!
+//! # Safety
+//!
+//! `IObject` maintains the invariant that its wrapped `IValue` (`self.0`) always
+//! has the `Object` tag, which is the precondition the `value::object` header
+//! accessors require.
 
-use std::alloc::{Layout, LayoutError};
-use std::cmp::{self, Ordering};
-use std::collections::hash_map::DefaultHasher;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::{Hash, Hasher};
 use std::iter::FromIterator;
 use std::mem;
 use std::ops::{Index, IndexMut};
-use std::ptr::NonNull;
 
 #[cfg(feature = "indexmap")]
 use indexmap::IndexMap;
 
-use crate::alloc::{alloc_infallible, dealloc_infallible};
-use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
+use crate::string::IString;
+use crate::thin::{ThinMut, ThinMutExt, ThinRef};
+use crate::value::object::{Header, HeaderMut, HeaderRef, KeyValuePair, ObjectRepr};
+use crate::value::IValue;
 
-use super::string::IString;
-use super::value::{IValue, TypeTag};
-
-#[repr(C)]
-#[repr(align(4))]
-struct Header {
-    len: usize,
-    cap: usize,
-}
-
-#[repr(C)]
-#[derive(Debug)]
-struct KeyValuePair {
-    key: IString,
-    value: IValue,
-}
-
-fn hash_capacity(cap: usize) -> usize {
-    cap + cap / 4
-}
-
-fn hash_fn(s: &IString) -> usize {
-    let v: &IValue = s.as_ref();
-    // We know the bottom two bits are always the same
-    let mut p = v.ptr_usize() >> 2;
-    p = p.wrapping_mul(202_529);
-    p = p ^ (p >> 13);
-    p.wrapping_mul(202_529)
-}
-
-fn hash_bucket(s: &IString, hash_cap: usize) -> usize {
-    hash_fn(s) % hash_cap
-}
-
-struct SplitHeader<'a> {
-    cap: usize,
-    items: &'a [KeyValuePair],
-    table: &'a [usize],
-}
-
-impl SplitHeader<'_> {
-    fn find_bucket(&self, key: &IString) -> Result<usize, usize> {
-        let hash_cap = hash_capacity(self.cap);
-        let initial_bucket = hash_bucket(key, hash_cap);
-        unsafe {
-            // Linear search from expected bucket
-            for i in 0..hash_cap {
-                let bucket = (initial_bucket + i) % hash_cap;
-                let index = *self.table.get_unchecked(bucket);
-
-                // If we hit an empty bucket, we know the key is not present
-                if index == usize::MAX {
-                    return Err(bucket);
-                }
-
-                // If the bucket contains our key, we found the bucket
-                let k = &self.items.get_unchecked(index).key;
-                if k == key {
-                    return Ok(bucket);
-                }
-
-                // If the bucket contains a different key, and its probe length is less than
-                // ours, then we know our key is not present or we would have evicted this one.
-                let key_dist = (bucket + hash_cap - hash_bucket(k, hash_cap)) % hash_cap;
-                if key_dist < i {
-                    return Err(bucket);
-                }
-            }
-        }
-        Err(usize::MAX)
-    }
-    // Safety: index must be in bounds
-    unsafe fn find_bucket_from_index(&self, index: usize) -> usize {
-        let hash_cap = hash_capacity(self.cap);
-        let key = &self.items.get_unchecked(index).key;
-        let mut bucket = hash_bucket(key, hash_cap);
-
-        // We don't bother with any early exit conditions, because
-        // we know the item is present.
-        while *self.table.get_unchecked(bucket) != index {
-            bucket = (bucket + 1) % hash_cap;
-        }
-
-        bucket
+// Safety: `header` must have capacity for an extra element.
+unsafe fn build_entry<'a>(header: ThinMut<'a, Header>, key: IString) -> Entry<'a> {
+    match header.split().find_bucket(&key) {
+        Err(bucket) => Entry::Vacant(VacantEntry {
+            header,
+            bucket,
+            key,
+        }),
+        Ok(bucket) => Entry::Occupied(OccupiedEntry { header, bucket }),
     }
 }
 
-struct SplitHeaderMut<'a> {
-    cap: usize,
-    items: &'a mut [KeyValuePair],
-    table: &'a mut [usize],
-}
-
-impl SplitHeaderMut<'_> {
-    fn as_ref<'a>(&'a self) -> SplitHeader<'a> {
-        SplitHeader {
-            cap: self.cap,
-            items: self.items,
-            table: self.table,
-        }
-    }
-    // Safety: Bucket must be valid and empty.
-    //
-    // Shifts elements up to fill the empty space if they are not at their ideal location.
-    unsafe fn unshift(&mut self, initial_bucket: usize) {
-        let hash_cap = hash_capacity(self.cap);
-        let mut prev_bucket = initial_bucket;
-        for i in 1..hash_cap {
-            let bucket = (initial_bucket + i) % hash_cap;
-            let index = *self.table.get_unchecked(bucket);
-
-            // If we hit an empty bucket, we're done
-            if index == usize::MAX {
-                return;
-            }
-
-            // If the probe length is zero, we're done
-            let k = &self.items.get_unchecked(index).key;
-            if hash_bucket(k, hash_cap) == bucket {
-                return;
-            }
-
-            // Shift this element back one
-            self.table.swap(prev_bucket, bucket);
-            prev_bucket = bucket;
-        }
-    }
-    // Safety: item with this index must have just been pushed, and the bucket
-    // index must be correct.
-    //
-    // Inserts an index into the table, shifting existing elements down until
-    // there's an empty slot.
-    unsafe fn shift(&mut self, initial_bucket: usize, mut index: usize) {
-        let hash_cap = hash_capacity(self.cap);
-        for i in 0..hash_cap {
-            // If we hit an empty bucket, we're done
-            if index == usize::MAX {
-                return;
-            }
-
-            let bucket = (initial_bucket + i) % hash_cap;
-            mem::swap(self.table.get_unchecked_mut(bucket), &mut index);
-        }
-    }
-    // Safety: Bucket index must be in range and occupied
-    unsafe fn remove_bucket(&mut self, bucket: usize) {
-        // Remove the entry from the table
-        let index = mem::replace(self.table.get_unchecked_mut(bucket), usize::MAX);
-
-        // Unshift any displaced buckets, so the table is valid again
-        self.unshift(bucket);
-
-        // If the item being removed is not at the end of the array,
-        // we need to do some book-keeping
-        let last_index = self.items.len() - 1;
-        if last_index != index {
-            // Find the bucket containing the last item
-            let bucket_to_update = self.as_ref().find_bucket_from_index(last_index);
-
-            // Update it to point to the location where that item will be
-            // after we swap it.
-            *self.table.get_unchecked_mut(bucket_to_update) = index;
-
-            // Swap the element to be removed to the back
-            self.items.swap(index, last_index);
-        }
-    }
-}
-
-trait HeaderRef<'a>: ThinRefExt<'a, Header> {
-    fn items_ptr(&self) -> *const KeyValuePair {
-        // Safety: pointers to the end of structs are allowed
-        unsafe { self.ptr().add(1).cast() }
-    }
-    fn hashes_ptr(&self) -> *const usize {
-        // Safety: pointers to the end of structs are allowed
-        unsafe { self.items_ptr().add(self.cap).cast() }
-    }
-    fn split(&self) -> SplitHeader<'a> {
-        // Safety: Header `len` and `cap` must be accurate
-        unsafe {
-            SplitHeader {
-                cap: self.cap,
-                items: std::slice::from_raw_parts(self.items_ptr(), self.len),
-                table: std::slice::from_raw_parts(self.hashes_ptr(), hash_capacity(self.cap)),
-            }
-        }
-    }
-}
-
-trait HeaderMut<'a>: ThinMutExt<'a, Header> {
-    fn items_ptr_mut(&mut self) -> *mut KeyValuePair {
-        // Safety: pointers to the end of structs are allowed
-        unsafe { self.ptr_mut().add(1).cast() }
-    }
-    fn hashes_ptr_mut(&mut self) -> *mut usize {
-        // Safety: pointers to the end of structs are allowed
-        unsafe { self.items_ptr_mut().add(self.cap).cast() }
-    }
-    fn split_mut(mut self) -> SplitHeaderMut<'a> {
-        // Safety: Header `len` and `cap` must be accurate
-        let len = self.len;
-        let hash_cap = hash_capacity(self.cap);
-        let item_ptr = self.items_ptr_mut();
-        let hash_ptr = self.hashes_ptr_mut();
-        unsafe {
-            SplitHeaderMut {
-                cap: self.cap,
-                items: std::slice::from_raw_parts_mut(item_ptr as *mut _, len),
-                table: std::slice::from_raw_parts_mut(hash_ptr as *mut _, hash_cap),
-            }
-        }
-    }
-
-    // Safety: Must ensure there's capacity for an extra element
-    unsafe fn entry(self, key: IString) -> Entry<'a>;
-    // Safety: Must ensure there's capacity for an extra element
-    unsafe fn entry_or_clone(self, key: &IString) -> Entry<'a>;
-
-    // Safety: Object must not be empty
-    unsafe fn pop(&mut self) -> (IString, IValue) {
-        self.len -= 1;
-        let item = self.items_ptr_mut().add(self.len).read();
-        (item.key, item.value)
-    }
-    unsafe fn push(&mut self, key: IString, value: IValue) -> usize {
-        self.items_ptr_mut()
-            .add(self.len)
-            .write(KeyValuePair { key, value });
-        let res = self.len;
-        self.len += 1;
-        res
-    }
-    fn clear(&mut self) {
-        // Clear the table
-        for item in self.reborrow().split_mut().table {
-            *item = usize::MAX;
-        }
-        // Drop the items
-        while self.len > 0 {
-            // Safety: not empty
-            unsafe {
-                self.pop();
-            }
-        }
-    }
-}
-
-impl<'a, T: ThinRefExt<'a, Header>> HeaderRef<'a> for T {}
-impl<'a> HeaderMut<'a> for ThinMut<'a, Header> {
-    // Safety: Must ensure there's capacity for an extra element
-    unsafe fn entry(self, key: IString) -> Entry<'a> {
-        match self.split().find_bucket(&key) {
-            Err(bucket) => Entry::Vacant(VacantEntry {
-                header: self,
-                bucket,
-                key,
-            }),
-            Ok(bucket) => Entry::Occupied(OccupiedEntry {
-                header: self,
-                bucket,
-            }),
-        }
-    }
-    // Safety: Must ensure there's capacity for an extra element
-    unsafe fn entry_or_clone(self, key: &IString) -> Entry<'a> {
-        match self.split().find_bucket(key) {
-            Err(bucket) => Entry::Vacant(VacantEntry {
-                header: self,
-                bucket,
-                key: key.clone(),
-            }),
-            Ok(bucket) => Entry::Occupied(OccupiedEntry {
-                header: self,
-                bucket,
-            }),
-        }
+// Safety: `header` must have capacity for an extra element.
+unsafe fn build_entry_or_clone<'a>(header: ThinMut<'a, Header>, key: &IString) -> Entry<'a> {
+    match header.split().find_bucket(key) {
+        Err(bucket) => Entry::Vacant(VacantEntry {
+            header,
+            bucket,
+            key: key.clone(),
+        }),
+        Ok(bucket) => Entry::Occupied(OccupiedEntry { header, bucket }),
     }
 }
 
@@ -393,7 +149,7 @@ pub struct VacantEntry<'a> {
 
 impl Debug for VacantEntry<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OccupiedEntry")
+        f.debug_struct("VacantEntry")
             .field("key", self.key())
             .finish()
     }
@@ -517,84 +273,53 @@ impl ExactSizeIterator for IntoIter {
 ///
 /// Removing from an `IObject` will disrupt the insertion order.
 ///
-/// [`IArray`]: super::IArray
+/// [`IArray`]: crate::IArray
 #[repr(transparent)]
 #[derive(Clone)]
 pub struct IObject(pub(crate) IValue);
 
 value_subtype_impls!(IObject, into_object, as_object, as_object_mut);
 
-static EMPTY_HEADER: Header = Header { len: 0, cap: 0 };
-
 impl IObject {
-    fn layout(cap: usize) -> Result<Layout, LayoutError> {
-        Ok(Layout::new::<Header>()
-            .extend(Layout::array::<KeyValuePair>(cap)?)?
-            .0
-            .extend(Layout::array::<usize>(hash_capacity(cap))?)?
-            .0
-            .pad_to_align())
-    }
-
-    fn alloc(cap: usize) -> NonNull<Header> {
-        unsafe {
-            let hd = alloc_infallible(Self::layout(cap).unwrap()).cast::<Header>();
-            hd.write(Header { len: 0, cap });
-            let mut hd_mut = ThinMut::new(hd);
-            let hash_ptr = hd_mut.hashes_ptr_mut();
-            for i in 0..hash_capacity(cap) {
-                hash_ptr.add(i).write(usize::MAX);
-            }
-            hd
-        }
-    }
-
-    fn dealloc(ptr: NonNull<Header>) {
-        unsafe {
-            let layout = Self::layout(ptr.as_ref().cap).unwrap();
-            dealloc_infallible(ptr.cast(), layout);
-        }
-    }
-
     /// Constructs a new empty `IObject`. Does not allocate.
     #[must_use]
     pub fn new() -> Self {
-        unsafe { Self(IValue::new_ref(&EMPTY_HEADER, TypeTag::ObjectOrTrue)) }
+        IObject(ObjectRepr::empty())
     }
 
     /// Constructs a new `IObject` with the specified capacity. At least that many entries
     /// can be added to the object without reallocating.
     #[must_use]
     pub fn with_capacity(cap: usize) -> Self {
-        if cap == 0 {
-            Self::new()
-        } else {
-            Self(unsafe { IValue::new_ptr(Self::alloc(cap).cast(), TypeTag::ObjectOrTrue) })
-        }
+        IObject(ObjectRepr::with_capacity(cap))
     }
 
-    fn header<'a>(&'a self) -> ThinRef<'a, Header> {
-        unsafe { ThinRef::new(self.0.ptr().cast()) }
+    // Safety: the object must be *allocated* — not the empty, unallocated form, whose
+    // pointer bits are zero (`is_empty()` is true then). Reading a header off that
+    // dereferences null. `unsafe`, like its `header_mut` sibling, so a caller cannot reach
+    // for it on a possibly-empty object without acknowledging the guard.
+    unsafe fn header(&self) -> ThinRef<'_, Header> {
+        ObjectRepr::header(&self.0)
     }
 
-    // Safety: must not be static
-    unsafe fn header_mut<'a>(&'a mut self) -> ThinMut<'a, Header> {
-        ThinMut::new(self.0.ptr().cast())
+    // Safety: the object must be allocated (see `header`). A mutator's usual path is to
+    // `reserve`/grow first, which allocates.
+    unsafe fn header_mut(&mut self) -> ThinMut<'_, Header> {
+        ObjectRepr::header_mut(&mut self.0)
     }
 
-    fn is_static(&self) -> bool {
-        self.capacity() == 0
-    }
     /// Returns the capacity of the object. This is the maximum number of entries the object
     /// can hold without reallocating.
     #[must_use]
     pub fn capacity(&self) -> usize {
-        self.header().cap
+        // Safety: `self.0` is always an object.
+        unsafe { ObjectRepr::capacity(&self.0) }
     }
     /// Returns the number of entries currently stored in the object.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.header().len
+        // Safety: `self.0` is always an object.
+        unsafe { ObjectRepr::len(&self.0) }
     }
     /// Returns `true` if the object is empty.
     #[must_use]
@@ -602,44 +327,24 @@ impl IObject {
         self.len() == 0
     }
 
-    fn resize_internal(&mut self, cap: usize) {
-        let old_obj = mem::replace(self, Self::with_capacity(cap));
-        if !self.is_static() {
-            unsafe {
-                let mut hd = self.header_mut();
-                for (k, v) in old_obj {
-                    if let Err(bucket) = hd.split().find_bucket(&k) {
-                        let index = hd.push(k, v);
-                        hd.reborrow().split_mut().shift(bucket, index);
-                    }
-                }
-            }
-        }
-    }
-
     /// Reserves space for at least this many additional entries.
     pub fn reserve(&mut self, additional: usize) {
-        let hd = self.header();
-        let current_capacity = hd.cap;
-        let desired_capacity = hd.len.checked_add(additional).unwrap();
-        if current_capacity >= desired_capacity {
-            return;
-        }
-        self.resize_internal(cmp::max(current_capacity * 2, desired_capacity.max(4)));
+        // Safety: `self.0` is always an object.
+        unsafe { ObjectRepr::reserve(&mut self.0, additional) }
     }
 
     /// Returns a view of an entry within this object.
-    pub fn entry<'a>(&'a mut self, key: impl Into<IString>) -> Entry<'a> {
+    pub fn entry(&mut self, key: impl Into<IString>) -> Entry<'_> {
         self.reserve(1);
         // Safety: cannot be static after reserving space
-        unsafe { self.header_mut().entry(key.into()) }
+        unsafe { build_entry(self.header_mut(), key.into()) }
     }
     /// Returns a view of an entry within this object, whilst avoiding
     /// cloning the key if the entry is already occupied.
-    pub fn entry_or_clone<'a>(&'a mut self, key: &IString) -> Entry<'a> {
+    pub fn entry_or_clone(&mut self, key: &IString) -> Entry<'_> {
         self.reserve(1);
         // Safety: cannot be static after reserving space
-        unsafe { self.header_mut().entry_or_clone(key) }
+        unsafe { build_entry_or_clone(self.header_mut(), key) }
     }
     /// Returns an iterator over references to the keys in this object.
     pub fn keys(&self) -> impl Iterator<Item = &IString> {
@@ -651,8 +356,9 @@ impl IObject {
     }
     /// Returns an iterator over (&key, &value) pairs in this object.
     #[must_use]
-    pub fn iter<'a>(&'a self) -> Iter<'a> {
-        Iter(self.header().split().items.iter())
+    pub fn iter(&self) -> Iter<'_> {
+        // Safety: `self.0` is always an object.
+        Iter(unsafe { ObjectRepr::items(&self.0) }.iter())
     }
     /// Returns an iterator over mutable references to the values in
     /// this object.
@@ -660,7 +366,7 @@ impl IObject {
         self.iter_mut().map(|x| x.1)
     }
     /// Returns an iterator over (&key, &mut value) pairs in this object.
-    pub fn iter_mut<'a>(&'a mut self) -> IterMut<'a> {
+    pub fn iter_mut(&mut self) -> IterMut<'_> {
         IterMut(
             if self.is_empty() {
                 &mut []
@@ -711,7 +417,7 @@ impl IObject {
     }
 
     /// Inserts a new value into this object with the specified key. If a value already
-    /// existed at this key, that value is replaced and returend.
+    /// existed at this key, that value is replaced and returned.
     pub fn insert(&mut self, k: impl Into<IString>, v: impl Into<IValue>) -> Option<IValue> {
         match self.entry(k) {
             Entry::Occupied(mut occ) => Some(occ.insert(v)),
@@ -736,7 +442,8 @@ impl IObject {
     /// Shrinks the memory allocation used by the object such that its
     /// capacity becomes equal to its length.
     pub fn shrink_to_fit(&mut self) {
-        self.resize_internal(self.len());
+        // Safety: `self.0` is always an object.
+        unsafe { ObjectRepr::shrink_to_fit(&mut self.0) }
     }
 
     /// Calls the specified function for each entry in the object. Each entry
@@ -765,24 +472,6 @@ impl IObject {
             }
         }
     }
-
-    pub(crate) fn clone_impl(&self) -> IValue {
-        let mut res = Self::with_capacity(self.len());
-        for (k, v) in self.iter() {
-            res.insert(k.clone(), v.clone());
-        }
-
-        res.0
-    }
-    pub(crate) fn drop_impl(&mut self) {
-        self.clear();
-        if !self.is_static() {
-            unsafe {
-                Self::dealloc(self.0.ptr().cast());
-                self.0.set_ref(&EMPTY_HEADER);
-            }
-        }
-    }
 }
 
 impl IntoIterator for IObject {
@@ -790,9 +479,12 @@ impl IntoIterator for IObject {
     type IntoIter = IntoIter;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        unsafe {
-            let split_header = self.header_mut().split_mut();
-            split_header.items.reverse();
+        if !self.is_empty() {
+            // Safety: not empty, so the object is allocated.
+            unsafe {
+                let split_header = self.header_mut().split_mut();
+                split_header.items.reverse();
+            }
         }
         IntoIter {
             reversed_object: self,
@@ -802,43 +494,26 @@ impl IntoIterator for IObject {
 
 impl PartialEq for IObject {
     fn eq(&self, other: &Self) -> bool {
-        if self.0.raw_eq(&other.0) {
-            return true;
-        }
-        if self.len() != other.len() {
-            return false;
-        }
-        for (k, v) in self.iter() {
-            if other.get(k) != Some(v) {
-                return false;
-            }
-        }
-        true
+        // Delegates through `IValue`'s own `PartialEq`, which dispatches to the
+        // object representation.
+        self.0 == other.0
     }
 }
 
 impl Eq for IObject {}
 impl PartialOrd for IObject {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self == other {
-            Some(Ordering::Equal)
-        } else {
-            None
-        }
+        // Delegate to the object representation, the single owner of the
+        // `a == b => Some(Equal)` invariant (see `ObjectRepr::partial_cmp`).
+        self.0.partial_cmp(&other.0)
     }
 }
 
 impl Hash for IObject {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.len().hash(state);
-
-        let mut total_hash = 0_u64;
-        for item in self.iter() {
-            let mut h = DefaultHasher::new();
-            item.hash(&mut h);
-            total_hash = total_hash.wrapping_add(h.finish());
-        }
-        total_hash.hash(state);
+        // Delegates through `IValue`'s own `Hash`, which dispatches to the object
+        // representation.
+        self.0.hash(state);
     }
 }
 
@@ -924,7 +599,8 @@ impl ObjectIndex for &IString {
         if v.is_empty() {
             return None;
         }
-        let hd = v.header().split();
+        // Safety: just checked non-empty, so the object is allocated.
+        let hd = unsafe { v.header() }.split();
         if let Ok(bucket) = hd.find_bucket(self) {
             // Safety: Bucket index is valid
             unsafe {
@@ -1000,7 +676,9 @@ impl<T: ObjectIndex> ObjectIndex for &T {
 
 impl Debug for IObject {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_map().entries(self.iter()).finish()
+        // Delegates through `IValue`'s own `Debug`, which dispatches to the object
+        // representation.
+        Debug::fmt(&self.0, f)
     }
 }
 
@@ -1131,6 +809,74 @@ mod tests {
     }
 
     #[mockalloc::test]
+    fn equal_objects_order_equal_through_ivalue() {
+        // Regression: `ObjectRepr::eq` compares objects by value, but
+        // `ObjectRepr::partial_cmp` kept the `None` default. That broke the
+        // `a == b => a.partial_cmp(b) == Some(Equal)` coherence law for objects
+        // compared as values — directly, and nested inside an array, where it
+        // would also panic `sort_by(|a, b| a.partial_cmp(b).unwrap())`.
+        let make = || {
+            let mut o = IObject::new();
+            o.insert("k", IValue::TRUE);
+            IValue::from(o)
+        };
+
+        // Two value-equal objects in distinct allocations, compared as values.
+        let a = make();
+        let b = make();
+        assert_eq!(a, b);
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Equal));
+
+        // The same objects nested inside arrays.
+        let mut arr_a = crate::array::IArray::new();
+        arr_a.push(make());
+        let mut arr_b = crate::array::IArray::new();
+        arr_b.push(make());
+        let (arr_a, arr_b) = (IValue::from(arr_a), IValue::from(arr_b));
+        assert_eq!(arr_a, arr_b);
+        assert_eq!(arr_a.partial_cmp(&arr_b), Some(Ordering::Equal));
+    }
+
+    #[mockalloc::test]
+    fn empty_object_is_unallocated() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_of(o: &IObject) -> u64 {
+            let mut h = DefaultHasher::new();
+            o.hash(&mut h);
+            h.finish()
+        }
+
+        // An empty object carries no allocation (just the tag). Every read must
+        // treat the unallocated form as empty, not dereference it — including the
+        // hash-table lookups, which must never probe a zero-capacity table.
+        let mut x = IObject::new();
+        assert_eq!(x.len(), 0);
+        assert_eq!(x.capacity(), 0);
+        assert!(x.is_empty());
+        assert_eq!(x.get("missing"), None);
+        assert_eq!(x.remove("missing"), None);
+        assert!(!x.contains_key("missing"));
+        assert_eq!(x.iter().count(), 0);
+        assert_eq!(format!("{x:?}"), "{}");
+        assert_eq!(x.clone().into_iter().count(), 0);
+
+        // Cloning stays empty and equal; an allocated-but-empty object compares and
+        // hashes identically to the unallocated one.
+        let allocated_empty = IObject::with_capacity(8);
+        assert_eq!(x, x.clone());
+        assert_eq!(x, allocated_empty);
+        assert_eq!(hash_of(&x), hash_of(&allocated_empty));
+
+        // Inserting allocates; removing the last entry returns to length zero.
+        x.insert("k", IValue::NULL);
+        assert_eq!(x.len(), 1);
+        assert_eq!(x.remove("k"), Some(IValue::NULL));
+        assert!(x.is_empty());
+    }
+
+    #[mockalloc::test]
     fn can_collect() {
         let x = vec![
             ("a", IValue::NULL),
@@ -1242,5 +988,269 @@ mod tests {
             }
             assert_eq!(x, IObject::new());
         }
+    }
+
+    #[mockalloc::test]
+    fn entry_or_insert_variants() {
+        let mut o = IObject::new();
+        // Vacant: fills with the default and hands back a live reference.
+        assert_eq!(*o.entry("a").or_insert(IValue::from(1)), IValue::from(1));
+        // Occupied: keeps the existing value, the default is dropped.
+        assert_eq!(*o.entry("a").or_insert(IValue::from(2)), IValue::from(1));
+
+        // `or_insert_with` runs its closure only when vacant.
+        assert_eq!(
+            *o.entry("b").or_insert_with(|| IValue::from(3)),
+            IValue::from(3)
+        );
+        let mut called = false;
+        let v = o.entry("b").or_insert_with(|| {
+            called = true;
+            IValue::from(9)
+        });
+        assert_eq!(*v, IValue::from(3));
+        assert!(!called, "closure must not run for an occupied entry");
+    }
+
+    #[mockalloc::test]
+    fn entry_key_and_modify_and_debug() {
+        let mut o = IObject::new();
+        o.insert("x", IValue::from(1));
+
+        // `Entry::key` on both arms.
+        assert_eq!(o.entry("x").key().as_str(), "x");
+        assert_eq!(o.entry("y").key().as_str(), "y");
+
+        // `and_modify` runs on an occupied entry and is a no-op on a vacant one.
+        o.entry("x")
+            .and_modify(|v| *v = IValue::from(2))
+            .or_insert(IValue::from(0));
+        assert_eq!(o["x"], IValue::from(2));
+        o.entry("z")
+            .and_modify(|_| panic!("and_modify must not run on a vacant entry"))
+            .or_insert(IValue::from(5));
+        assert_eq!(o["z"], IValue::from(5));
+
+        // Both entry kinds are `Debug`.
+        assert!(format!("{:?}", o.entry("x")).contains("Occupied"));
+        assert!(format!("{:?}", o.entry("new")).contains("Vacant"));
+    }
+
+    #[mockalloc::test]
+    fn occupied_entry_methods() {
+        let mut o = IObject::new();
+        o.insert("k", IValue::from(1));
+
+        match o.entry("k") {
+            Entry::Occupied(mut occ) => {
+                assert_eq!(occ.key().as_str(), "k");
+                assert_eq!(*occ.get(), IValue::from(1));
+                *occ.get_mut() = IValue::from(2);
+                assert_eq!(*occ.get(), IValue::from(2));
+                // `insert` returns the previous value.
+                assert_eq!(occ.insert(IValue::from(3)), IValue::from(2));
+                // `into_mut` extends the borrow to the object.
+                *occ.into_mut() = IValue::from(4);
+            }
+            Entry::Vacant(_) => panic!("expected an occupied entry"),
+        }
+        assert_eq!(o["k"], IValue::from(4));
+
+        // `remove_entry` returns the pair; `remove` just the value.
+        o.insert("a", IValue::from(7));
+        match o.entry("a") {
+            Entry::Occupied(occ) => {
+                assert_eq!(occ.remove_entry(), (IString::intern("a"), IValue::from(7)));
+            }
+            Entry::Vacant(_) => panic!("expected an occupied entry"),
+        }
+        o.insert("b", IValue::from(8));
+        match o.entry("b") {
+            Entry::Occupied(occ) => assert_eq!(occ.remove(), IValue::from(8)),
+            Entry::Vacant(_) => panic!("expected an occupied entry"),
+        }
+        assert!(!o.contains_key("a"));
+        assert!(!o.contains_key("b"));
+    }
+
+    #[mockalloc::test]
+    fn vacant_entry_methods() {
+        let mut o = IObject::new();
+        match o.entry("k") {
+            Entry::Vacant(vac) => {
+                assert_eq!(vac.key().as_str(), "k");
+                *vac.insert(IValue::from(1)) = IValue::from(2);
+            }
+            Entry::Occupied(_) => panic!("expected a vacant entry"),
+        }
+        assert_eq!(o["k"], IValue::from(2));
+
+        // `into_key` hands the key back without inserting anything.
+        match o.entry("unused") {
+            Entry::Vacant(vac) => assert_eq!(vac.into_key().as_str(), "unused"),
+            Entry::Occupied(_) => panic!("expected a vacant entry"),
+        }
+        assert!(!o.contains_key("unused"));
+    }
+
+    #[mockalloc::test]
+    fn entry_or_clone_reuses_key() {
+        let mut o = IObject::new();
+        let key = IString::intern("shared");
+        // Vacant: the key is cloned into the entry.
+        o.entry_or_clone(&key).or_insert(IValue::from(1));
+        // Occupied: the existing key is kept, the passed one untouched.
+        o.entry_or_clone(&key).and_modify(|v| *v = IValue::from(2));
+        assert_eq!(o[&key], IValue::from(2));
+    }
+
+    #[mockalloc::test]
+    fn iterators() {
+        let mut o = IObject::new();
+        o.insert("a", IValue::from(1));
+        o.insert("b", IValue::from(2));
+        o.insert("c", IValue::from(3));
+
+        // Insertion order is preserved.
+        let keys: Vec<&str> = o.keys().map(IString::as_str).collect();
+        assert_eq!(keys, ["a", "b", "c"]);
+        let sum: i64 = o.values().map(|v| v.to_i64().unwrap()).sum();
+        assert_eq!(sum, 6);
+        assert_eq!(o.iter().len(), 3);
+
+        // `values_mut` / `iter_mut` mutate in place.
+        for v in o.values_mut() {
+            *v = IValue::from(v.to_i64().unwrap() * 10);
+        }
+        assert_eq!(o["a"], IValue::from(10));
+        assert_eq!(o.iter_mut().len(), 3);
+        for (k, v) in o.iter_mut() {
+            if k.as_str() == "b" {
+                *v = IValue::from(0);
+            }
+        }
+        assert_eq!(o["b"], IValue::from(0));
+
+        // `IntoIter`: length, Debug, and a full drain.
+        assert_eq!(o.clone().into_iter().len(), 3);
+        assert!(format!("{:?}", o.clone().into_iter()).contains("IntoIter"));
+        assert_eq!(o.into_iter().count(), 3);
+    }
+
+    #[mockalloc::test]
+    fn clear_keeps_capacity() {
+        let mut o = IObject::with_capacity(8);
+        o.insert("a", IValue::from(1));
+        o.insert("b", IValue::from(2));
+        let cap = o.capacity();
+        o.clear();
+        assert!(o.is_empty());
+        assert_eq!(o.capacity(), cap);
+        // Clearing an already-empty object is a no-op.
+        o.clear();
+        assert!(o.is_empty());
+    }
+
+    #[mockalloc::test]
+    fn get_key_value_variants() {
+        let mut o = IObject::new();
+        o.insert("a", IValue::from(1));
+
+        let (k, v) = o.get_key_value("a").unwrap();
+        assert_eq!(k.as_str(), "a");
+        assert_eq!(*v, IValue::from(1));
+        assert!(o.get_key_value("missing").is_none());
+
+        *o.get_mut("a").unwrap() = IValue::from(2);
+        assert_eq!(o.get("a"), Some(&IValue::from(2)));
+        assert!(o.get_mut("missing").is_none());
+
+        {
+            let (k, v) = o.get_key_value_mut("a").unwrap();
+            assert_eq!(k.as_str(), "a");
+            *v = IValue::from(3);
+        }
+        assert!(o.get_key_value_mut("missing").is_none());
+        assert_eq!(o["a"], IValue::from(3));
+
+        // The `&T` blanket `ObjectIndex` impl: indexing by a reference to an index (`&&str`).
+        let key_ref = &"a";
+        assert_eq!(o.get(key_ref), Some(&IValue::from(3)));
+        assert!(o.contains_key(key_ref));
+    }
+
+    #[mockalloc::test]
+    fn retain_filters_and_mutates() {
+        let mut o = IObject::new();
+        for i in 0..6 {
+            o.insert(i.to_string(), IValue::from(i));
+        }
+        // Keep the evens, scaling each survivor in place.
+        o.retain(|_k, v| {
+            let n = v.to_i64().unwrap();
+            if n % 2 == 0 {
+                *v = IValue::from(n * 10);
+                true
+            } else {
+                false
+            }
+        });
+        assert_eq!(o.len(), 3);
+        assert_eq!(o["0"], IValue::from(0));
+        assert_eq!(o["2"], IValue::from(20));
+        assert_eq!(o["4"], IValue::from(40));
+        assert!(!o.contains_key("1"));
+
+        // `retain` on an empty object is a no-op.
+        let mut e = IObject::new();
+        e.retain(|_, _| panic!("must not visit an empty object"));
+        assert!(e.is_empty());
+    }
+
+    #[mockalloc::test]
+    fn index_and_index_mut() {
+        let mut o = IObject::new();
+        o.insert("a", IValue::from(1));
+        assert_eq!(o["a"], IValue::from(1));
+
+        // `IndexMut` on an existing key.
+        o["a"] = IValue::from(2);
+        assert_eq!(o["a"], IValue::from(2));
+
+        // `IndexMut` on a missing key inserts (as null) then assigns.
+        o["new"] = IValue::from(5);
+        assert_eq!(o["new"], IValue::from(5));
+    }
+
+    #[mockalloc::test]
+    fn from_maps_and_extend() {
+        let mut hm = HashMap::new();
+        hm.insert("a", 1);
+        hm.insert("b", 2);
+        let o: IObject = hm.into();
+        assert_eq!(o.len(), 2);
+        assert_eq!(o["a"], IValue::from(1));
+
+        let mut bt = BTreeMap::new();
+        bt.insert("x", 10);
+        bt.insert("y", 20);
+        let mut o2: IObject = bt.into();
+        assert_eq!(o2["y"], IValue::from(20));
+
+        // `extend` inserts new keys and overwrites existing ones.
+        o2.extend(vec![("z", 30), ("x", 11)]);
+        assert_eq!(o2.len(), 3);
+        assert_eq!(o2["x"], IValue::from(11));
+        assert_eq!(o2["z"], IValue::from(30));
+    }
+
+    #[mockalloc::test]
+    fn partial_ord_delegates() {
+        let mut a = IObject::new();
+        a.insert("k", IValue::from(1));
+        let b = a.clone();
+        // The coherence law the representation owns: equal objects compare Equal.
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Equal));
+        assert!(a >= b);
     }
 }
