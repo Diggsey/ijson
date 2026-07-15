@@ -352,14 +352,6 @@ impl IValue {
         // true of an inline value, which has none to expose.
         self.ptr.as_ptr().addr() & !(ALIGNMENT - 1)
     }
-    // The whole value word, tag included — the bits as stored. For an inline value this is
-    // its complete encoding; for a heap value it is the tagged pointer. Comparing against an
-    // inline constant here (rather than the tag-masked `usize_()`) needs no assumption that
-    // no allocation lives at that address: a heap value's tag is non-zero, so its raw word
-    // has a low bit set, and an inline constant never does — the two simply cannot collide.
-    fn raw_word(&self) -> usize {
-        self.ptr.as_ptr().addr()
-    }
     // The heap allocation this value points at, with the tag stripped.
     //
     // Safety: must be a heap value with a live allocation — not an inline value, and
@@ -405,8 +397,9 @@ impl IValue {
     /// [`type_`](Self::type_)/[`ValueType`] so they stay decoupled from how a value
     /// happens to be stored.
     pub(crate) fn repr_tag(&self) -> ReprTag {
-        // The whole word — not `usize_()`, which has masked the tag off.
-        self.raw_word().into()
+        // The whole word — not `usize_()`, which has masked the tag off. `addr()` reads the
+        // bits without exposing provenance (an inline value has none); see `usize_`.
+        self.ptr.as_ptr().addr().into()
     }
 
     /// Whether this value is stored inline (tag `Inline`) rather than behind a
@@ -511,13 +504,17 @@ impl IValue {
     /// Returns `true` if this is the `true` value.
     #[must_use]
     pub fn is_true(&self) -> bool {
-        self.raw_word() == inline::TRUE
+        // Compare the whole word against the `true` constant (`raw_eq` is bit equality),
+        // not the tag-masked `usize_()`: a heap value's tag is non-zero, so its raw word
+        // can never equal an inline constant's, and this needs no assumption about what may
+        // live at that address.
+        self.raw_eq(&Self::TRUE)
     }
 
     /// Returns `true` if this is the `false` value.
     #[must_use]
     pub fn is_false(&self) -> bool {
-        self.raw_word() == inline::FALSE
+        self.raw_eq(&Self::FALSE)
     }
 
     /// Converts this value to a `bool`.
