@@ -48,3 +48,6 @@ rand = "0.10.0"
 # dev builds, so the derive machinery drives `to_value`/`from_value` in the round-trip
 # test without pulling `serde_derive` into the published library's build.
 serde = { version = "1.0.228", features = ["derive"] }
+# Drives the bytes paths of the serde bridge (`serialize_bytes` / `deserialize_bytes`),
+# which JSON never reaches.
+serde_bytes = "0.11"

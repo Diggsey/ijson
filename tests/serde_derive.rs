@@ -210,6 +210,54 @@ fn type_mismatches_are_errors() {
     assert!(ijson::from_value::<String>(&n).is_err()); // string from number
     assert!(ijson::from_value::<bool>(&n).is_err()); // bool from number
     assert!(ijson::from_value::<Vec<i32>>(&n).is_err()); // seq from number
-    assert!(ijson::from_value::<Inner>(&arr).is_err()); // struct from array
+    assert!(ijson::from_value::<Inner>(&arr).is_err()); // struct from array (wrong length)
+    assert!(ijson::from_value::<Inner>(&n).is_err()); // struct from a scalar
     assert!(ijson::from_value::<Shape>(&n).is_err()); // enum from number
+}
+
+/// A unit-only enum and a newtype struct, used only as map keys below.
+#[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+enum UnitKey {
+    A,
+    B,
+}
+
+#[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+struct IdKey(u32);
+
+/// The map-key shapes that legitimately serialize to a string: integers of assorted widths, a
+/// unit enum variant (its name), and a newtype struct (its inner value). These drive the
+/// `ObjectKeySerializer` arms that a plain string key does not.
+#[test]
+fn serializable_map_key_shapes() {
+    // Integer keys of several widths stringify. (One per signedness/size class — the arms are
+    // identical per width, so a representative sample is the point, not an exhaustive one.)
+    let signed = ijson::to_value(BTreeMap::from([(-8i8, 1), (8, 2)])).unwrap();
+    assert_eq!(signed.as_object().unwrap()["-8"].to_i64(), Some(1));
+    let wide = ijson::to_value(BTreeMap::from([(1i64 << 40, 1)])).unwrap();
+    assert_eq!(wide.as_object().unwrap()["1099511627776"].to_i64(), Some(1));
+    let unsigned = ijson::to_value(BTreeMap::from([(200u8, 1)])).unwrap();
+    assert_eq!(unsigned.as_object().unwrap()["200"].to_i64(), Some(1));
+
+    // A unit enum variant used as a key serializes to the variant name.
+    let by_variant = ijson::to_value(BTreeMap::from([(UnitKey::A, 1), (UnitKey::B, 2)])).unwrap();
+    let o = by_variant.as_object().unwrap();
+    assert_eq!(o["A"].to_i64(), Some(1));
+    assert_eq!(o["B"].to_i64(), Some(2));
+
+    // A newtype struct key forwards to its inner value.
+    let by_id = ijson::to_value(BTreeMap::from([(IdKey(7), 1)])).unwrap();
+    assert_eq!(by_id.as_object().unwrap()["7"].to_i64(), Some(1));
+}
+
+/// Keys that have no string form must be rejected, across the shapes a key can take. (One
+/// representative per shape; the remaining `ObjectKeySerializer` error arms are the same
+/// one-line rejection for key types that cannot occur in practice.)
+#[test]
+fn non_scalar_map_keys_are_rejected() {
+    assert!(ijson::to_value(BTreeMap::from([((1, 2), 0)])).is_err()); // tuple key
+    assert!(ijson::to_value(BTreeMap::from([(vec![1, 2], 0)])).is_err()); // seq key
+    assert!(ijson::to_value(BTreeMap::from([((), 0)])).is_err()); // unit key
+    assert!(ijson::to_value(BTreeMap::from([(Some(1), 0)])).is_err()); // option Some key
+    assert!(ijson::to_value(BTreeMap::from([(None::<i32>, 0)])).is_err()); // option None key
 }
