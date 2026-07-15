@@ -143,7 +143,7 @@ pub enum Destructured {
 }
 
 impl Destructured {
-    /// Convert to the borrowed form of thie enum.
+    /// Convert to the borrowed form of this enum.
     #[must_use]
     pub fn as_ref<'a>(&'a self) -> DestructuredRef<'a> {
         use DestructuredRef::{Array, Bool, Null, Number, Object, String};
@@ -465,7 +465,7 @@ impl IValue {
         index.index_into_mut(self)
     }
 
-    /// Removes a value at the specified numberic or string index.
+    /// Removes a value at the specified numeric or string index.
     /// Panics if this is not an array or object.
     /// Panics if attempting to index an array with a string.
     /// Panics if attempting to index an object with a number.

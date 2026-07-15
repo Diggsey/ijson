@@ -125,7 +125,7 @@ impl IArray {
     }
 
     /// Inserts a new item into the array at the specified index. Any existing items
-    /// on or after this index will be shifted down to accomodate this. For large
+    /// on or after this index will be shifted down to accommodate this. For large
     /// arrays, insertions near the front will be slow as it will require shifting
     /// a large number of items.
     pub fn insert(&mut self, index: usize, item: impl Into<IValue>) {
@@ -138,7 +138,7 @@ impl IArray {
     /// arrays, removals from near the front will be slow as it will require shifting
     /// a large number of items.
     ///
-    /// If the order of the array is unimporant, consider using [`IArray::swap_remove`].
+    /// If the order of the array is unimportant, consider using [`IArray::swap_remove`].
     ///
     /// If the index is outside the array bounds, `None` is returned.
     pub fn remove(&mut self, index: usize) -> Option<IValue> {

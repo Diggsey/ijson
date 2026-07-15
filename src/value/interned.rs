@@ -247,13 +247,16 @@ impl InternedRepr {
         let hd = Self::as_header(ptr);
 
         // If the reference count is greater than 1, we can safely decrement it without
-        // locking the string cache.
+        // locking the string cache. `Release`: a fast-path decrementer never takes the
+        // shard lock, so this is the only thing ordering its reads of the immutable bytes
+        // before it gives up the reference. It pairs with the `Acquire` on the freeing
+        // `fetch_sub` below, so the thread that eventually frees sees those reads completed.
         let mut rc = hd.rc.load(AtomicOrdering::Relaxed);
         while rc > 1 {
             match hd.rc.compare_exchange_weak(
                 rc,
                 rc - 1,
-                AtomicOrdering::Relaxed,
+                AtomicOrdering::Release,
                 AtomicOrdering::Relaxed,
             ) {
                 Ok(_) => return,
@@ -266,7 +269,13 @@ impl InternedRepr {
         // Safety: the number of shards is fixed
         let shard = cache.shards().get_unchecked(hd.shard_index());
         let mut guard = shard.write();
-        if hd.rc.fetch_sub(1, AtomicOrdering::Relaxed) == 1 {
+        // `Acquire`, to synchronize with the fast-path `Release` decrements above so that
+        // every lock-free owner's reads of the bytes happen-before the free below. It does
+        // not also need `Release`: the slow path and the free both run under this shard
+        // lock, so a slow-path decrementer's own reads are already published to the freeing
+        // thread by the lock's release/acquire (this also covers the resurrection case,
+        // where a concurrent `intern` upgraded the entry and `fetch_sub` returns > 1).
+        if hd.rc.fetch_sub(1, AtomicOrdering::Acquire) == 1 {
             // Reference count reached zero, free the string
             assert!(guard.remove(hd.str()).is_some());
 

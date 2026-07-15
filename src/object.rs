@@ -417,7 +417,7 @@ impl IObject {
     }
 
     /// Inserts a new value into this object with the specified key. If a value already
-    /// existed at this key, that value is replaced and returend.
+    /// existed at this key, that value is replaced and returned.
     pub fn insert(&mut self, k: impl Into<IString>, v: impl Into<IValue>) -> Option<IValue> {
         match self.entry(k) {
             Entry::Occupied(mut occ) => Some(occ.insert(v)),
