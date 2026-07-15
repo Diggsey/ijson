@@ -98,14 +98,16 @@ they will compare equal) it does allow you to distinguish them using the
 method `INumber::has_decimal_point()`. That said, calling `to_i32` on
 `2.0` will succeed with the value `2`.
 
-Currently `INumber` can store any number representable with an `f64`, `i64` or
-`u64`. It is expected that in the future it will be further expanded to store
-integers and possibly decimals to arbitrary precision, but that is not currently
-the case.
+By default `INumber` can store any number representable with an `f64`, `i64` or
+`u64`. Enabling the `arbitrary_precision` feature stores numbers as their exact
+decimal value instead, so decimals such as `0.1` are kept exactly and integers
+and decimals beyond `f64`'s range and precision become representable.
 
-Any number representable with an `i8` or a `u8` can be stored in an `INumber`
-without a heap allocation (so JSON byte arrays are relatively efficient).
-Integers up to 24 bits can be stored with a 4-byte heap allocation.
+Most numbers are stored _inline_ within the pointer-sized value, with no heap
+allocation: small integers, timestamps and ids, and short fractions such as
+`0.5` and `63.5` all fit inline (a 56-bit mantissa on 64-bit platforms, 24-bit
+on 32-bit). Only larger integers and higher-precision floats fall back to a
+single 8-byte heap allocation. See the technical details below.
 
 ### IString
 
@@ -113,11 +115,12 @@ The `IString` type is an interned, immutable string, and is where this crate
 gets its name.
 
 Cloning an `IString` is cheap, and it can be easily converted from `&str` or
-`String` types. Comparisons between `IString`s is a simple pointer
-comparison.
+`String` types. Short strings are stored inline; longer strings are interned, so
+comparing two interned `IString`s is a simple pointer comparison.
 
-The memory backing an `IString` is reference counted, so that unlike many
-string interning libraries, memory is not leaked as new strings are interned.
+The memory backing an interned `IString` is reference counted, so that unlike
+many string interning libraries, memory is not leaked as new strings are
+interned.
 Interning uses `DashSet`, an implementation of a concurrent hash-set, allowing
 many strings to be interned concurrently without becoming a bottleneck.
 
@@ -155,59 +158,44 @@ And those without:
 - array
 - object
 
-Conveniently, this means we only need to distinguish between four different
-heap allocated types (those without) and this can be done using only 2 bits.
+We make sure our heap allocations have an alignment of at least 8, which leaves
+the low three bits of a pointer free to store a "tag" value. Seven of the eight
+tags name a pointer type — `i64`, `u64`, `f64`, decimal (only with
+`arbitrary_precision`), string, array and object — and the eighth (tag `0`) is
+the _inline_ family: rather than pointing at a heap allocation, the rest of the
+word holds the value directly.
 
-We make sure our heap allocations have an alignment of at least 4 (which
-is generally the case _anyway_) and this leaves us the two lower bits of
-a pointer to store a "tag" value.
-
-As an added bonus, the alignment of 4 means there are 3 constant pointer
-values (other than the null pointer) which can never be returned from
-`alloc`:
-
-- 0x1
-- 0x2
-- 0x3
-
-These three pointer values map neatly onto the fixed values `null`, `false`
-and `true` respectively. And with that, we've covered all the possible JSON
-types!
-
-All that's left is to find a way to store numbers, strings, arrays and
-objects behind a thin pointer.
+`null`, `true` and `false` are three such inline values (they need no payload at
+all), as are small numbers and short strings. So the common small values cost no
+allocation and no pointer indirection, and all that's left is storing larger
+numbers, strings, arrays and objects behind a thin pointer.
 
 ### `INumber`
 
-It's not uncommon to store byte arrays in JSON. If we need to a heap
-allocation for every single byte in such an array it would be extremely
-inefficient. Also, some numbers are more common than others (0, 1, -1).
+It's not uncommon to store byte arrays — or large arrays of small integers,
+timestamps or ids — in JSON. A heap allocation per number would be extremely
+inefficient, so small numbers are stored _inline_ in the value word (tag `0`)
+rather than behind a pointer.
 
-As a result, we need a way to encode numbers more efficiently the smaller
-they are, and ideally encode all possible byte values without a heap
-allocation. But we only have a single pointer to work with, and we've
-already used the tag bits!
+An inline number is a `mantissa × base^exp` value: a signed 56-bit mantissa
+(24-bit on 32-bit platforms) and a small exponent, packed alongside the tag.
+By default the base is 2, so an inline number is a binary float and is always
+exactly an `f64`; with the `arbitrary_precision` feature the base is 10, so it
+is an exact decimal. Either way the vast majority of real JSON numbers — every
+small integer, and short fractions such as `0.5` — fit with no allocation.
 
-The good news is that there just aren't that many byte values (256 to
-be exact) and even if we extend the range to signed bytes too, it's
-only 384. We can simply reserve a static array in our binary for these
-small integers.
-
-In practice we use a nice round 512-entry array storing values from
-`-128` to `383` which more than covers the byte value range. When we
-need to store one of these numbers we simply set our pointer to the
-appropriate entry in the array, and skip any allocating or freeing.
+A number that doesn't fit inline (a large integer, or a float whose exponent is
+out of range) spills to a single 8-byte heap payload — an `i64`, `u64`, `f64`,
+or (with `arbitrary_precision`) an arbitrary-precision decimal — whose type is
+named by the tag.
 
 ### `IString`
 
-As mentioned previously, strings are interned. As well as saving a ton
-of memory when keys are repeated many times in arrays of objects, this
-also makes it trivial to store a string with a single pointer, we just
-set the pointer to the location of the interned string.
-
-We also use a similar trick as for numbers to store the empty string
-more cheaply: we just declare a static variable to be the empty string,
-and use pointers to that.
+Short strings (up to 7 bytes on 64-bit platforms, 3 on 32-bit) are stored
+inline in the value word, with no allocation. Longer strings are interned:
+storing one is then just a pointer to the shared interned copy, which also
+saves a ton of memory when the same key is repeated many times across arrays
+of objects. The empty string is a short string, so it too is inline.
 
 ### `IArray`
 
