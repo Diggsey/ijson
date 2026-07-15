@@ -44,3 +44,7 @@ indexmap = { version = "2.13.0", optional = true }
 mockalloc = "0.1.2"
 ctor = "0.6.3"
 rand = "0.10.0"
+# `derive` only for tests/examples: it unions onto the normal `serde` dependency for
+# dev builds, so the derive machinery drives `to_value`/`from_value` in the round-trip
+# test without pulling `serde_derive` into the published library's build.
+serde = { version = "1.0.228", features = ["derive"] }
