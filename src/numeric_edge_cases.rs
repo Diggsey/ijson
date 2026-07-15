@@ -550,19 +550,30 @@ mod tests {
             if let Some(u) = v.to_u64() {
                 assert_eq!(u as f64, x, "{} to_u64 value", x);
             }
-            // serde_json's default float *parser* is not exact-round-trip for all
-            // magnitudes (its precise parser is behind the `float_roundtrip`
-            // feature). Require only that ijson loses no more than serde_json's own
-            // f64 pipeline does. (ijson canonicalises -0.0 to +0.0; `0.0 == -0.0`.)
+            // A round trip through JSON text must not lose the value.
             let out = serde_json::to_string(&v).unwrap();
             let back: IValue = serde_json::from_str(&out).unwrap();
-            let baseline: f64 = serde_json::from_str(&serde_json::to_string(&x).unwrap()).unwrap();
-            assert_eq!(
-                back.to_f64_lossy(),
-                Some(baseline),
-                "{} serde round-trip",
-                x
-            );
+            #[cfg(feature = "arbitrary_precision")]
+            {
+                // Deserialization is exact: every `f64` is an exact decimal, written out in
+                // full and read back through the same parser, so it reconstructs perfectly.
+                // (ijson canonicalises `-0.0` to `+0.0`; `0.0 == -0.0`.)
+                assert_eq!(back.to_f64_lossy(), Some(x), "{} exact serde round-trip", x);
+            }
+            #[cfg(not(feature = "arbitrary_precision"))]
+            {
+                // serde_json's default float *parser* is not exact-round-trip for all
+                // magnitudes (its precise parser is behind `float_roundtrip`). Require only
+                // that ijson loses no more than serde_json's own `f64` pipeline does.
+                let baseline: f64 =
+                    serde_json::from_str(&serde_json::to_string(&x).unwrap()).unwrap();
+                assert_eq!(
+                    back.to_f64_lossy(),
+                    Some(baseline),
+                    "{} serde round-trip",
+                    x
+                );
+            }
         }
     }
 
@@ -600,13 +611,20 @@ mod tests {
                 serde_json::from_str(s).unwrap_or_else(|e| panic!("parse {:?}: {}", s, e));
             assert!(v.is_number(), "{:?} not a number", s);
 
-            // A number has a decimal point iff serde stored it as a float: when
-            // written with `.`/`e`/`E`, when it is a bare integer too large for
-            // `i64`/`u64` (reparsed as a float), or the token "-0" (which
-            // serde_json parses as -0.0 to preserve the sign).
+            // A number has a decimal point iff it was *written* as a float — with `.`/`e`/
+            // `E`. Without `arbitrary_precision`, deserialization also rounds anything it
+            // cannot hold to an `f64`, which gains a point: a bare integer beyond `i64`/`u64`,
+            // and the token "-0" (which serde reads as `-0.0`). With the feature,
+            // deserialization is exact — both of those stay integers — so only the syntax
+            // decides. (This mirrors `string_inputs_are_consistent`, which reaches the same
+            // split through `INumber::from_str`; deserialization now shares that parser.)
             let syntactic_float = s.bytes().any(|b| matches!(b, b'.' | b'e' | b'E'));
             let fits_int = s.parse::<i64>().is_ok() || s.parse::<u64>().is_ok();
-            let expect_dot = syntactic_float || !fits_int || s == "-0";
+            let expect_dot = if cfg!(feature = "arbitrary_precision") {
+                syntactic_float
+            } else {
+                syntactic_float || !fits_int || s == "-0"
+            };
             assert_eq!(
                 v.as_number().unwrap().has_decimal_point(),
                 expect_dot,

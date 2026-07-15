@@ -420,6 +420,26 @@ impl SerializeMap for SerializeObject {
     }
 
     fn end(self) -> Result<IValue, Self::Error> {
+        // The mirror of the Deserialize side: with `arbitrary_precision`, a
+        // `serde_json::Number` serializes itself as a one-field struct keyed by its private
+        // token, whose value is the raw literal. Serializing such a number *into* ijson must
+        // land as a number, not an object with a magic key — otherwise round-tripping a
+        // `serde_json::Value` through ijson would turn every number into an object. Only a
+        // value that actually parses as a number triggers this, so a genuine object that
+        // happened to use this key with a non-number string is left alone. (serde_json's own
+        // arbitrary-precision format carries the same, unavoidable, ambiguity.)
+        #[cfg(feature = "arbitrary_precision")]
+        if self.object.len() == 1 {
+            if let Some(literal) = self
+                .object
+                .get(crate::de::NUMBER_TOKEN)
+                .and_then(|v| v.as_string())
+            {
+                if let Ok(n) = literal.as_str().parse::<crate::INumber>() {
+                    return Ok(n.into());
+                }
+            }
+        }
         Ok(self.object.into())
     }
 }

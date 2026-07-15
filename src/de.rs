@@ -125,17 +125,33 @@ impl<'de> Visitor<'de> for ValueVisitor {
         ArrayVisitor.visit_seq(visitor).map(Into::into)
     }
 
+    #[cfg(not(feature = "arbitrary_precision"))]
     fn visit_map<V>(self, visitor: V) -> Result<IValue, V::Error>
     where
         V: MapAccess<'de>,
     {
         ObjectVisitor.visit_map(visitor).map(Into::into)
     }
+
+    // With `arbitrary_precision` a number can arrive here disguised as a one-entry map (see
+    // `NUMBER_TOKEN`), so peek the first key: the token means it is really a number, anything
+    // else is a genuine object key and the object is finished from there.
+    #[cfg(feature = "arbitrary_precision")]
+    fn visit_map<V>(self, mut map: V) -> Result<IValue, V::Error>
+    where
+        V: MapAccess<'de>,
+    {
+        match map.next_key_seed(MapKeyClassifier)? {
+            Some(MapKey::Number) => number_from_map_value(&mut map).map(IValue::from),
+            Some(MapKey::Key(first_key)) => build_object(map, Some(first_key)).map(Into::into),
+            None => Ok(IObject::with_capacity(0).into()),
+        }
+    }
 }
 
 struct NumberVisitor;
 
-impl Visitor<'_> for NumberVisitor {
+impl<'de> Visitor<'de> for NumberVisitor {
     type Value = INumber;
 
     fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
@@ -155,6 +171,20 @@ impl Visitor<'_> for NumberVisitor {
     #[inline]
     fn visit_f64<E: SError>(self, value: f64) -> Result<INumber, E> {
         INumber::try_from(value).map_err(|_| E::invalid_value(Unexpected::Float(value), &self))
+    }
+
+    // With `arbitrary_precision`, serde_json delivers a float or an out-of-`u64` integer as
+    // a `{ NUMBER_TOKEN: "<literal>" }` map rather than through `visit_f64`. Re-parse the
+    // literal exactly. (Integers in range still come through `visit_u64`/`visit_i64` above.)
+    #[cfg(feature = "arbitrary_precision")]
+    fn visit_map<V>(self, mut map: V) -> Result<INumber, V::Error>
+    where
+        V: MapAccess<'de>,
+    {
+        if map.next_key::<NumberToken>()?.is_none() {
+            return Err(V::Error::invalid_type(Unexpected::Map, &self));
+        }
+        number_from_map_value(&mut map)
     }
 }
 
@@ -228,15 +258,112 @@ impl<'de> Visitor<'de> for ObjectVisitor {
         formatter.write_str("JSON object")
     }
 
-    fn visit_map<V>(self, mut visitor: V) -> Result<IObject, V::Error>
+    fn visit_map<V>(self, visitor: V) -> Result<IObject, V::Error>
     where
         V: MapAccess<'de>,
     {
-        let mut obj = IObject::with_capacity(visitor.size_hint().unwrap_or(0));
-        while let Some((k, v)) = visitor.next_entry::<IString, IValue>()? {
-            obj.insert(k, v);
+        build_object(visitor, None)
+    }
+}
+
+/// Builds an object from the remaining map entries, optionally with one key already peeled
+/// off (`first_key`). The peel-first form is what lets `ValueVisitor` look at the first key
+/// to tell a real object from `arbitrary_precision`'s number-in-a-map and still finish the
+/// object if it was one; `ObjectVisitor` just passes `None`.
+fn build_object<'de, V>(mut map: V, first_key: Option<IString>) -> Result<IObject, V::Error>
+where
+    V: MapAccess<'de>,
+{
+    let mut obj =
+        IObject::with_capacity(map.size_hint().unwrap_or(0) + usize::from(first_key.is_some()));
+    if let Some(key) = first_key {
+        let value = map.next_value::<IValue>()?;
+        obj.insert(key, value);
+    }
+    while let Some((k, v)) = map.next_entry::<IString, IValue>()? {
+        obj.insert(k, v);
+    }
+    Ok(obj)
+}
+
+// `arbitrary_precision` deserialization goes through one parser. serde_json, with its own
+// `arbitrary_precision` on, does not round a number to `f64` on the way in — it hands over
+// the raw literal as a single-entry map, `{ NUMBER_TOKEN: "<digits>" }`. Intercepting that
+// map and re-parsing the literal with `INumber::from_str` (the same parser `str::parse`
+// uses) is what keeps a value exact through a round trip: without it, `from_str("0.1")` and
+// `from_str::<serde_json>("0.1")` would be different numbers, and a magnitude beyond `f64`
+// would be unreadable. Integers in `i64`/`u64` range still arrive through `visit_u64`/`i64`.
+#[cfg(feature = "arbitrary_precision")]
+pub(crate) const NUMBER_TOKEN: &str = "$serde_json::private::Number";
+
+/// Parses the value half of a number map (its key already consumed) with `INumber`'s own
+/// parser — the single boundary all number text passes through.
+#[cfg(feature = "arbitrary_precision")]
+fn number_from_map_value<'de, V>(map: &mut V) -> Result<INumber, V::Error>
+where
+    V: MapAccess<'de>,
+{
+    let literal = map.next_value::<String>()?;
+    literal
+        .parse::<INumber>()
+        .map_err(|_| V::Error::custom(format_args!("invalid JSON number {:?}", literal)))
+}
+
+/// A map key classified as either `arbitrary_precision`'s number token or a genuine object
+/// key. Peeking it is how [`ValueVisitor`] tells the two maps apart.
+#[cfg(feature = "arbitrary_precision")]
+enum MapKey {
+    Number,
+    Key(IString),
+}
+
+#[cfg(feature = "arbitrary_precision")]
+struct MapKeyClassifier;
+
+#[cfg(feature = "arbitrary_precision")]
+impl<'de> DeserializeSeed<'de> for MapKeyClassifier {
+    type Value = MapKey;
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<MapKey, D::Error> {
+        struct KeyVisitor;
+        impl Visitor<'_> for KeyVisitor {
+            type Value = MapKey;
+            fn expecting(&self, f: &mut Formatter) -> fmt::Result {
+                f.write_str("a JSON object key")
+            }
+            fn visit_str<E: SError>(self, s: &str) -> Result<MapKey, E> {
+                Ok(if s == NUMBER_TOKEN {
+                    MapKey::Number
+                } else {
+                    MapKey::Key(IString::intern(s))
+                })
+            }
         }
-        Ok(obj)
+        deserializer.deserialize_str(KeyVisitor)
+    }
+}
+
+/// A map key that must be exactly the number token — nothing else can be a valid number.
+#[cfg(feature = "arbitrary_precision")]
+struct NumberToken;
+
+#[cfg(feature = "arbitrary_precision")]
+impl<'de> Deserialize<'de> for NumberToken {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl Visitor<'_> for V {
+            type Value = NumberToken;
+            fn expecting(&self, f: &mut Formatter) -> fmt::Result {
+                f.write_str("the arbitrary-precision number token")
+            }
+            fn visit_str<E: SError>(self, s: &str) -> Result<NumberToken, E> {
+                if s == NUMBER_TOKEN {
+                    Ok(NumberToken)
+                } else {
+                    Err(E::custom("expected a JSON number"))
+                }
+            }
+        }
+        deserializer.deserialize_identifier(V)
     }
 }
 
@@ -905,4 +1032,123 @@ where
     T: Deserialize<'de>,
 {
     T::deserialize(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{INumber, IValue};
+
+    // The literals whose deserialization behaviour differs by feature. In every case the
+    // point is that the *route in* does not change the value: `str::parse` and
+    // `serde_json::from_str` are two doors to the same parser, so they must agree, and
+    // whatever we serialize must read back unchanged.
+    const CASES: &[&str] = &[
+        "0",
+        "-0",
+        "42",
+        "-42",
+        "0.1",
+        "0.5",
+        "3.14159",
+        "1.0",
+        "1e3",
+        "-2.5e-4",
+        // Beyond `i64`/`u64` — a big integer, kept exact under `arbitrary_precision`.
+        "123456789012345678901234567890",
+        "-123456789012345678901234567890",
+        // More precision than an `f64` holds.
+        "0.12345678901234567890123456789",
+        // Beyond `f64`'s range entirely.
+        "1e400",
+        "-1e400",
+        "1e-400",
+    ];
+
+    /// The single most important invariant this whole path exists to hold: text becomes the
+    /// same number whichever door it comes through. `serde_json::from_str` and `str::parse`
+    /// share one parser now, so they cannot disagree — in *either* feature configuration
+    /// (without `arbitrary_precision` both round to `f64`, and both reject an out-of-range
+    /// magnitude; with it, both keep the exact value).
+    #[test]
+    fn the_two_parsers_agree() {
+        for &s in CASES {
+            let via_parse = s.parse::<INumber>();
+            let via_serde = serde_json::from_str::<INumber>(s);
+            match (via_parse, via_serde) {
+                (Ok(a), Ok(b)) => {
+                    assert_eq!(a, b, "{:?}: parse and serde gave different numbers", s);
+
+                    // Value always agrees; shape agrees too, save one long-standing
+                    // exception that has nothing to do with this feature — the JSON token
+                    // `-0`. `INumber::from_str` reads it by the grammar, as the *integer*
+                    // `0` (no decimal point); `serde_json` reads it as the float `-0.0`.
+                    // They still denote the same number, so this is presentation, not value.
+                    if s != "-0" {
+                        assert_eq!(
+                            a.has_decimal_point(),
+                            b.has_decimal_point(),
+                            "{:?}: parse and serde disagree on integer/float shape",
+                            s
+                        );
+                    }
+                }
+                (Err(_), Err(_)) => {}
+                (a, b) => panic!(
+                    "{:?}: one parser accepted and the other rejected (parse ok={}, serde ok={})",
+                    s,
+                    a.is_ok(),
+                    b.is_ok()
+                ),
+            }
+        }
+    }
+
+    /// Anything we can hold, we can round-trip through JSON text and through `serde_json`
+    /// itself — same value, same integer/float shape. This is what would break if the write
+    /// side (`Serialize`) and the read side (`Deserialize`) ever stopped sharing a parser:
+    /// we could emit JSON we could not read back, or read it back as a different number.
+    #[test]
+    fn round_trips_through_serde_json() {
+        for &s in CASES {
+            let Ok(n) = s.parse::<INumber>() else {
+                // Rejected here must mean rejected by serde too (checked above); nothing to
+                // round-trip.
+                continue;
+            };
+            let text = serde_json::to_string(&n).unwrap();
+            let back = serde_json::from_str::<INumber>(&text).unwrap_or_else(|e| {
+                panic!(
+                    "{:?} serialized to {:?}, which serde cannot read: {}",
+                    s, text, e
+                )
+            });
+            assert_eq!(back, n, "{:?} -> {:?} -> a different number", s, text);
+            assert_eq!(
+                back.has_decimal_point(),
+                n.has_decimal_point(),
+                "{:?} -> {:?}: shape",
+                s,
+                text
+            );
+
+            // The same, wrapped in a container, so the object/array visitors are exercised
+            // too — the number-in-a-map interception must not disturb real object parsing.
+            let doc = format!("{{\"k\":[{}]}}", text);
+            let v: IValue = serde_json::from_str(&doc).unwrap();
+            let inner = &v.as_object().unwrap()["k"].as_array().unwrap()[0];
+            assert_eq!(inner.as_number().unwrap(), &n, "{:?} inside a container", s);
+        }
+    }
+
+    /// A genuine object whose key happens to look nothing like the number token still
+    /// deserializes as an object — and one *couldn't* collide, but check a normal one works.
+    #[test]
+    fn objects_still_deserialize() {
+        let v: IValue = serde_json::from_str(r#"{"a":1,"b":[2,3],"c":{"d":0.5}}"#).unwrap();
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 3);
+        assert_eq!(obj["a"].to_i64(), Some(1));
+        assert_eq!(obj["b"].as_array().unwrap().len(), 2);
+        assert_eq!(obj["c"].as_object().unwrap()["d"].to_f64_lossy(), Some(0.5));
+    }
 }

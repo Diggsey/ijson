@@ -312,16 +312,21 @@ impl From<serde_json::Number> for INumber {
         } else if let Some(v) = n.as_i64() {
             INumber::from(v)
         } else {
-            // A serde_json number is always representable as an f64, so this
-            // cannot return `None`; if it does, an invariant broke.
-            let v = n
-                .as_f64()
-                .expect("a serde_json number is always an integer or float");
-            // Standard JSON numbers are finite. Only the `arbitrary_precision`
-            // feature can parse a magnitude beyond f64's range (an infinity);
-            // clamp it so the result stays a finite, representable number and
-            // `try_from` cannot fail.
-            INumber::try_from(v.clamp(f64::MIN, f64::MAX)).expect("a clamped f64 is always finite")
+            // A float, or — with `arbitrary_precision` — a magnitude beyond `i64`/`u64`.
+            // Parse the number's own literal through `from_str`, the single boundary all
+            // number text passes through, so this conversion keeps a value exact wherever
+            // that parser can (an exact decimal under `arbitrary_precision`), instead of
+            // forcing it through an `f64` that would round it — or, for a magnitude past
+            // `f64`'s range, clamp it to a wholly different number. A `serde_json::Number`
+            // is always valid JSON, so `from_str` accepts it; the `f64` arm below is only a
+            // total-function backstop for the unreachable case where it somehow does not.
+            n.to_string().parse::<INumber>().unwrap_or_else(|_| {
+                let v = n
+                    .as_f64()
+                    .expect("a serde_json number is always an integer or float");
+                INumber::try_from(v.clamp(f64::MIN, f64::MAX))
+                    .expect("a clamped f64 is always finite")
+            })
         }
     }
 }

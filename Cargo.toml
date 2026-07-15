@@ -18,7 +18,13 @@ broken-borrow-impl-compat = []
 # arbitrary-precision decimal for larger values) instead of rounding to `f64`.
 # When disabled, the same inline slot holds a binary float (`mantissa * 2^exp`),
 # so every inline number is exactly an `f64`. Mirrors serde_json's feature.
-arbitrary_precision = ["serde_json/raw_value"]
+# `serde_json/raw_value` lets us serialize an exact decimal from its own digits.
+# `serde_json/arbitrary_precision` is the matching read side: it makes serde_json hand a
+# number over as its raw literal (via a magic single-entry map) instead of eagerly
+# rounding to `f64`, so deserializing routes through the *same* parser as `INumber::from_str`
+# and a value that is exactly representable stays exact. Without it the two disagree — the
+# whole point of the feature would be undone on the way in.
+arbitrary_precision = ["serde_json/raw_value", "serde_json/arbitrary_precision"]
 
 # `codegen_probes` is set only by the codegen tests' nested build (see
 # tests/codegen_probes.rs); it exposes hooks that let a probe tell the compiler which
