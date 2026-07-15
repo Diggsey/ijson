@@ -382,6 +382,14 @@ impl IValue {
         let word = word | self.repr_tag() as usize;
         self.ptr = NonNull::new_unchecked(std::ptr::without_provenance_mut(word));
     }
+    // Bit-copies the tagged word, adjusting no ownership: no refcount bump, no allocation.
+    //
+    // Safety: for a value that owns heap storage (an interned string, array, object, heap
+    // scalar or decimal), the two words now alias one allocation, so the caller must ensure
+    // they are not both dropped — either by accounting for the extra reference first
+    // (`InternedRepr::clone` bumps the refcount before copying) or by moving rather than
+    // duplicating ownership. An inline value owns nothing, so a bit-copy of it is a genuine,
+    // unconditional clone (`InlineRepr::clone`).
     unsafe fn raw_copy(&self) -> Self {
         Self { ptr: self.ptr }
     }
@@ -985,17 +993,21 @@ impl IValue {
 
 #[cfg(test)]
 impl IValue {
-    /// Test-only key identifying the exact internal representation of a *number*:
-    /// its tag together with the inline bits (for inline values) or the 8-byte
-    /// heap scalar payload. Two numbers with equal keys are stored bit-for-bit
-    /// identically. Only meaningful when called on a number.
+    /// Test-only key identifying the internal representation of a *number*: its tag
+    /// together with the inline bits (for an inline value) or the first 8 bytes at the
+    /// pointer. For the inline and heap-scalar reps — an `i64`/`u64`/`f64` payload is
+    /// exactly those 8 bytes — equal keys mean bit-for-bit identical storage, which is all
+    /// the tests that use this compare. It does *not* distinguish two multi-limb
+    /// `arbitrary_precision` decimals with equal headers (it reads only the header, not the
+    /// limbs); no test feeds it one. Only meaningful when called on a number.
     pub(crate) fn number_repr_key(&self) -> (u8, u64) {
         let tag = self.repr_tag() as u8;
         if self.is_inline() {
             (tag, self.usize_() as u64)
         } else {
-            // Safety: a heap number stores its payload as the 8-byte scalar at
-            // `ptr()`; only called on numbers. The raw bits (as `u64`) are the key.
+            // Safety: only called on numbers; a heap number's pointer addresses at least 8
+            // readable bytes (a scalar payload, or a decimal `Header`). Reading them as the
+            // key is sound; see the note above on what it does and does not distinguish.
             (tag, unsafe { scalar::read::<u64>(self.ptr()) })
         }
     }

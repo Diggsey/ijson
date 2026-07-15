@@ -95,6 +95,8 @@ impl ArrayRepr {
     }
 
     fn alloc(cap: usize) -> NonNull<Header> {
+        // Safety: `layout(cap)` is non-zero (it includes the `Header`), and the `Header` is
+        // written before the block is read.
         unsafe {
             let ptr = alloc_infallible(Self::layout(cap).unwrap()).cast::<Header>();
             ptr.write(Header { len: 0, cap });
@@ -103,6 +105,8 @@ impl ArrayRepr {
     }
 
     fn realloc(ptr: NonNull<Header>, new_cap: usize) -> NonNull<Header> {
+        // Safety: `ptr` is a live array allocation whose current layout is `layout(cap)`
+        // (the `cap` it stores); both layouts share the `Header`'s alignment.
         unsafe {
             let old_layout = Self::layout(ptr.as_ref().cap).unwrap();
             let new_layout = Self::layout(new_cap).unwrap();
@@ -113,6 +117,8 @@ impl ArrayRepr {
     }
 
     fn dealloc(ptr: NonNull<Header>) {
+        // Safety: `ptr` is a live array allocation; `layout(cap)` recomputes the exact
+        // layout it was allocated with from the `cap` it stores.
         unsafe {
             let layout = Self::layout(ptr.as_ref().cap).unwrap();
             dealloc_infallible(ptr.cast(), layout);

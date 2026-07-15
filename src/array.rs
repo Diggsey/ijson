@@ -2,7 +2,7 @@
 //!
 //! [`IArray`] is the public *type* for JSON arrays. It is a thin, transparent
 //! wrapper around an [`IValue`] that is known to be an array; the heap layout and
-//! every operation on it live in the [`crate::value::array`] representation
+//! every operation on it live in the `crate::value::array` representation
 //! module. Each method here simply delegates *down* to that module.
 //!
 //! # Safety

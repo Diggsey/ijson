@@ -304,6 +304,9 @@ impl ObjectRepr {
     }
 
     fn alloc(cap: usize) -> NonNull<Header> {
+        // Safety: `layout(cap)` is non-zero (it includes the `Header`); the `Header` and
+        // every hash-table slot are written before the block is read, and `hashes_ptr_mut`
+        // points at the trailing table this layout just sized.
         unsafe {
             let hd = alloc_infallible(Self::layout(cap).unwrap()).cast::<Header>();
             hd.write(Header { len: 0, cap });
@@ -317,6 +320,8 @@ impl ObjectRepr {
     }
 
     fn dealloc(ptr: NonNull<Header>) {
+        // Safety: `ptr` is a live object allocation; `layout(cap)` recomputes the exact
+        // layout it was allocated with from the `cap` it stores.
         unsafe {
             let layout = Self::layout(ptr.as_ref().cap).unwrap();
             dealloc_infallible(ptr.cast(), layout);

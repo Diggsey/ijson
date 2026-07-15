@@ -2,7 +2,7 @@
 //!
 //! [`IObject`] is the public *type* for JSON objects. It is a thin, transparent
 //! wrapper around an [`IValue`] that is known to be an object. The heap layout
-//! and the low-level header machinery live in the [`crate::value::object`]
+//! and the low-level header machinery live in the `crate::value::object`
 //! representation module; this module builds the public API (entries, iterators,
 //! indexing) on top of that machinery and delegates the value-level operations
 //! (clone, drop, hash, equality, formatting) *down* to it.
@@ -149,7 +149,7 @@ pub struct VacantEntry<'a> {
 
 impl Debug for VacantEntry<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OccupiedEntry")
+        f.debug_struct("VacantEntry")
             .field("key", self.key())
             .finish()
     }
