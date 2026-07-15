@@ -1,0 +1,4 @@
+# Fuzzing corpora are arbitrary bytes: never apply EOL/text normalization (which would
+# corrupt them), and mark them generated so GitHub collapses them in diffs and excludes
+# them from language statistics.
+fuzz/corpus/** binary linguist-generated
