@@ -15,6 +15,10 @@ arbitrary_precision = ["ijson/arbitrary_precision"]
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+# `derive` for the `serde_roundtrip` target, whose payload type is both `Arbitrary`
+# (so the fuzzer builds it) and `Serialize`/`Deserialize` (so it drives the typed
+# `to_value`/`from_value` machinery).
+serde = { version = "1", features = ["derive"] }
 # `float_roundtrip` makes serde_json's float *parser* correctly rounded, so a
 # serialize/parse cycle preserves an `f64` exactly. Without it serde_json's default
 # parser can be off by 1 ULP for large magnitudes (its own `to_string`/`from_str`
@@ -55,6 +59,13 @@ bench = false
 [[bin]]
 name = "json"
 path = "fuzz_targets/json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "serde_roundtrip"
+path = "fuzz_targets/serde_roundtrip.rs"
 test = false
 doc = false
 bench = false
