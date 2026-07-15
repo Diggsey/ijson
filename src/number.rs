@@ -737,6 +737,26 @@ mod tests {
     }
 
     #[test]
+    fn absurd_exponents_do_not_overflow() {
+        // A valid JSON number may carry an exponent far larger than any type can hold. The
+        // parser must not overflow computing where the decimal point lands — it must simply
+        // decline to represent the value (falling back to `f64`, i.e. `0` or an infinity it
+        // then rejects). Found by fuzzing the `arbitrary_precision` path, where the exact
+        // parser subtracts the fraction length from the exponent. Exercised in both configs,
+        // since the same grammar parser underlies both.
+        for s in [
+            "1e-99999999999999999999",
+            "1e99999999999999999999",
+            "-1.5e-99999999999999999999",
+            "0.00000000000000000001e-99999999999999999999",
+            "1e-9223372036854775808", // near i64::MIN
+        ] {
+            // The one contract: it returns without panicking (a value or a clean error).
+            let _ = s.parse::<INumber>();
+        }
+    }
+
+    #[test]
     #[cfg(not(feature = "arbitrary_precision"))]
     fn rejects_out_of_range_magnitude() {
         // Without exact decimals there is nowhere to put a JSON float whose magnitude

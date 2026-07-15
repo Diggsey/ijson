@@ -101,7 +101,14 @@ impl JsonNumber<'_> {
         // one per digit, which is the only place the written exponent can grow in
         // magnitude; `canonicalise` may then raise it again by at most the digit count,
         // so bounding the result at `MAX_EXP` leaves it room to do so within an `i32`.
-        let exp = self.written_exp - self.frac_digits.len() as i64;
+        //
+        // Saturating: `written_exp` is itself already saturated (an absurd literal like
+        // `1e-99999999999999999999` reaches `i64::MIN`), and subtracting the fraction
+        // length from that would overflow. The result is rejected by the `MAX_EXP` bound
+        // regardless — saturation only keeps it a well-defined, still-out-of-range number.
+        let exp = self
+            .written_exp
+            .saturating_sub(self.frac_digits.len() as i64);
         if exp.unsigned_abs() > MAX_EXP {
             return None;
         }
