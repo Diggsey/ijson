@@ -342,30 +342,47 @@ impl<'a> NumVal<'a> {
     /// `has_decimal_point` is the literal's shape, not part of the value: it decides
     /// only whether the text must read back as a JSON float (see [`render_decimal`]).
     pub(crate) fn exact_json(self, has_decimal_point: bool) -> Option<String> {
+        // Zero is exactly representable by every serde primitive (`0`, or `0.0` for a float
+        // literal), so let serde write it — and `render_decimal` below requires a non-zero,
+        // canonical magnitude. Zero is always `Int(0)`: canonicalisation sends every zero
+        // there, and no other variant holds it (`Float` never carries `±0.0`).
+        if matches!(self.0, Repr::Int(0)) {
+            return None;
+        }
         match self.0 {
-            // `serialize_i64`/`serialize_u64` write an integer exactly, in integer
-            // syntax — right for an integer literal.
+            // The only value `serde` can write without changing it: an integer literal in
+            // `i64`/`u64` range, as an integer. `serialize_i64`/`serialize_u64` are exact.
             Repr::Int(_) | Repr::UInt(_) if !has_decimal_point => None,
-            // `serialize_f64` writes an exact `f64` exactly, in float syntax — right for
-            // a float literal.
-            Repr::Float(_) if has_decimal_point => None,
-            // Everything else is a number `serde` cannot write without changing it. Two
-            // cases beyond the exact decimals, both where the value's shape and the
-            // literal's disagree, and every primitive gets one of them wrong:
+            // Everything else is written from its own exact digits, because it will be
+            // reparsed *exactly* and no `serde` number primitive would survive that:
             //
-            //   - an integer literal beyond `u64` that is exactly an `f64` (`1e20`) —
-            //     float syntax would make it a float;
-            //   - a float literal whose value is an integer but not an exact `f64`
-            //     (`1.2345678901234567891e19`) — integer syntax would make it an
-            //     integer, and an `f64` would round it.
-            //
-            // Both are written from their digits, in the shape the literal had.
+            //   - a `Decimal`/`Big` through an `f64` would round (`1e-400` -> `0.0`);
+            //   - an integer literal beyond `u64` that is exactly an `f64` (`1e20`) in
+            //     float syntax would become a float, and vice versa;
+            //   - and even an exact-`f64` *float* — `serialize_f64` emits the *shortest*
+            //     decimal that rounds back to the same `f64`, but an exact reparse reads
+            //     that shortest decimal literally, as a different number
+            //     (`441044444333116.125`'s `f64` prints as `441044444333116.1`, which
+            //     reparses to the decimal `…116.1`). Only the `f64`'s full exact value
+            //     reparses back to the `f64`.
             _ => {
+                // The exact value, canonicalised for rendering: `to_owned_big` does not
+                // strip factors of ten, and an `f64`'s exact magnitude carries a great many
+                // (`0.5` is `5 * 10^52 * 10^-53`), which would print as trailing zeros.
+                // Dividing them out gives the same value in its shortest exact form (`0.5`).
                 let exact = self.to_owned_big();
+                let mut magnitude = exact.magnitude;
+                let mut exp = i64::from(exact.exp);
+                while !bigint::is_zero(&magnitude)
+                    && bigint::rem_small(&magnitude, bigint::TEN) == 0
+                {
+                    bigint::div_small(&mut magnitude, bigint::TEN);
+                    exp += 1;
+                }
                 Some(render_decimal(
                     exact.negative,
-                    &bigint::to_decimal_digits(&exact.magnitude),
-                    exact.exp,
+                    &bigint::to_decimal_digits(&magnitude),
+                    exp as i32,
                     has_decimal_point,
                 ))
             }

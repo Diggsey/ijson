@@ -1053,6 +1053,12 @@ mod tests {
         "1.0",
         "1e3",
         "-2.5e-4",
+        "0.0",
+        "-0.0",
+        // An exact `f64` whose *shortest* decimal (`441044444333116.1`) differs from its
+        // exact value: `serialize_f64` would emit the shortest, which an exact reparse reads
+        // as a different number. Must serialize its exact value to round-trip. (Fuzzer.)
+        "441044444333116.125",
         // Beyond `i64`/`u64` — a big integer, kept exact under `arbitrary_precision`.
         "123456789012345678901234567890",
         "-123456789012345678901234567890",

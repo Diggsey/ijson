@@ -33,8 +33,7 @@ impl Serialize for INumber {
     where
         S: Serializer,
     {
-        // Whatever `serde` can carry exactly, hand it exactly: an integer literal as an
-        // integer, a float that is an exact `f64` as an `f64`.
+        // An integer literal in range: serde carries it exactly, as an integer.
         if !self.has_decimal_point() {
             if let Some(v) = self.to_i64() {
                 return serializer.serialize_i64(v);
@@ -42,16 +41,15 @@ impl Serialize for INumber {
             if let Some(v) = self.to_u64() {
                 return serializer.serialize_u64(v);
             }
-        } else if let Some(v) = self.to_f64() {
-            return serializer.serialize_f64(v);
         }
 
-        // What is left is an exact decimal that is neither — only `arbitrary_precision`
-        // stores one. An `f64` would *change* it (`1e-400` would go out as `0.0`, a
-        // 25-digit fraction would round), so it is written from its own digits instead.
-        // `serde` has no arbitrary-precision primitive, so this goes through
-        // `serde_json`'s raw value, exactly as `serde_json`'s own `arbitrary_precision`
-        // does.
+        // With `arbitrary_precision`, everything else is written from its own exact digits
+        // and reparsed exactly — a `Decimal`, a `Big`, an integer beyond `u64`, *and* an
+        // exact-`f64` float. A float cannot use `serialize_f64` here: that emits the
+        // shortest decimal rounding back to the same `f64`, which an exact reparse reads as
+        // a different number (see `NumVal::exact_json`). serde has no arbitrary-precision
+        // primitive, so this goes through `serde_json`'s raw value, as its own
+        // `arbitrary_precision` does. Only an integer, handled above, returns `None` here.
         #[cfg(feature = "arbitrary_precision")]
         if let Some(exact) = self.0.exact_json() {
             return serde_json::value::RawValue::from_string(exact)
@@ -59,10 +57,11 @@ impl Serialize for INumber {
                 .serialize(serializer);
         }
 
-        // Without `arbitrary_precision` every number *is* an integer or an exact `f64`,
-        // so nothing reaches here; with it, the case above has already dealt with the
-        // rest. Rounding is still a better last resort than panicking in a serializer.
-        serializer.serialize_f64(self.to_f64_lossy())
+        // Without `arbitrary_precision` a float *is* an exact `f64`, and serde_json reparses
+        // through `f64`, so its own shortest formatting round-trips. (With the feature, the
+        // block above handled every float; the lossy call is only an unreachable finite
+        // fallback, better than panicking in a serializer.)
+        serializer.serialize_f64(self.to_f64().unwrap_or_else(|| self.to_f64_lossy()))
     }
 }
 

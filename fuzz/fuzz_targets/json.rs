@@ -52,13 +52,24 @@ fuzz_target!(|data: &str| {
     assert!(ours == reparsed, "round-trip changed value: {:?} -> {}", data, text);
     assert_eq!(hash(&ours), hash(&reparsed), "round-trip changed hash: {:?}", data);
 
-    // When `serde_json` also accepts the input, ijson must agree with it on the value.
-    // Comparing `serde_json::Value` to `serde_json::Value` (ijson's output reparsed
-    // vs. serde_json's own parse) avoids comparing numbers across two different models
-    // and the f64-overflow boundary where the two float parsers can disagree.
+    // When `serde_json` also accepts the input, ijson must agree with it — on the *value*,
+    // and on emitting JSON serde_json can read back.
     if let Ok(theirs) = serde_json::from_str::<serde_json::Value>(data) {
-        let ours_as_serde: serde_json::Value =
-            serde_json::from_str(&text).expect("serde_json rejects ijson's own output");
-        assert_eq!(ours_as_serde, theirs, "ijson and serde_json disagree on {:?}", data);
+        // ijson's serialization is valid JSON that serde_json accepts.
+        serde_json::from_str::<serde_json::Value>(&text)
+            .expect("serde_json rejects ijson's own output");
+
+        // The values agree — compared through ijson's model, `ours == IValue::from(theirs)`,
+        // not by `serde_json::Value` equality. ijson stores a number's *value* (plus an
+        // int/float flag), while `serde_json`'s `arbitrary_precision` `Value` stores the raw
+        // *literal* and compares those textually, so `9E0` (ijson: the value `9.0`, written
+        // `9.0`) and serde_json's kept `9e+0` are unequal as literals though identical as
+        // numbers. Converting serde_json's parse into an `IValue` compares like with like.
+        let theirs_as_ours: IValue = theirs.into();
+        assert!(
+            ours == theirs_as_ours,
+            "ijson and serde_json disagree on the value of {:?}",
+            data
+        );
     }
 });
