@@ -469,4 +469,59 @@ mod tests {
             }
         }
     }
+
+    #[mockalloc::test]
+    fn slice_traits_and_iteration() {
+        let mut x: IArray = vec![IValue::from(1), IValue::from(2), IValue::from(3)].into();
+
+        // `Deref` to `[IValue]`: slice methods are available directly.
+        assert_eq!(x.first(), Some(&IValue::from(1)));
+
+        // `Borrow` / `AsRef` / `BorrowMut` all view the backing slice.
+        let s: &[IValue] = Borrow::borrow(&x);
+        assert_eq!(s.len(), 3);
+        let s: &[IValue] = x.as_ref();
+        assert_eq!(s.len(), 3);
+        {
+            let sm: &mut [IValue] = BorrowMut::borrow_mut(&mut x);
+            sm[0] = IValue::from(10);
+        }
+        assert_eq!(x[0], IValue::from(10));
+
+        // Iterating a shared and a mutable borrow.
+        let sum: i64 = (&x).into_iter().map(|v| v.to_i64().unwrap()).sum();
+        assert_eq!(sum, 15);
+        for v in &mut x {
+            *v = IValue::from(v.to_i64().unwrap() + 1);
+        }
+        assert_eq!(x[0], IValue::from(11));
+
+        // `IntoIter`: `ExactSizeIterator::len` and `Debug`.
+        assert_eq!(x.clone().into_iter().len(), 3);
+        assert!(format!("{:?}", x.clone().into_iter()).contains("IntoIter"));
+    }
+
+    #[mockalloc::test]
+    fn clear_partial_ord_default_and_from_slice() {
+        // `clear` empties but keeps the capacity.
+        let mut x: IArray = vec![IValue::from(1), IValue::from(2)].into();
+        let cap = x.capacity();
+        x.clear();
+        assert!(x.is_empty());
+        assert_eq!(x.capacity(), cap);
+
+        // `PartialOrd` delegates to the representation: equal arrays compare Equal.
+        let a: IArray = vec![IValue::from(1), IValue::from(2)].into();
+        let b = a.clone();
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Equal));
+
+        // `Default` is the empty array.
+        assert!(IArray::default().is_empty());
+
+        // `From<&[T]>` clones each element in.
+        let src = [1, 2, 3];
+        let from_slice = IArray::from(&src[..]);
+        assert_eq!(from_slice.len(), 3);
+        assert_eq!(from_slice[2], IValue::from(3));
+    }
 }

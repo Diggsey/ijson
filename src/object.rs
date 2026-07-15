@@ -989,4 +989,268 @@ mod tests {
             assert_eq!(x, IObject::new());
         }
     }
+
+    #[mockalloc::test]
+    fn entry_or_insert_variants() {
+        let mut o = IObject::new();
+        // Vacant: fills with the default and hands back a live reference.
+        assert_eq!(*o.entry("a").or_insert(IValue::from(1)), IValue::from(1));
+        // Occupied: keeps the existing value, the default is dropped.
+        assert_eq!(*o.entry("a").or_insert(IValue::from(2)), IValue::from(1));
+
+        // `or_insert_with` runs its closure only when vacant.
+        assert_eq!(
+            *o.entry("b").or_insert_with(|| IValue::from(3)),
+            IValue::from(3)
+        );
+        let mut called = false;
+        let v = o.entry("b").or_insert_with(|| {
+            called = true;
+            IValue::from(9)
+        });
+        assert_eq!(*v, IValue::from(3));
+        assert!(!called, "closure must not run for an occupied entry");
+    }
+
+    #[mockalloc::test]
+    fn entry_key_and_modify_and_debug() {
+        let mut o = IObject::new();
+        o.insert("x", IValue::from(1));
+
+        // `Entry::key` on both arms.
+        assert_eq!(o.entry("x").key().as_str(), "x");
+        assert_eq!(o.entry("y").key().as_str(), "y");
+
+        // `and_modify` runs on an occupied entry and is a no-op on a vacant one.
+        o.entry("x")
+            .and_modify(|v| *v = IValue::from(2))
+            .or_insert(IValue::from(0));
+        assert_eq!(o["x"], IValue::from(2));
+        o.entry("z")
+            .and_modify(|_| panic!("and_modify must not run on a vacant entry"))
+            .or_insert(IValue::from(5));
+        assert_eq!(o["z"], IValue::from(5));
+
+        // Both entry kinds are `Debug`.
+        assert!(format!("{:?}", o.entry("x")).contains("Occupied"));
+        assert!(format!("{:?}", o.entry("new")).contains("Vacant"));
+    }
+
+    #[mockalloc::test]
+    fn occupied_entry_methods() {
+        let mut o = IObject::new();
+        o.insert("k", IValue::from(1));
+
+        match o.entry("k") {
+            Entry::Occupied(mut occ) => {
+                assert_eq!(occ.key().as_str(), "k");
+                assert_eq!(*occ.get(), IValue::from(1));
+                *occ.get_mut() = IValue::from(2);
+                assert_eq!(*occ.get(), IValue::from(2));
+                // `insert` returns the previous value.
+                assert_eq!(occ.insert(IValue::from(3)), IValue::from(2));
+                // `into_mut` extends the borrow to the object.
+                *occ.into_mut() = IValue::from(4);
+            }
+            Entry::Vacant(_) => panic!("expected an occupied entry"),
+        }
+        assert_eq!(o["k"], IValue::from(4));
+
+        // `remove_entry` returns the pair; `remove` just the value.
+        o.insert("a", IValue::from(7));
+        match o.entry("a") {
+            Entry::Occupied(occ) => {
+                assert_eq!(occ.remove_entry(), (IString::intern("a"), IValue::from(7)));
+            }
+            Entry::Vacant(_) => panic!("expected an occupied entry"),
+        }
+        o.insert("b", IValue::from(8));
+        match o.entry("b") {
+            Entry::Occupied(occ) => assert_eq!(occ.remove(), IValue::from(8)),
+            Entry::Vacant(_) => panic!("expected an occupied entry"),
+        }
+        assert!(!o.contains_key("a"));
+        assert!(!o.contains_key("b"));
+    }
+
+    #[mockalloc::test]
+    fn vacant_entry_methods() {
+        let mut o = IObject::new();
+        match o.entry("k") {
+            Entry::Vacant(vac) => {
+                assert_eq!(vac.key().as_str(), "k");
+                *vac.insert(IValue::from(1)) = IValue::from(2);
+            }
+            Entry::Occupied(_) => panic!("expected a vacant entry"),
+        }
+        assert_eq!(o["k"], IValue::from(2));
+
+        // `into_key` hands the key back without inserting anything.
+        match o.entry("unused") {
+            Entry::Vacant(vac) => assert_eq!(vac.into_key().as_str(), "unused"),
+            Entry::Occupied(_) => panic!("expected a vacant entry"),
+        }
+        assert!(!o.contains_key("unused"));
+    }
+
+    #[mockalloc::test]
+    fn entry_or_clone_reuses_key() {
+        let mut o = IObject::new();
+        let key = IString::intern("shared");
+        // Vacant: the key is cloned into the entry.
+        o.entry_or_clone(&key).or_insert(IValue::from(1));
+        // Occupied: the existing key is kept, the passed one untouched.
+        o.entry_or_clone(&key).and_modify(|v| *v = IValue::from(2));
+        assert_eq!(o[&key], IValue::from(2));
+    }
+
+    #[mockalloc::test]
+    fn iterators() {
+        let mut o = IObject::new();
+        o.insert("a", IValue::from(1));
+        o.insert("b", IValue::from(2));
+        o.insert("c", IValue::from(3));
+
+        // Insertion order is preserved.
+        let keys: Vec<&str> = o.keys().map(IString::as_str).collect();
+        assert_eq!(keys, ["a", "b", "c"]);
+        let sum: i64 = o.values().map(|v| v.to_i64().unwrap()).sum();
+        assert_eq!(sum, 6);
+        assert_eq!(o.iter().len(), 3);
+
+        // `values_mut` / `iter_mut` mutate in place.
+        for v in o.values_mut() {
+            *v = IValue::from(v.to_i64().unwrap() * 10);
+        }
+        assert_eq!(o["a"], IValue::from(10));
+        assert_eq!(o.iter_mut().len(), 3);
+        for (k, v) in o.iter_mut() {
+            if k.as_str() == "b" {
+                *v = IValue::from(0);
+            }
+        }
+        assert_eq!(o["b"], IValue::from(0));
+
+        // `IntoIter`: length, Debug, and a full drain.
+        assert_eq!(o.clone().into_iter().len(), 3);
+        assert!(format!("{:?}", o.clone().into_iter()).contains("IntoIter"));
+        assert_eq!(o.into_iter().count(), 3);
+    }
+
+    #[mockalloc::test]
+    fn clear_keeps_capacity() {
+        let mut o = IObject::with_capacity(8);
+        o.insert("a", IValue::from(1));
+        o.insert("b", IValue::from(2));
+        let cap = o.capacity();
+        o.clear();
+        assert!(o.is_empty());
+        assert_eq!(o.capacity(), cap);
+        // Clearing an already-empty object is a no-op.
+        o.clear();
+        assert!(o.is_empty());
+    }
+
+    #[mockalloc::test]
+    fn get_key_value_variants() {
+        let mut o = IObject::new();
+        o.insert("a", IValue::from(1));
+
+        let (k, v) = o.get_key_value("a").unwrap();
+        assert_eq!(k.as_str(), "a");
+        assert_eq!(*v, IValue::from(1));
+        assert!(o.get_key_value("missing").is_none());
+
+        *o.get_mut("a").unwrap() = IValue::from(2);
+        assert_eq!(o.get("a"), Some(&IValue::from(2)));
+        assert!(o.get_mut("missing").is_none());
+
+        {
+            let (k, v) = o.get_key_value_mut("a").unwrap();
+            assert_eq!(k.as_str(), "a");
+            *v = IValue::from(3);
+        }
+        assert!(o.get_key_value_mut("missing").is_none());
+        assert_eq!(o["a"], IValue::from(3));
+
+        // The `&T` blanket `ObjectIndex` impl: indexing by a reference to an index (`&&str`).
+        let key_ref = &"a";
+        assert_eq!(o.get(key_ref), Some(&IValue::from(3)));
+        assert!(o.contains_key(key_ref));
+    }
+
+    #[mockalloc::test]
+    fn retain_filters_and_mutates() {
+        let mut o = IObject::new();
+        for i in 0..6 {
+            o.insert(i.to_string(), IValue::from(i));
+        }
+        // Keep the evens, scaling each survivor in place.
+        o.retain(|_k, v| {
+            let n = v.to_i64().unwrap();
+            if n % 2 == 0 {
+                *v = IValue::from(n * 10);
+                true
+            } else {
+                false
+            }
+        });
+        assert_eq!(o.len(), 3);
+        assert_eq!(o["0"], IValue::from(0));
+        assert_eq!(o["2"], IValue::from(20));
+        assert_eq!(o["4"], IValue::from(40));
+        assert!(!o.contains_key("1"));
+
+        // `retain` on an empty object is a no-op.
+        let mut e = IObject::new();
+        e.retain(|_, _| panic!("must not visit an empty object"));
+        assert!(e.is_empty());
+    }
+
+    #[mockalloc::test]
+    fn index_and_index_mut() {
+        let mut o = IObject::new();
+        o.insert("a", IValue::from(1));
+        assert_eq!(o["a"], IValue::from(1));
+
+        // `IndexMut` on an existing key.
+        o["a"] = IValue::from(2);
+        assert_eq!(o["a"], IValue::from(2));
+
+        // `IndexMut` on a missing key inserts (as null) then assigns.
+        o["new"] = IValue::from(5);
+        assert_eq!(o["new"], IValue::from(5));
+    }
+
+    #[mockalloc::test]
+    fn from_maps_and_extend() {
+        let mut hm = HashMap::new();
+        hm.insert("a", 1);
+        hm.insert("b", 2);
+        let o: IObject = hm.into();
+        assert_eq!(o.len(), 2);
+        assert_eq!(o["a"], IValue::from(1));
+
+        let mut bt = BTreeMap::new();
+        bt.insert("x", 10);
+        bt.insert("y", 20);
+        let mut o2: IObject = bt.into();
+        assert_eq!(o2["y"], IValue::from(20));
+
+        // `extend` inserts new keys and overwrites existing ones.
+        o2.extend(vec![("z", 30), ("x", 11)]);
+        assert_eq!(o2.len(), 3);
+        assert_eq!(o2["x"], IValue::from(11));
+        assert_eq!(o2["z"], IValue::from(30));
+    }
+
+    #[mockalloc::test]
+    fn partial_ord_delegates() {
+        let mut a = IObject::new();
+        a.insert("k", IValue::from(1));
+        let b = a.clone();
+        // The coherence law the representation owns: equal objects compare Equal.
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Equal));
+        assert!(a >= b);
+    }
 }

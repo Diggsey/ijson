@@ -322,4 +322,61 @@ mod tests {
         assert_eq!(obj["no"], IValue::from(3));
         assert_eq!(obj.len(), 3);
     }
+
+    #[mockalloc::test]
+    fn conversions_and_formatting() {
+        let base = IString::from(LONG_A);
+        let owned = String::from(LONG_A);
+
+        // Every `From` into `IString`.
+        assert_eq!(IString::from(owned.clone()), base); // From<String>
+        assert_eq!(IString::from(&owned), base); // From<&String>
+        {
+            let mut o1 = String::from(LONG_A);
+            assert_eq!(IString::from(o1.as_mut_str()), base); // From<&mut str>
+            assert_eq!(IString::from(&mut o1), base); // From<&mut String>
+        }
+        // `From<IString> for String`.
+        assert_eq!(String::from(base.clone()), LONG_A);
+
+        // Comparison against `str` and `String`, in both directions.
+        assert!(base == *LONG_A);
+        assert!(*LONG_A == base);
+        assert!(base == owned);
+        assert!(owned == base);
+
+        // `Deref` to `str` (coercion) and byte access.
+        let s: &str = &base;
+        assert_eq!(s, LONG_A);
+        assert_eq!(base.as_bytes(), LONG_A.as_bytes());
+
+        // `Debug` quotes; `Display` does not.
+        assert_eq!(format!("{:?}", base), format!("{:?}", LONG_A));
+        assert_eq!(format!("{base}"), LONG_A);
+
+        // `Default` is the empty string.
+        assert_eq!(IString::default().as_str(), "");
+    }
+
+    #[mockalloc::test]
+    fn ord_and_hash() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let a = IString::intern(LONG_A);
+        let a2 = IString::intern(LONG_A);
+        let b = IString::intern(LONG_B);
+
+        // Pointer-equal strings short-circuit to Equal; distinct ones fall back to bytes.
+        assert_eq!(a.cmp(&a2), Ordering::Equal);
+        assert_eq!(a.partial_cmp(&b), Some(Ordering::Less));
+
+        // Equal strings hash equally.
+        let hash = |s: &IString| {
+            let mut h = DefaultHasher::new();
+            s.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(hash(&a), hash(&a2));
+    }
 }
